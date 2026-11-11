@@ -1,0 +1,9 @@
+when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	blame_p90	builds_per_landing	landings_per_hour	engine_lines	note
+2026-11-11T08:23Z	4415dce	hey2	challenger	12497	0.16	1.76	4.56	3.12	1.40	7.7	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:24Z	4415dce	hey2	serial	12104	0.91	28.24	48.80	1.04	1.25	1.9	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:24Z	4415dce	hey2	every-prefix	12430	0.00	1.44	4.00	3.12	1.44	9.1	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:24Z	4415dce	hey2	batched	12285	0.00	5.04	54.40	70.24	1.67	2.2	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:24Z	4415dce	hey-native-apps	challenger	35022	0.09	2.00	6.13	5.53	0.54	11.9	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:24Z	4415dce	hey-native-apps	serial	33316	4.71	86.20	159.87	1.00	1.25	1.7	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:25Z	4415dce	hey-native-apps	every-prefix	34886	0.69	6.80	12.87	3.00	1.30	8.4	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:25Z	4415dce	hey-native-apps	batched	34861	0.00	3.67	13.40	11.00	0.36	6.9	634	baseline: the first challenger, beside serial, every-prefix and batched
