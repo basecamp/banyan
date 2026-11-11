@@ -51,7 +51,7 @@ func dials(slots, batch int, probes bool) queue.Config {
 
 // challenger is the configuration each shape would ship with. The hillclimb moves these.
 var challenger = map[string]queue.Config{
-	"hey2":            dials(6, 1, false),
+	"hey2":            dials(8, 1, false),
 	"hey-native-apps": dials(4, 12, true),
 }
 
@@ -304,7 +304,7 @@ func main() {
 	fmt.Printf("\n%-16s %-13s %7s %9s %8s %8s %9s %10s %8s\n", "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "blame90", "builds/pr", "per hour")
 	for _, shape := range shapes {
 		for _, cfg := range configs(shape) {
-			if cfg.Name != "challenger" && !*baselines && *record == "" {
+			if cfg.Name != "challenger" && !*baselines {
 				continue
 			}
 			sc, br := measure(shape, cfg.Config)
@@ -384,7 +384,8 @@ func worse(was, now Score) []string {
 	return out
 }
 
-// recorded is the newest row of each shape and config on the scoreboard.
+// recorded is the newest row of each shape and config on the scoreboard that was kept: a
+// rejected experiment's row says so in its note, and nothing is compared with it.
 func recorded() map[string]Score {
 	out := map[string]Score{}
 	data, err := os.ReadFile(scoreboard)
@@ -393,7 +394,7 @@ func recorded() map[string]Score {
 	}
 	for _, line := range strings.Split(string(data), "\n")[1:] {
 		f := strings.Split(line, "\t")
-		if len(f) < 12 {
+		if len(f) < 13 || strings.Contains(f[12], "rejected") {
 			continue
 		}
 		sc := Score{Shape: f[2], Config: f[3]}

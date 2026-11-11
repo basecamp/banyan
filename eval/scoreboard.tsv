@@ -7,3 +7,7 @@ when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	blame_p90	build
 2026-11-11T08:24Z	4415dce	hey-native-apps	serial	33316	4.71	86.20	159.87	1.00	1.25	1.7	634	baseline: the first challenger, beside serial, every-prefix and batched
 2026-11-11T08:25Z	4415dce	hey-native-apps	every-prefix	34886	0.69	6.80	12.87	3.00	1.30	8.4	634	baseline: the first challenger, beside serial, every-prefix and batched
 2026-11-11T08:25Z	4415dce	hey-native-apps	batched	34861	0.00	3.67	13.40	11.00	0.36	6.9	634	baseline: the first challenger, beside serial, every-prefix and batched
+2026-11-11T08:30Z	10bf055+	hey2	challenger	12368	0.08	1.76	4.48	3.12	1.66	8.0	631	stack on through a red candidate, stopping only for a red trunk: rejected, wait unmoved and builds per landing up 19% (hey2) and 13% (hey-native-apps)
+2026-11-11T08:30Z	10bf055+	hey-native-apps	challenger	35098	0.06	2.00	6.33	6.80	0.61	12.1	631	stack on through a red candidate, stopping only for a red trunk: rejected, wait unmoved and builds per landing up 19% (hey2) and 13% (hey-native-apps)
+2026-11-11T08:34Z	10bf055+	hey2	challenger	12430	0.00	1.44	4.00	3.12	1.44	9.1	634	hey2 at 8 slots, not 6: kept, wait p50 down 18% and landings an hour up 18% for 3% more builds
+2026-11-11T08:34Z	10bf055+	hey-native-apps	challenger	35022	0.09	2.00	6.13	5.53	0.54	11.9	634	hey2 at 8 slots, not 6: kept, wait p50 down 18% and landings an hour up 18% for 3% more builds
