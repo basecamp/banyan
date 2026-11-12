@@ -312,7 +312,7 @@ var mutants = map[string]mutant{
 		plan: func(w queue.World, c queue.Config) []queue.Action {
 			w.Builds = slices.Clone(w.Builds)
 			for i := range w.Builds {
-				w.Builds[i].Started = time.Time{}
+				w.Builds[i].Started = w.Builds[i].Pushed
 			}
 			return queue.Plan(w, c)
 		}},
