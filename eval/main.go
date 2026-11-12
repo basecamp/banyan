@@ -150,6 +150,9 @@ func invariants(m mutant, worlds int) []string {
 	calm := storm
 	calm.Name, calm.Flake, calm.ProbeFlake = "storm without flakes", 0, 0
 	for _, shape := range []Shape{storm, calm} {
+		if m.uncrashed {
+			shape.Crash = 0
+		}
 		for _, cfg := range []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)} {
 			for i, s := range each(worlds, func(i int) *Sim {
 				s := NewSim(shape, cfg, int64(i))
@@ -207,6 +210,9 @@ func small(m mutant) []string {
 type mutant struct {
 	plan   func(queue.World, queue.Config) []queue.Action
 	verify func(queue.World, queue.Action) error
+	// crashes marks a queue that is right until a tick dies partway, which is the sixth
+	// invariant's own failure. uncrashed plays it in worlds where no tick does.
+	crashes, uncrashed bool
 }
 
 var mutants = map[string]mutant{
@@ -239,6 +245,26 @@ var mutants = map[string]mutant{
 			}
 			return acts
 		}},
+	"holds a lock across its tick": {verify: queue.Verify, crashes: true,
+		plan: func(w queue.World, c queue.Config) []queue.Action {
+			for _, pr := range w.PRs {
+				if pr.Note == "locked" {
+					return nil
+				}
+			}
+			acts := queue.Plan(w, c)
+			if len(acts) == 0 || len(w.PRs) == 0 {
+				return acts
+			}
+			holder, after := w.PRs[0].Number, w.PRs[0].Note
+			for _, a := range acts {
+				if a.Do == "note" && a.PR == holder {
+					after = a.Text
+				}
+			}
+			acts = append([]queue.Action{{Do: "note", PR: holder, Text: "locked"}}, acts...)
+			return append(acts, queue.Action{Do: "note", PR: holder, Text: after})
+		}},
 	"builds a commit twice": {verify: queue.Verify,
 		plan: func(w queue.World, c queue.Config) []queue.Action {
 			acts := queue.Plan(w, c)
@@ -265,7 +291,7 @@ func main() {
 	}
 	failed := false
 
-	broken := invariants(mutant{queue.Plan, queue.Verify}, seeds/2)
+	broken := invariants(mutant{plan: queue.Plan, verify: queue.Verify}, seeds/2)
 	fmt.Printf("invariants: %d broken\n", len(broken))
 	for i, b := range broken {
 		if i == 12 {
@@ -295,6 +321,15 @@ func main() {
 		if len(which) == 0 {
 			fmt.Println("  the eval is blind to it")
 			failed = true
+		}
+		if m := mutants[name]; m.crashes {
+			m.uncrashed = true
+			if n := len(invariants(m, 8)); n > 0 {
+				fmt.Printf("  it breaks %d worlds where no tick crashes, so it proves nothing about invariant 6\n", n)
+				failed = true
+			} else if len(which) > 0 {
+				fmt.Println("  and nothing where no tick crashes: the eval sees invariant 6")
+			}
 		}
 	}
 
