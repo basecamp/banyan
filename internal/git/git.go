@@ -237,6 +237,12 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 	return b, nil
 }
 
+// Holds says whether the trunk at this tip already holds the commit.
+func (r *Repo) Holds(trunk, sha queue.SHA) bool {
+	_, err := r.git("merge-base", "--is-ancestor", sha, trunk)
+	return err == nil
+}
+
 // Push sends a build's commit to its branch, which starts its CI.
 func (r *Repo) Push(sha queue.SHA) error {
 	_, err := r.git("push", "--quiet", r.Remote, sha+":"+r.ref(sha))

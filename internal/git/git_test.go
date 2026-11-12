@@ -2,69 +2,32 @@ package git
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 
+	"github.com/basecamp/banyan/internal/gittest"
 	"github.com/basecamp/banyan/internal/queue"
 )
 
-// origin is a bare repository with a trunk and pull requests, each a branch off the trunk
-// that writes one file, and a clone of it for the queue to work in.
 type origin struct {
-	t     *testing.T
-	bare  string
-	work  string
-	Repo  *Repo
-	heads map[int]queue.SHA
-}
-
-func sh(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
-		"GIT_AUTHOR_NAME=A", "GIT_AUTHOR_EMAIL=a@example.com", "GIT_COMMITTER_NAME=A", "GIT_COMMITTER_EMAIL=a@example.com",
-		"GIT_AUTHOR_DATE=2026-01-02T03:04:05Z", "GIT_COMMITTER_DATE=2026-01-02T03:04:05Z")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return strings.TrimSpace(string(out))
+	*gittest.Origin
+	t    *testing.T
+	Repo *Repo
 }
 
 func newOrigin(t *testing.T) *origin {
-	dir := t.TempDir()
-	o := &origin{t: t, bare: filepath.Join(dir, "origin.git"), work: filepath.Join(dir, "author"), heads: map[int]queue.SHA{}}
-	sh(t, dir, "git", "init", "--quiet", "--bare", "--initial-branch=main", o.bare)
-	sh(t, dir, "git", "clone", "--quiet", o.bare, o.work)
-	os.WriteFile(filepath.Join(o.work, "README"), []byte("trunk\n"), 0o644)
-	sh(t, o.work, "git", "add", ".")
-	sh(t, o.work, "git", "commit", "--quiet", "-m", "trunk")
-	sh(t, o.work, "git", "push", "--quiet", "origin", "HEAD:main")
-	clone := filepath.Join(dir, "queue")
-	sh(t, dir, "git", "clone", "--quiet", o.bare, clone)
-	o.Repo = &Repo{Dir: clone, Remote: "origin", Trunk: "main", Lane: "merge-queue", Name: "Banyan", Email: "banyan@example.com"}
-	return o
+	o := gittest.New(t)
+	return &origin{Origin: o, t: t, Repo: &Repo{Dir: o.Clone, Remote: "origin", Trunk: "main", Lane: "merge-queue", Name: "Banyan", Email: "banyan@example.com"}}
 }
 
 // pr opens pull request n, which writes content to file, and returns it queued.
 func (o *origin) pr(n int, file, content string) queue.PR {
-	sh(o.t, o.work, "git", "checkout", "--quiet", "-B", fmt.Sprintf("pr%d", n), "origin/main")
-	os.WriteFile(filepath.Join(o.work, file), []byte(content), 0o644)
-	sh(o.t, o.work, "git", "add", ".")
-	sh(o.t, o.work, "git", "commit", "--quiet", "-m", fmt.Sprintf("pr %d", n))
-	head := sh(o.t, o.work, "git", "rev-parse", "HEAD")
-	sh(o.t, o.work, "git", "push", "--quiet", "--force", "origin", fmt.Sprintf("HEAD:refs/pull/%d/head", n))
-	o.heads[n] = head
+	head := o.PR(n, file, content)
 	return queue.PR{Number: n, Head: head, Pinned: head, Checks: queue.Success}
 }
 
 func (o *origin) fetch() queue.SHA {
 	var ns []int
-	for n := range o.heads {
+	for n := range o.Heads {
 		ns = append(ns, n)
 	}
 	trunk, heads, err := o.Repo.Fetch(ns)
@@ -72,8 +35,8 @@ func (o *origin) fetch() queue.SHA {
 		o.t.Fatal(err)
 	}
 	for n, h := range heads {
-		if h != o.heads[n] {
-			o.t.Fatalf("#%d fetched at %s, pushed at %s", n, h, o.heads[n])
+		if h != o.Heads[n] {
+			o.t.Fatalf("#%d fetched at %s, pushed at %s", n, h, o.Heads[n])
 		}
 	}
 	return trunk
@@ -201,11 +164,7 @@ func TestATrunkThatMovedRefusesTheLanding(t *testing.T) {
 	trunk := o.fetch()
 	one, _ := o.Repo.Merge(trunk, a, "")
 	o.Repo.Push(one)
-	sh(t, o.work, "git", "checkout", "--quiet", "-B", "main", "origin/main")
-	os.WriteFile(filepath.Join(o.work, "other"), []byte("x\n"), 0o644)
-	sh(t, o.work, "git", "add", ".")
-	sh(t, o.work, "git", "commit", "--quiet", "-m", "outside")
-	sh(t, o.work, "git", "push", "--quiet", "origin", "HEAD:main")
+	o.Outside("other", "x\n")
 	if err := o.Repo.Land(one); err == nil {
 		t.Error("a candidate landed on a trunk that had moved past its base")
 	}

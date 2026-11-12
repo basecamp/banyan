@@ -110,7 +110,7 @@ type World struct {
 	Trunk  SHA
 	PRs    []PR
 	Builds []Build
-	Repo   Repo
+	Repo   Repo `json:"-"`
 }
 
 // Config holds the dials.
@@ -130,13 +130,13 @@ type Config struct {
 // Action is one thing a tick does. The executor applies them in order.
 type Action struct {
 	// Do is pin, push, land, delete, eject or note.
-	Do    string
-	Build Build  // push
-	SHA   SHA    // land, delete
-	PR    int    // pin, eject, note
-	Cause string // eject: culprit, conflict or moved
-	Text  string
+	Do    string `json:"do"`
+	Build Build  `json:"build,omitzero"`  // push
+	SHA   SHA    `json:"sha,omitempty"`   // land, delete
+	PR    int    `json:"pr,omitempty"`    // pin, eject, note
+	Cause string `json:"cause,omitempty"` // eject: culprit, conflict or moved
+	Text  string `json:"text,omitempty"`
 	// Evidence is the builds an ejection rests on, and Members the pull requests a landing lands.
-	Evidence []SHA
-	Members  []Member
+	Evidence []SHA    `json:"evidence,omitempty"`
+	Members  []Member `json:"members,omitempty"`
 }
