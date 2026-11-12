@@ -35,7 +35,7 @@ banyan replay <recording>        # plan a recorded tick again
 }
 ```
 
-`admit` names the statuses a pull request's own head must pass before it joins the queue. `slots` is how many builds run at once, and `max_batch` how many pull requests each adds. `run.Config` in `internal/run/run.go` lists every setting.
+`admit` names the statuses a pull request's own head must pass before it joins the queue. `slots` is how many builds run at once, and `max_batch` how many pull requests each adds. Set `cancels` where your CI stops a build whose branch is deleted; otherwise a build the queue no longer wants keeps its slot until it reports. `run.Config` in `internal/run/run.go` lists every setting.
 
 To make the queue the only way in, require `merge-queue/build` on the trunk and let only Banyan's token update it.
 

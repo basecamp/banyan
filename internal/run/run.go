@@ -31,6 +31,7 @@ type Config struct {
 	Probe    string   `json:"probe"`    // the context that judges a probe; without one there are no probes
 	Admit    []string `json:"admit"`    // the contexts a pull request's head must pass to join the chain
 	Threads  bool     `json:"threads"`  // an unresolved review thread keeps a pull request out
+	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
 	Slots    int      `json:"slots"`
 	MaxBatch int      `json:"max_batch"`
 	Timeout  string   `json:"timeout"`
@@ -85,7 +86,7 @@ func (c Config) names() github.Names {
 func (c Config) dials() queue.Config {
 	timeout, _ := time.ParseDuration(c.Timeout)
 	recheck, _ := time.ParseDuration(c.Recheck)
-	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Probes: c.Probe != "", Timeout: timeout, Recheck: recheck}
+	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck}
 }
 
 // Queue is one repository's queue, ready to tick.
