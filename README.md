@@ -20,7 +20,7 @@ banyan replay <recording>        # plan a recorded tick again
 
 ## Set up
 
-1. **CI builds `merge-queue/**` branches whole,** and reports the commit status `merge-queue/build`.
+1. **CI builds `merge-queue/**` branches whole,** and reports the commit status `merge-queue/build`. No branch may be named `merge-queue` itself: git can't hold it beside them, and the queue's pushes are refused while it exists.
 2. **A tick runs every few minutes,** with a token that can push to the trunk and to `merge-queue/**`, and write statuses, comments and labels.
 3. **`.github/merge-queue.json`** holds whatever differs from the defaults:
 
