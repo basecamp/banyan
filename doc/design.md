@@ -78,7 +78,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 
 ## Dials
 
-`slots` is how many builds are under test at once. `max_batch` is how many pull requests a candidate adds. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
+`slots` is how many candidates are under test at once. A round's builds are beside them and are not counted. `max_batch` is how many pull requests a candidate adds. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
 
 ## Not in the engine
 

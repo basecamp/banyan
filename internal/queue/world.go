@@ -116,7 +116,7 @@ type World struct {
 
 // Config holds the dials.
 type Config struct {
-	// Slots is how many builds the queue keeps under test at once.
+	// Slots is how many candidates the queue keeps under test at once.
 	Slots int
 	// MaxBatch is how many pull requests one candidate adds to the chain.
 	MaxBatch int

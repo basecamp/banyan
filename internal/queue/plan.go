@@ -47,8 +47,8 @@ type plan struct {
 	reds    []*red
 	kept    []SHA // every build left standing
 	pushed  []SHA // every build this tick begins
-	pending int
-	held    bool // a round on the trunk's tip found the trunk red
+	pending int   // candidates with no verdict yet, which is what the slots count
+	held    bool  // a round on the trunk's tip found the trunk red
 }
 
 // red is a red candidate set aside, with the pull requests it added to its base. The suspects
@@ -238,7 +238,7 @@ func (p *plan) read() {
 
 func (p *plan) keep(b Build) {
 	p.kept = append(p.kept, b.SHA)
-	if b.Verdict == Pending {
+	if b.Verdict == Pending && b.Kind == Candidate {
 		p.pending++
 	}
 }
@@ -428,7 +428,9 @@ func (p *plan) candidate(j int) Build {
 func (p *plan) push(b Build) {
 	b.Pushed = p.w.Now
 	p.act(Action{Do: "push", Build: b})
-	p.pending++
+	if b.Kind == Candidate {
+		p.pending++
+	}
 }
 
 // retry builds again a candidate on the chain whose newest attempt ended with no verdict.
