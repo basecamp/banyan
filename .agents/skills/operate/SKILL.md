@@ -51,5 +51,6 @@ Then rehearse before the real repository: a clash (one pull request that passes 
 ## What to know about CI
 
 - **A cancelled build may report as failed.** Buildkite does. The queue deletes a branch before its build is cancelled, so it never reads that verdict. A build cancelled by hand while its branch stands reads as red, and costs the builds that clear it.
+- **A lost agent may report as failed.** Buildkite does, as exit status -1 with nothing to tell it from a red test. The queue clears it as it clears a flake, at about a build time and three builds each. Have the pipeline retry a step whose agent was lost, so the queue only reads a red the tests gave.
 - **An open lane pays for every merge made beside it.** A merge by hand moves the trunk under the running builds, and each is built again on the new tip. The queue is quick once most landings go through it.
 - **What a repository admits on is its own policy.** `admit` names statuses on the pull request's head, and the queue reads only their state. Decide there who may post them.
