@@ -167,7 +167,7 @@ func (p *plan) read() {
 				continue
 			}
 		}
-		if rest, ok := b.above(trunk); ok && p.queued(rest) {
+		if rest, ok := b.above(trunk); ok && len(rest) > 0 && p.queued(rest) {
 			b.Base, b.Chain = trunk, rest
 			stacked = append(stacked, b)
 		} else {

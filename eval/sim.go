@@ -31,10 +31,11 @@ type Shape struct {
 	Removals     float64 // labels taken off
 	Outside      float64 // trunk commits that did not come through the queue
 	Episodes     []Episode
-	Crash        float64  // a tick dies after one of its actions
-	Race         float64  // a head moves between a tick's read and its landing
-	Script       []bool   // exhaustive cases: whether the nth build flakes, in place of Flake
-	Queue        []Queued // a case's pull requests, each queued at its own time
+	Crash        float64         // a tick dies after one of its actions
+	Race         float64         // a head moves between a tick's read and its landing
+	Script       []bool          // exhaustive cases: whether the nth build flakes, in place of Flake
+	Queue        []Queued        // a case's pull requests, each queued at its own time
+	Takes        []time.Duration // a case's builds: how long the nth takes, in place of Build
 }
 
 // Queued is a pull request a case queues by hand, with its hidden facts.
@@ -463,6 +464,9 @@ func (s *Sim) push(b queue.Build) {
 		s.Probes++
 	} else {
 		s.Whole++
+	}
+	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
+		d = s.shape.Takes[s.started]
 	}
 	sb := &simBuild{Build: b, start: s.now, end: s.now + d, lost: s.chance(s.shape.Lost)}
 	if s.shape.Script != nil {
