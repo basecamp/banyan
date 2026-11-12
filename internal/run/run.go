@@ -32,6 +32,7 @@ type Config struct {
 	Admit    []string `json:"admit"`    // the contexts a pull request's head must pass to join the chain
 	Threads  bool     `json:"threads"`  // an unresolved review thread keeps a pull request out
 	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
+	Started  string   `json:"started"`  // a word CI's pending status carries once the build runs; a check run says so itself
 	Slots    int      `json:"slots"`
 	MaxBatch int      `json:"max_batch"`
 	Timeout  string   `json:"timeout"`
@@ -166,6 +167,11 @@ func (q *Queue) Read() (*Read, error) {
 			contexts = []string{q.Probe}
 		}
 		b.Verdict, b.Pushed = github.Verdict(st, contexts), st[q.Status].At
+		for _, c := range contexts {
+			if s := st[c]; s.State == queue.Pending && (s.Running || q.Started != "" && strings.Contains(s.Description, q.Started)) {
+				b.Started = s.At
+			}
+		}
 		if _, marked := st[q.Status]; !marked {
 			// A tick died between its push and its mark. The wait starts now.
 			b.Pushed = q.Now()

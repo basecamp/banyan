@@ -76,7 +76,7 @@ A verdict belongs to one commit for good. A retry is the same merge carrying `Ba
 2. **Probes, optionally.** A commit carrying `Banyan-Probe-Of: <sha>` runs only what failed in the build of that SHA, and reports under the probe context, which the trunk's rule never accepts.
 3. **Cancelling, optionally.** The queue deletes the branch of a build it no longer needs. The repository's CI may cancel a build whose branch is gone. `cancels` says whether it does. Where it does not, the build runs to its end and holds an agent, so a candidate the queue no longer wants is left until it reports and holds its slot. Otherwise every head that moves leaves a chain's worth of builds behind, and on a small pool the queue's own leavings outrun the agents.
 
-4. **When a build began, optionally.** Where the statuses say CI has begun a build, a fair test's rounds overlap and it answers in about one build time. Where they do not, it takes three.
+4. **When a build began, optionally.** Where the statuses say CI has begun a build, a fair test's rounds overlap and it answers in about one build time. Where they do not, it takes three. A check run says so itself. A commit status says so in words, and `started` names a word its pending status carries once the build runs: Buildkite's reads "Build #7 started".
 
 The queue never calls a CI provider's API and never reads a log.
 

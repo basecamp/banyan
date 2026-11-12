@@ -269,7 +269,15 @@ func (w *world) ci() {
 		if strings.Contains(gittest.Sh(w.t, w.o.Bare, "git", "show", "--no-patch", "--format=%B", sha), "Banyan-Probe-Of") {
 			context = "merge-queue/probe"
 		}
-		if w.last(sha, context).State != "" || (w.slow != nil && w.slow(sha)) {
+		last := w.last(sha, context).State
+		if last == "success" || last == "failure" {
+			continue
+		}
+		// A build CI has begun and not answered says so, as Buildkite does.
+		if w.slow != nil && w.slow(sha) {
+			if last == "" {
+				w.statuses[sha] = append(w.statuses[sha], status{context, "pending", "Build started", "https://ci.example/" + sha[:12], w.now})
+			}
 			continue
 		}
 		state := "success"
@@ -626,7 +634,7 @@ func TestProbesNarrowABatchToItsCulprit(t *testing.T) {
 }
 
 func TestARedCandidateIsJudgedWhereItStoodAfterTheTrunkMovesOn(t *testing.T) {
-	w := newWorld(t, `{"slots": 2}`)
+	w := newWorld(t, `{"slots": 2, "started": "started"}`)
 	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }
 	w.queue(1, "a", "1\n")
 	w.rounds(2)
@@ -651,9 +659,10 @@ func TestARedCandidateIsJudgedWhereItStoodAfterTheTrunkMovesOn(t *testing.T) {
 	if w.queued(2) || !w.said(2, "<!-- merge-queue eject "+two.heads[0]+" attributed=culprit -->") {
 		t.Errorf("#2 was not ejected as the culprit: %+v\n%s", two.comments, w.log)
 	}
-	// #1; #2 and #2 with #3; the round's two checks; #3 beside it.
-	if len(w.built) != 6 {
-		t.Errorf("CI built %d commits, and the round begun before the trunk moved should have decided it in 6\n%s", len(w.built), w.log)
+	// #1; #2 and #2 with #3; #3 beside the test; and the test's three builds, one a round:
+	// #2 again, the trunk it stood on, #2 once more.
+	if len(w.built) != 7 {
+		t.Errorf("CI built %d commits, and the test begun before the trunk moved should have decided it in 7\n%s", len(w.built), w.log)
 	}
 	if left := w.o.Branches("merge-queue/"); len(left) != 0 {
 		t.Errorf("branches left behind: %v", left)

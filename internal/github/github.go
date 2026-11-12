@@ -30,6 +30,8 @@ type Status struct {
 	Description string
 	URL         string
 	At          time.Time
+	// Running is a check run saying it has begun. A commit status has only its description.
+	Running bool
 }
 
 func (c *Client) do(method, path string, in, out any) error {
@@ -124,7 +126,7 @@ func (r *rollup) statuses() map[string]Status {
 	for _, n := range r.Contexts.Nodes {
 		name, s := n.Context, Status{Description: n.Description, URL: n.TargetURL, At: n.CreatedAt}
 		if n.Typename == "CheckRun" {
-			name, s = n.Name, Status{URL: n.DetailsURL, At: n.StartedAt}
+			name, s = n.Name, Status{URL: n.DetailsURL, At: n.StartedAt, Running: n.Status == "IN_PROGRESS"}
 			switch {
 			case n.Status != "COMPLETED":
 				s.State = queue.Pending
