@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -272,9 +273,13 @@ func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 			if i == 0 {
 				what = "passed without it"
 			}
-			url := ""
-			for _, s := range r.Statuses[sha] {
-				if s.URL != "" {
+			// The build that judged it: with several, the one that failed it.
+			url, want := "", queue.Failure
+			if i == 0 {
+				want = queue.Success
+			}
+			for _, c := range append(slices.Clone(q.Build), q.Probe) {
+				if s := r.Statuses[sha][c]; s.URL != "" && (url == "" || s.State == want) {
 					url = s.URL
 				}
 			}
