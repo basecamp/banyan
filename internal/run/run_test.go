@@ -27,6 +27,9 @@ type hub struct {
 	now      time.Time
 	pulls    map[int]*pull
 	statuses map[string][]status
+	// listing, where set, runs before each listing of the queue, with how many came before.
+	listing  func(n int)
+	listings int
 }
 
 type pull struct {
@@ -135,6 +138,10 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case strings.Contains(q.Query, "query Queue"):
+			if h.listing != nil {
+				h.listing(h.listings)
+			}
+			h.listings++
 			repo["pullRequests"] = listed(false)
 		case strings.Contains(q.Query, "query Landed"):
 			repo["pullRequests"] = listed(true)
@@ -440,6 +447,38 @@ func TestARemovalRefusesTheLandingUnderWay(t *testing.T) {
 	w.rounds(2)
 	if w.landed(1) || w.o.Trunk() != before || !w.said(1, "attributed=removed") {
 		t.Errorf("#1 was removed and landed %v; comments %+v", w.landed(1), w.pulls[1].comments)
+	}
+}
+
+func TestAReviewWithdrawnAsTheLandingBeginsStopsIt(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff", "review"]}`)
+	p := w.open(1, "a", "1\n")
+	w.set(p.heads[0], "signoff", "success")
+	w.set(p.heads[0], "review", "success")
+	if _, err := w.q.Add(1, false); err != nil {
+		t.Fatal(err)
+	}
+	w.round() // pushed, and CI passed it
+	before := w.o.Trunk()
+	if w.landed(1) {
+		t.Fatal("#1 landed before the tick under test")
+	}
+	// The next tick reads the queue and plans the landing; the landing reads it again.
+	from := w.listings
+	w.listing = func(n int) {
+		if n == from+1 {
+			w.set(p.heads[0], "review", "failure")
+		}
+	}
+	w.round()
+	if w.landed(1) || w.o.Trunk() != before {
+		t.Errorf("#1 landed though its review failed before the trunk moved\n%s", w.log)
+	}
+	w.listing = nil
+	w.set(p.heads[0], "review", "success")
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Errorf("#1 never landed once its review passed again\n%s", w.log)
 	}
 }
 

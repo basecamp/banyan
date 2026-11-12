@@ -611,7 +611,7 @@ func Verify(w World, a Action) error {
 			return fmt.Errorf("%.12s is no passed candidate on the trunk", a.SHA)
 		}
 		for _, m := range rest {
-			if pr, in := prs[m.Number]; !in || pr.Head != m.Head || pr.Pinned != m.Head || pr.Wait != "" {
+			if pr, in := prs[m.Number]; !in || pr.Head != m.Head || pr.Pinned != m.Head || pr.Wait != "" || pr.Checks != Success {
 				return fmt.Errorf("#%d is no longer queued at %.12s", m.Number, m.Head)
 			}
 		}
