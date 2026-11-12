@@ -93,3 +93,5 @@ when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	blame_p90	build
 2026-11-12T03:04Z	fa0dce8+	hey-native-apps	challenger	35021	0.03	1.73	4.07	3.93	0.54	16.6	2227	delete the chain's wait while one of its candidates is red above a build still running: kept
 2026-11-12T03:05Z	9c9aa95+	hey2	challenger	12400	0.00	1.44	3.12	4.16	1.37	11.2	2224	delete dropping the failed candidates built on a trunk that a round found red: kept
 2026-11-12T03:05Z	9c9aa95+	hey-native-apps	challenger	35021	0.03	1.73	4.07	3.93	0.54	16.6	2224	delete dropping the failed candidates built on a trunk that a round found red: kept
+2026-11-12T03:07Z	a43583a+	hey2	challenger	12400	0.00	1.44	3.12	4.16	1.37	11.2	2221	delete building the top twice after a round whose builds ran apart: kept
+2026-11-12T03:07Z	a43583a+	hey-native-apps	challenger	35021	0.03	1.73	4.07	3.93	0.54	16.6	2221	delete building the top twice after a round whose builds ran apart: kept

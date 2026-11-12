@@ -67,7 +67,6 @@ type red struct {
 	proof     []SHA
 	running   bool // a round's build has no verdict yet
 	confirmed bool // the last round had a pass below a failure, and they ran together
-	apart     bool // the last round had them, and they did not
 	none, tip bool // nothing passed in the last round, and the tip failed in it
 	flake     bool // probes passed on the red tree itself
 	cleared   bool // a whole build of the red tree passed
@@ -308,7 +307,6 @@ func (p *plan) weigh(r *red) {
 		if r.void || len(rounds[n]) == 0 {
 			continue
 		}
-		r.apart = false
 		if g < 0 {
 			r.none, r.tip, r.flake, r.confirmed, r.lo, r.hi = true, tip, false, false, 0, k
 			continue
@@ -352,7 +350,6 @@ func (p *plan) weigh(r *red) {
 				r.fails[low]++
 			}
 		}
-		r.apart = !r.confirmed
 	}
 }
 
@@ -497,13 +494,12 @@ func (p *plan) rounds() {
 			// twice, so that it convicts by itself wherever the culprit is. The builds go
 			// from the top down and up again, so that where they start one after another
 			// each pass has a failure above it on both sides. The top is built the second
-			// time only when no failed build stacked on the red candidate bears it out, or
-			// when the last round's builds ran apart.
+			// time only when no failed build stacked on the red candidate bears it out.
 			if span == 1 || (whole && n == span-1) {
 				down := slices.Clone(points[1:])
 				slices.Reverse(down)
 				points = slices.Concat([]int{r.hi}, down, points)
-				if !r.backed || r.apart {
+				if !r.backed {
 					points = append(points, r.hi)
 				}
 			}
