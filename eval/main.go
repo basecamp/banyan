@@ -121,12 +121,13 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	}
 	sc.WaitP50, sc.WaitP90, sc.BlameP90 = percentile(waits, 50), percentile(waits, 90), percentile(blames, 90)
 
-	// Throughput is measured on a backlog alone: forty queued, nothing arriving.
+	// Throughput is measured on a backlog alone: forty queued, nothing arriving. A world is
+	// short and its last landing is one draw, so it takes many of them to hold still.
 	backlog := shape
 	backlog.Backlog, backlog.Arrivals, backlog.Hours = 40, 0, 0
 	var landed int
 	var hours float64
-	for _, s := range each(seeds/4, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
+	for _, s := range each(2*seeds, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
 		landed, hours = landed+s.Landed, hours+s.LastLand.Hours()
 	}
 	if hours > 0 {
