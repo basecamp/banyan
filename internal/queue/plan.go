@@ -483,6 +483,9 @@ func (p *plan) rounds() bool {
 		default:
 			points = []int{r.lo}
 			n := min(max(p.c.Slots, 2)-1, span-1)
+			if !whole {
+				n = span - 1
+			}
 			for i := 1; i <= n; i++ {
 				points = append(points, r.lo+i*span/(n+1))
 			}

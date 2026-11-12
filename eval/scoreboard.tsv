@@ -37,3 +37,5 @@ when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	blame_p90	build
 2026-11-12T01:21Z	e30a75f	hey-native-apps	serial	33241	0.48	83.93	156.20	3.00	1.44	1.7	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
 2026-11-12T01:21Z	e30a75f	hey-native-apps	every-prefix	34941	0.11	4.67	8.13	3.00	1.38	11.1	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
 2026-11-12T01:21Z	e30a75f	hey-native-apps	batched	34869	0.03	1.93	6.07	8.67	0.42	12.7	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:23Z	f52f034+	hey2	challenger	12315	0.00	1.12	2.32	2.88	1.60	15.1	769	a round of probes builds every prefix of the red candidate at once: kept, hey-native-apps blame p90 4.33 to 3.80 and wait p90 down 5% for 3% more builds
+2026-11-12T01:23Z	f52f034+	hey-native-apps	challenger	34960	0.00	1.67	3.93	3.80	0.63	16.7	769	a round of probes builds every prefix of the red candidate at once: kept, hey-native-apps blame p90 4.33 to 3.80 and wait p90 down 5% for 3% more builds
