@@ -26,7 +26,8 @@ type Kind int
 const (
 	// Candidate is a whole build of a commit the trunk may fast-forward to.
 	Candidate Kind = iota
-	// Check is a whole build of a tree that never lands: evidence about the trunk's tip.
+	// Check is a whole build of a tree that never lands: evidence about the trunk's tip, or
+	// about a prefix of a red candidate.
 	Check
 	// Probe reruns only what failed in a red candidate, on one prefix of it.
 	Probe
