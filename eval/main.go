@@ -2,8 +2,9 @@
 //
 // It plays the planner against simulated worlds whose hidden facts decide every verdict,
 // holds it to the charter's invariants, plays the cases in eval/cases, measures the charter's
-// indicators, and compares them with the last recorded run. It exits 1 on a broken invariant,
-// on a failed case, on an eval that a broken planner passes, and on an indicator that got worse.
+// indicators, and compares each with the best it has been on a kept row since the last fresh
+// baselines. It exits 1 on a broken invariant, on a failed case, on an eval that a broken
+// planner passes, and on an indicator that got worse.
 //
 //	go run ./eval                    check against the scoreboard
 //	go run ./eval -record "<note>"   append this run's rows to the scoreboard
@@ -410,11 +411,10 @@ func main() {
 				fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
 					sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
 			}
-			rows = append(rows, fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%d\t%s",
-				time.Now().UTC().Format("2006-01-02T15:04Z"), commit(), sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.BlameP90, sc.Builds, sc.PerHour, lines, *record))
+			rows = append(rows, sc.row(lines, *record))
 			if was, ok := last[sc.Shape+"\t"+sc.Config]; ok && cfg.Name == "challenger" && *record == "" {
 				for _, w := range worse(was, sc) {
-					fmt.Println("  worse than recorded: " + w)
+					fmt.Println("  worse than its best kept row: " + w)
 					failed = true
 				}
 			}
@@ -531,7 +531,7 @@ func fit() {
 	}
 }
 
-// worse lists the indicators that moved the wrong way by more than a twentieth.
+// worse lists the indicators that are worse than they were by more than a twentieth.
 func worse(was, now Score) []string {
 	var out []string
 	check := func(name string, before, after float64, lowerIsBetter bool) {
@@ -549,24 +549,42 @@ func worse(was, now Score) []string {
 	return out
 }
 
-// recorded is the newest row of each shape and config on the scoreboard that was kept: a
-// rejected experiment's row says so in its note, and nothing is compared with it.
+// recorded is what a run is held to, read from the scoreboard.
 func recorded() map[string]Score {
-	out := map[string]Score{}
 	data, err := os.ReadFile(scoreboard)
 	if err != nil {
-		return out
+		return map[string]Score{}
 	}
-	for _, line := range strings.Split(string(data), "\n")[1:] {
+	return best(strings.Split(string(data), "\n")[1:])
+}
+
+// best is, for each shape and config, the best each indicator has been on a kept row since
+// the last fresh baselines, whose notes begin with "baseline". A run is compared with that
+// and not with the newest row, so small losses do not add up over kept steps. A rejected
+// experiment's row says so in its note, and nothing is compared with it.
+func best(rows []string) map[string]Score {
+	out := map[string]Score{}
+	for _, line := range rows {
 		f := strings.Split(line, "\t")
 		if len(f) < 13 || strings.Contains(f[12], "rejected") {
 			continue
 		}
 		sc := Score{Shape: f[2], Config: f[3]}
 		fmt.Sscan(f[5]+" "+f[6]+" "+f[7]+" "+f[8]+" "+f[9]+" "+f[10], &sc.Wrong, &sc.WaitP50, &sc.WaitP90, &sc.BlameP90, &sc.Builds, &sc.PerHour)
-		out[sc.Shape+"\t"+sc.Config] = sc
+		key := sc.Shape + "\t" + sc.Config
+		if was, ok := out[key]; ok && !strings.HasPrefix(f[12], "baseline") {
+			sc.Wrong, sc.WaitP50, sc.WaitP90 = min(sc.Wrong, was.Wrong), min(sc.WaitP50, was.WaitP50), min(sc.WaitP90, was.WaitP90)
+			sc.BlameP90, sc.Builds, sc.PerHour = min(sc.BlameP90, was.BlameP90), min(sc.Builds, was.Builds), max(sc.PerHour, was.PerHour)
+		}
+		out[key] = sc
 	}
 	return out
+}
+
+// row is the score's line on the scoreboard.
+func (sc Score) row(lines int, note string) string {
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%d\t%s",
+		time.Now().UTC().Format("2006-01-02T15:04Z"), commit(), sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.BlameP90, sc.Builds, sc.PerHour, lines, note)
 }
 
 func commit() string {
