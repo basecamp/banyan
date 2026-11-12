@@ -532,9 +532,8 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 }
 
 // fill stacks new candidates on the chain while slots are free. It waits while the trunk is
-// red, unless a pull request labelled as its fix has yet to be built, while probes are
-// deciding whether a red candidate is real, and while any of the chain is red above a build
-// still running.
+// red, unless a pull request labelled as its fix has yet to be built, and while probes are
+// deciding whether a red candidate is real.
 func (p *plan) fill() {
 	in := map[int]bool{}
 	for _, m := range p.chain {
@@ -543,11 +542,6 @@ func (p *plan) fill() {
 	fix := slices.ContainsFunc(p.order, func(pr PR) bool { return pr.First && !in[pr.Number] && p.waits[pr.Number] == "" })
 	if p.wait || (p.held && !fix) {
 		return
-	}
-	for _, k := range p.stacked() {
-		if p.red(k) {
-			return
-		}
 	}
 	for p.pending < p.c.Slots {
 		parent, added := p.prefix(len(p.chain)), 0
