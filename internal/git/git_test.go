@@ -217,3 +217,37 @@ func TestABuildKeepsItsBaseOnceTheTrunkHasMovedPastIt(t *testing.T) {
 		}
 	}
 }
+
+func TestAShallowCloneIsNoConflict(t *testing.T) {
+	o := newOrigin(t)
+	a, b := o.pr(1, "a", "a\n"), o.pr(2, "b", "b\n")
+	trunk := o.fetch()
+	one, _ := o.Repo.Merge(trunk, a, "")
+	o.Repo.Push(one)
+	if err := o.Repo.Land(one); err != nil {
+		t.Fatal(err)
+	}
+
+	// A CI checkout of the trunk's tip alone has none of the history a merge base is found in.
+	shallow := *o.Repo
+	shallow.Dir, shallow.commits, shallow.made = t.TempDir(), nil, nil
+	gittest.Sh(t, shallow.Dir, "git", "clone", "--quiet", "--depth=1", "--branch=main", "file://"+o.Bare, ".")
+	tip, _, err := shallow.Fetch([]int{2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shallow.Merge(tip, b, ""); !ok {
+		t.Error("a pull request that merges cleanly was called a conflict in a shallow clone")
+	}
+}
+
+func TestAMergeThatGitCannotAttemptIsNoConflict(t *testing.T) {
+	o := newOrigin(t)
+	trunk := o.fetch()
+	defer func() {
+		if recover() == nil {
+			t.Error("a merge of a commit the repository does not hold was called a conflict")
+		}
+	}()
+	o.Repo.Merge(trunk, queue.PR{Number: 9, Head: "0123456789012345678901234567890123456789"}, "")
+}

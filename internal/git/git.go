@@ -8,6 +8,7 @@ package git
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -71,9 +72,13 @@ func (r *Repo) ref(sha queue.SHA) string {
 // Fetch brings the trunk, the queue's branches and the heads of the pull requests named, and
 // returns the trunk's tip and each head as the remote has it.
 func (r *Repo) Fetch(prs []int) (trunk queue.SHA, heads map[int]queue.SHA, err error) {
-	specs := []string{"fetch", "--quiet", "--no-tags", "--prune", r.Remote,
-		"+refs/heads/" + r.Trunk + ":refs/banyan/trunk",
-		fmt.Sprintf("+refs/heads/%s/%s/*:refs/banyan/lane/*", r.Lane, r.Trunk)}
+	specs := []string{"fetch", "--quiet", "--no-tags", "--prune"}
+	// A merge base is found in the whole history, which a CI checkout of one commit lacks.
+	if shallow, _ := r.git("rev-parse", "--is-shallow-repository"); shallow == "true" {
+		specs = append(specs, "--unshallow")
+	}
+	specs = append(specs, r.Remote, "+refs/heads/"+r.Trunk+":refs/banyan/trunk",
+		fmt.Sprintf("+refs/heads/%s/%s/*:refs/banyan/lane/*", r.Lane, r.Trunk))
 	for _, n := range prs {
 		specs = append(specs, fmt.Sprintf("+refs/pull/%d/head:refs/banyan/pull/%d", n, n))
 	}
@@ -158,21 +163,30 @@ func message(number int, note string) string {
 // parent versions and no others. It is false on a conflict.
 func (r *Repo) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, bool) {
 	tree, err := r.git("-c", "core.attributesFile=/dev/null", "--attr-source="+parent, "merge-tree", "--write-tree", "--no-messages", parent, pr.Head)
-	if err != nil {
+	// Only git's own word for a conflict is one: it exits 1 and still names the tree it
+	// reached. Any other failure is the queue's, and ends the tick before it can cost a
+	// pull request its place.
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 && tree != "" {
 		return "", false
 	}
-	sha, err := r.commitTree(tree, []string{parent, pr.Head}, message(pr.Number, note))
-	return sha, err == nil
+	return r.must(r.commitTree(r.must(tree, err), []string{parent, pr.Head}, message(pr.Number, note))), true
+}
+
+func (r *Repo) must(out string, err error) string {
+	if err != nil {
+		panic(err)
+	}
+	return out
 }
 
 // Mark is an empty commit on parent that carries note.
 func (r *Repo) Mark(parent queue.SHA, note string) queue.SHA {
 	c, err := r.read(parent)
 	if err != nil {
-		return ""
+		panic(err)
 	}
-	sha, _ := r.commitTree(c.tree, []string{parent}, fmt.Sprintf("Check %.12s\n\n%s", parent, note))
-	return sha
+	return r.must(r.commitTree(c.tree, []string{parent}, fmt.Sprintf("Check %.12s\n\n%s", parent, note)))
 }
 
 // Seen says whether the queue ever pushed this commit: its branch stands, or the forge
