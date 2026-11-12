@@ -196,6 +196,8 @@ type pullNode struct {
 	Closed      bool
 	BaseRefName string
 	HeadRefOid  string
+	HeadRefName string
+	Owner       struct{ Login string } `json:"headRepositoryOwner"`
 	Labels      struct{ Nodes []struct{ Name string } }
 	Timeline    struct {
 		Nodes []struct {
@@ -214,7 +216,7 @@ type pullNode struct {
 	}
 }
 
-const pullFields = `number isDraft merged closed baseRefName headRefOid
+const pullFields = `number isDraft merged closed baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 50) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent { createdAt label { name } } } }
 	reviewThreads(first: 100) { nodes { isResolved } }
@@ -223,6 +225,9 @@ const pullFields = `number isDraft merged closed baseRefName headRefOid
 func (n Names) pull(node pullNode) Pull {
 	p := Pull{Merged: node.Merged, Closed: node.Closed}
 	p.Number, p.Head = node.Number, node.HeadRefOid
+	if node.Owner.Login != "" && node.HeadRefName != "" {
+		p.Branch = node.Owner.Login + "/" + node.HeadRefName
+	}
 	labels := map[string]bool{}
 	for _, l := range node.Labels.Nodes {
 		labels[l.Name] = true

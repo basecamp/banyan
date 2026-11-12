@@ -80,6 +80,7 @@ func (h *hub) node(p *pull) map[string]any {
 		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha)}})
 	}
 	return map[string]any{"number": p.number, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base,
+		"headRefName": fmt.Sprintf("pr%d", p.number), "headRepositoryOwner": map[string]any{"login": "o"},
 		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": map[string]any{"nodes": events},
 		"reviewThreads": map[string]any{"nodes": []any{}}, "commits": map[string]any{"nodes": commits}}
 }
@@ -316,6 +317,9 @@ func TestGreenPullRequestsLandInOrder(t *testing.T) {
 	}
 	if w.last(trunk, "merge-queue/build").State != "success" {
 		t.Error("the trunk's tip is a commit CI did not pass")
+	}
+	if subject := gittest.Sh(t, w.o.Bare, "git", "log", "-1", "--format=%s", trunk); subject != "Merge pull request #3 from o/pr3" {
+		t.Errorf("the trunk's tip is titled %q, not as GitHub titles a merge", subject)
 	}
 	if left := w.o.Branches("merge-queue/"); len(left) != 0 {
 		t.Errorf("branches left behind: %v", left)

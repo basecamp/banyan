@@ -37,6 +37,8 @@ const (
 type PR struct {
 	Number int
 	Head   SHA
+	// Branch is the head branch as GitHub's own merge commits name it, owner/branch.
+	Branch string
 	// Pinned is the head the queue's status was posted on, empty before the first tick.
 	Pinned SHA
 	Queued time.Time

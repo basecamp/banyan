@@ -40,6 +40,7 @@ type commit struct {
 	parents  []string
 	tree     string
 	date     string
+	subject  string
 	trailers map[string]string
 }
 
@@ -109,6 +110,9 @@ func (r *Repo) read(sha string) (commit, error) {
 	}
 	lines := strings.Split(out, "\n")
 	c := commit{tree: lines[0], date: lines[1], parents: strings.Fields(lines[2]), trailers: map[string]string{}}
+	if len(lines) > 3 {
+		c.subject = lines[3]
+	}
 	for _, l := range lines[3:] {
 		if k, v, ok := strings.Cut(l, ": "); ok && strings.HasPrefix(k, "Banyan-") {
 			c.trailers[k] = v
@@ -151,8 +155,17 @@ func (r *Repo) commitTree(tree string, parents []string, message string) (queue.
 	return sha, nil
 }
 
-func message(number int, note string) string {
-	s := fmt.Sprintf("Merge #%d\n\nBanyan-Merges: %d", number, number)
+// subject is the first line of a merge, which is GitHub's own where the branch is known, so
+// a history the queue wrote reads like one the merge button wrote.
+func subject(pr queue.PR) string {
+	if pr.Branch == "" {
+		return fmt.Sprintf("Merge #%d", pr.Number)
+	}
+	return fmt.Sprintf("Merge pull request #%d from %s", pr.Number, pr.Branch)
+}
+
+func message(subject string, number int, note string) string {
+	s := fmt.Sprintf("%s\n\nBanyan-Merges: %d", subject, number)
 	if note != "" {
 		s += "\n" + note
 	}
@@ -170,7 +183,7 @@ func (r *Repo) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, boo
 	if errors.As(err, &exit) && exit.ExitCode() == 1 && tree != "" {
 		return "", false
 	}
-	return r.must(r.commitTree(r.must(tree, err), []string{parent, pr.Head}, message(pr.Number, note))), true
+	return r.must(r.commitTree(r.must(tree, err), []string{parent, pr.Head}, message(subject(pr), pr.Number, note))), true
 }
 
 func (r *Repo) must(out string, err error) string {
@@ -236,7 +249,7 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 	case top.trailers["Banyan-Try"] != "":
 		// A later try of a merge: the chain knows it by the merge that carries no try.
 		n, _ := strconv.Atoi(top.trailers["Banyan-Merges"])
-		plain, err := r.commitTree(top.tree, top.parents, message(n, ""))
+		plain, err := r.commitTree(top.tree, top.parents, message(top.subject, n, ""))
 		if err != nil {
 			return b, err
 		}
