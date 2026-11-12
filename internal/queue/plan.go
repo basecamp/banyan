@@ -66,7 +66,8 @@ type red struct {
 	pushed    time.Time
 	proof     []SHA
 	running   bool // a round's build has no verdict yet
-	confirmed bool // the last round had a pass below a failure
+	confirmed bool // the last round had a pass below a failure, and they ran together
+	apart     bool // the last round had them, and they did not
 	none, tip bool // nothing passed in the last round, and the tip failed in it
 	flake     bool // probes passed on the red tree itself
 	cleared   bool // a whole build of the red tree passed
@@ -277,8 +278,7 @@ func (p *plan) weigh(r *red) {
 		g, low := -1, -1
 		tip := false
 		r.void = false
-		var lowSHA, gSHA SHA
-		var by Kind
+		var passes []Build // the builds of prefix g that passed
 		for _, b := range rounds[n] {
 			if b.Pushed.After(r.pushed) {
 				r.pushed = b.Pushed
@@ -293,38 +293,61 @@ func (p *plan) weigh(r *red) {
 				tip = tip || j == 0
 			case Success:
 				if j > g {
-					g, gSHA, by = j, b.SHA, b.Kind
+					g, passes = j, nil
+				}
+				if j == g {
+					passes = append(passes, b)
 				}
 			}
 		}
 		if r.void || len(rounds[n]) == 0 {
 			continue
 		}
+		r.apart = false
 		if g < 0 {
 			r.none, r.tip, r.flake, r.confirmed, r.lo, r.hi = true, tip, false, false, 0, k
 			continue
 		}
-		r.none, r.tip, r.flake, r.cleared = false, false, g >= k && by == Probe, g >= k && by != Probe
+		for _, b := range rounds[n] {
+			if j := len(b.Chain); b.Verdict == Failure && j > g && (low < 0 || j < low) {
+				low = j
+			}
+		}
+		r.none, r.tip, r.flake, r.cleared = false, false, g >= k && passes[0].Kind == Probe, g >= k && passes[0].Kind != Probe
 		if g >= k {
 			continue
 		}
-		for _, b := range rounds[n] {
-			if j := len(b.Chain); b.Verdict == Failure && j > g && (low < 0 || j < low) {
-				low, lowSHA = j, b.SHA
+		r.lo, r.confirmed = g, false
+		if low < 0 {
+			if r.hi <= r.lo {
+				r.hi = k
 			}
+			continue
 		}
-		r.lo = g
-		if r.confirmed = low > 0; r.confirmed {
-			r.hi = low
+		r.hi = low
+		// A pass below a failure proves the red real only if the trunk cannot have gone
+		// red by the clock between them: the failures began at the same moment as the
+		// pass, or on both sides of it, and ran while it ran. Builds that waited their
+		// turn for an agent may not have, and then the next round builds them again.
+		for _, ok := range passes {
+			var before, after bool
+			var failed SHA
 			for _, b := range rounds[n] {
-				if len(b.Chain) == low && b.Verdict == Failure {
-					r.fails[low]++
+				if len(b.Chain) == low && b.Verdict == Failure && b.overlaps(ok) {
+					before, after = before || !b.began().After(ok.began()), after || !b.began().Before(ok.began())
+					failed = b.SHA
 				}
 			}
-			r.proof = []SHA{gSHA, lowSHA}
-		} else if r.hi <= r.lo {
-			r.hi = k
+			if before && after {
+				r.confirmed, r.proof = true, []SHA{ok.SHA, failed}
+			}
 		}
+		for _, b := range rounds[n] {
+			if len(b.Chain) == low && b.Verdict == Failure {
+				r.fails[low]++
+			}
+		}
+		r.apart = !r.confirmed
 	}
 }
 
@@ -472,18 +495,20 @@ func (p *plan) rounds() {
 			for i := 1; i <= n; i++ {
 				points = append(points, r.lo+i*span/(n+1))
 			}
-			// A round that can convict builds the top of the span, which has failed before.
-			// With no failed build stacked on the red candidate to bear it out, it builds
-			// the top twice, so that one more flake does not convict it. A round of whole
-			// builds that reaches every prefix builds each of them twice, and so convicts
-			// by itself wherever the culprit is.
-			if whole && n == span-1 {
-				points = append(append(points, points[1:]...), r.hi)
-			} else if span == 1 {
-				points = append(points, r.hi)
-			}
-			if !r.backed && points[len(points)-1] == r.hi {
-				points = append(points, r.hi)
+			// A round that can convict builds the top of the span, which has failed before,
+			// and a round of whole builds that reaches every prefix builds each of them
+			// twice, so that it convicts by itself wherever the culprit is. The builds go
+			// from the top down and up again, so that where they start one after another
+			// each pass has a failure above it on both sides. The top is built the second
+			// time only when no failed build stacked on the red candidate bears it out, or
+			// when the last round's builds ran apart.
+			if span == 1 || (whole && n == span-1) {
+				down := slices.Clone(points[1:])
+				slices.Reverse(down)
+				points = slices.Concat([]int{r.hi}, down, points)
+				if !r.backed || r.apart {
+					points = append(points, r.hi)
+				}
 			}
 		}
 		for _, j := range points {

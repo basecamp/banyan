@@ -492,7 +492,10 @@ func (s *Sim) push(b queue.Build) {
 	s.seen[b.SHA] = true
 	d, flake := s.shape.Build, s.shape.Flake
 	if b.Kind == queue.Probe {
-		d, flake = s.shape.Probe, s.shape.ProbeFlake
+		flake = s.shape.ProbeFlake
+		if s.shape.Probe > 0 {
+			d = s.shape.Probe
+		}
 		s.Probes++
 	} else {
 		s.Whole++

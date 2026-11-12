@@ -84,6 +84,20 @@ func (b Build) Tests() SHA {
 	return b.Chain[len(b.Chain)-1].Merge
 }
 
+// began is when CI began running the build, or its push where CI does not say.
+func (b Build) began() time.Time {
+	if b.Started.IsZero() {
+		return b.Pushed
+	}
+	return b.Started
+}
+
+// overlaps says the two builds ran at overlapping times. Builds with no time on their
+// verdicts are taken to have, as builds pushed together do on a CI that never makes one wait.
+func (b Build) overlaps(o Build) bool {
+	return b.Finished.IsZero() || o.Finished.IsZero() || (b.began().Before(o.Finished) && o.began().Before(b.Finished))
+}
+
 // above is the part of the build's chain above the trunk, and whether the trunk is on it.
 func (b Build) above(trunk SHA) ([]Member, bool) {
 	if b.Base == trunk {
