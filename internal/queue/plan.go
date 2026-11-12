@@ -68,12 +68,8 @@ func (p *plan) admit() {
 		case pr.Pinned != pr.Head:
 			p.act(Action{Do: "eject", PR: pr.Number, Cause: "moved",
 				Text: fmt.Sprintf("its head moved from %.12s to %.12s after it was queued", pr.Pinned, pr.Head)})
-		case pr.Hold:
-			p.waits[pr.Number] = "held by its label"
-		case pr.Draft:
-			p.waits[pr.Number] = "it is a draft"
-		case pr.Stacked:
-			p.waits[pr.Number] = "its base is not the trunk"
+		case pr.Wait != "":
+			p.waits[pr.Number] = pr.Wait
 		case pr.Checks == Pending:
 			p.waits[pr.Number] = "its own checks are running"
 		case pr.Checks != Success:
@@ -482,7 +478,7 @@ func Verify(w World, a Action) error {
 			return fmt.Errorf("%.12s is no passed candidate on the trunk", a.SHA)
 		}
 		for _, m := range rest {
-			if pr, in := prs[m.Number]; !in || pr.Head != m.Head || pr.Pinned != m.Head || pr.Hold || pr.Draft {
+			if pr, in := prs[m.Number]; !in || pr.Head != m.Head || pr.Pinned != m.Head || pr.Wait != "" {
 				return fmt.Errorf("#%d is no longer queued at %.12s", m.Number, m.Head)
 			}
 		}

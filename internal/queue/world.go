@@ -37,13 +37,13 @@ type PR struct {
 	Number int
 	Head   SHA
 	// Pinned is the head the queue's status was posted on, empty before the first tick.
-	Pinned  SHA
-	Queued  time.Time
-	First   bool
-	Hold    bool
-	Draft   bool
-	Stacked bool // its base is not the trunk
-	Checks  Verdict
+	Pinned SHA
+	Queued time.Time
+	First  bool
+	// Wait is why the pull request is not ready to join the chain, empty when it is: a hold
+	// label, a draft, a base that is not the trunk, a review thread left open.
+	Wait   string
+	Checks Verdict
 	// Note is the description of the queue's status on its head, as last written.
 	Note string
 }

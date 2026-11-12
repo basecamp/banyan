@@ -528,7 +528,7 @@ func (s *Sim) Run() {
 		return
 	}
 	for _, n := range s.numbers() {
-		if p := s.prs[n]; p.queued && !p.Hold && p.Checks == queue.Success {
+		if p := s.prs[n]; p.queued && p.Wait == "" && p.Checks == queue.Success {
 			s.broke(4, "#%d was still queued after %s", n, limit)
 			return
 		}
