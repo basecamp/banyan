@@ -11,3 +11,11 @@ when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	blame_p90	build
 2026-11-11T08:30Z	10bf055+	hey-native-apps	challenger	35098	0.06	2.00	6.33	6.80	0.61	12.1	631	stack on through a red candidate, stopping only for a red trunk: rejected, wait unmoved and builds per landing up 19% (hey2) and 13% (hey-native-apps)
 2026-11-11T08:34Z	10bf055+	hey2	challenger	12430	0.00	1.44	4.00	3.12	1.44	9.1	634	hey2 at 8 slots, not 6: kept, wait p50 down 18% and landings an hour up 18% for 3% more builds
 2026-11-11T08:34Z	10bf055+	hey-native-apps	challenger	35022	0.09	2.00	6.13	5.53	0.54	11.9	634	hey2 at 8 slots, not 6: kept, wait p50 down 18% and landings an hour up 18% for 3% more builds
+2026-11-12T00:30Z	b529abc	hey2	challenger	12430	0.00	1.44	4.00	3.12	1.44	9.1	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:30Z	b529abc	hey2	serial	12104	0.91	28.24	48.80	1.04	1.25	1.9	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:31Z	b529abc	hey2	every-prefix	12430	0.00	1.44	4.00	3.12	1.44	9.1	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:31Z	b529abc	hey2	batched	12285	0.00	5.04	54.40	70.24	1.67	2.2	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:31Z	b529abc	hey-native-apps	challenger	35022	0.09	2.00	6.13	5.53	0.54	11.9	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:31Z	b529abc	hey-native-apps	serial	33316	4.71	86.20	159.87	1.00	1.25	1.7	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:31Z	b529abc	hey-native-apps	every-prefix	34886	0.69	6.80	12.87	3.00	1.30	8.4	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
+2026-11-12T00:31Z	b529abc	hey-native-apps	batched	34861	0.00	3.67	13.40	11.00	0.36	6.9	630	baseline: the same planner, with a mutant for invariant 6 and the four history cases
