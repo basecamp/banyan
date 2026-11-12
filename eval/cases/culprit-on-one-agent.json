@@ -1,0 +1,7 @@
+{
+  "story": "Written on 2026-11-12, when the fair test was put in the charter, to hold what until then was only inferred. One agent builds everything in turn, so no two builds of a test ever begin together. The first pull request breaks the whole build and the second is good. The first leaves as the culprit, on a failure, a pass without it that began later, and a failure that began later still. The second lands.",
+  "build": 25,
+  "agents": 1,
+  "prs": [{"number": 1, "at": 0, "breaks": true}, {"number": 2, "at": 0}],
+  "ejected": [1]
+}
