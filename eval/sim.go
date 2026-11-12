@@ -46,6 +46,8 @@ type Shape struct {
 	Hold          time.Duration
 	// Cancels says the CI stops a build whose branch the queue deleted, and frees its agent.
 	Cancels bool
+	// Silent says the CI does not report when a build started.
+	Silent bool
 }
 
 // Queued is a pull request a case queues by hand, with its hidden facts.
@@ -398,7 +400,15 @@ func (s *Sim) World() queue.World {
 		}
 	}
 	for _, sha := range s.shas() {
-		w.Builds = append(w.Builds, s.builds[sha].Build)
+		sb := s.builds[sha]
+		b := sb.Build
+		if sb.end != never && !s.shape.Silent {
+			b.Started = s.epoch.Add(sb.start)
+		}
+		if b.Verdict != queue.Pending {
+			b.Finished = s.epoch.Add(sb.end)
+		}
+		w.Builds = append(w.Builds, b)
 	}
 	return w
 }
