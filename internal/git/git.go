@@ -7,6 +7,7 @@ package git
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,9 @@ type Repo struct {
 	Lane   string // the branches the queue pushes, <Lane>/<Trunk>/<sha12>
 	Name   string // the author and committer of the queue's commits
 	Email  string
+	// Token, where set, is what git presents to GitHub over https. The machine's own
+	// credential helpers are not read, as none of its configuration is.
+	Token string
 	// Pushed says whether the queue ever pushed a commit for CI, as the forge remembers it.
 	Pushed func(queue.SHA) bool
 
@@ -48,6 +52,10 @@ func (r *Repo) dated(date string, args ...string) (string, error) {
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME="+r.Name, "GIT_AUTHOR_EMAIL="+r.Email, "GIT_COMMITTER_NAME="+r.Name, "GIT_COMMITTER_EMAIL="+r.Email,
 		"GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date)
+	if r.Token != "" {
+		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + r.Token))
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
+	}
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {

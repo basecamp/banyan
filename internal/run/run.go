@@ -104,7 +104,7 @@ type Queue struct {
 func New(c Config, dir, api, token string) *Queue {
 	q := &Queue{Config: c, Now: time.Now, Log: os.Stdout,
 		Hub: &github.Client{API: api, Repo: c.Repo, Token: token},
-		Git: &git.Repo{Dir: dir, Remote: c.Remote, Trunk: c.Trunk, Lane: c.Branches, Name: c.Author.Name, Email: c.Author.Email}}
+		Git: &git.Repo{Dir: dir, Remote: c.Remote, Trunk: c.Trunk, Lane: c.Branches, Name: c.Author.Name, Email: c.Author.Email, Token: token}}
 	q.Git.Pushed = func(sha queue.SHA) bool {
 		seen, err := q.Hub.Pushed(sha, c.Status)
 		if err != nil {
@@ -366,6 +366,9 @@ func (q *Queue) Add(number int, first bool) (string, error) {
 		return refuse("ready", p.Wait)
 	case p.Checks == queue.Failure || p.Checks == queue.Error:
 		return refuse("checks", "its own checks failed at "+p.Head[:12])
+	}
+	if q.DryRun {
+		return fmt.Sprintf("would queue #%d at %s", number, p.Head), nil
 	}
 	if err := q.Hub.Label(number, q.Label); err != nil {
 		return "", err
