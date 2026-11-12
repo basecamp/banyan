@@ -70,9 +70,11 @@ type Build struct {
 	Of      SHA
 	Verdict Verdict
 	Pushed  time.Time
-	// Started is when CI began running the build: zero while it waits for an agent, and
-	// always zero where the repository's CI does not say. Finished is when CI reported the
-	// verdict.
+	// Started is when CI began running the build, if it made the build wait for an agent:
+	// zero while it waits, zero where CI began it as soon as it was pushed, and always zero
+	// where the repository's CI does not say. The planner compares these times exactly, and
+	// takes builds pushed together with no Started to have begun together. Finished is
+	// when CI reported the verdict.
 	Started, Finished time.Time
 }
 
