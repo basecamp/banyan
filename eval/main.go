@@ -55,6 +55,22 @@ var stages = []Shape{
 	{Name: "hey2-mostly", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 9, Arrivals: 3, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 1.2,
 		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
+	sandbox(),
+}
+
+// sandbox is the rehearsal repository's volume run: thirty pull requests queued twenty seconds
+// apart, one in ten builds a flake and one pair that clashes, on a CI that neither cancels nor
+// says when a build began. Its builds are little longer than a tick, so its row is coarse.
+func sandbox() Shape {
+	s := Shape{Name: "sandbox", Build: 200 * time.Second, Flake: 0.1, Hours: 1.0 / 6, Silent: true}
+	for i := 0; i < 30; i++ {
+		q := Queued{Number: 101 + i, At: time.Duration(i) * 20 * time.Second}
+		if i == 15 {
+			q.Clash = 115
+		}
+		s.Queue = append(s.Queue, q)
+	}
+	return s
 }
 
 // storm is the world the invariants are held in: everything that can go wrong, often.
