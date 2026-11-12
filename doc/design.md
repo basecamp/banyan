@@ -78,7 +78,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 
 - **A repository's own gates:** review, evidence, a person's word. They run before a pull request is queued.
 - **Repair of a trunk conflict.** A separate tool can read the eject comment and merge the trunk in. A pull request kept on a person's word is never pushed to.
-- **A watch.** A stall alarm reads `banyan report`.
+- **A watch.** A stall alarm reads `banyan status`.
 - **A stop switch.** A person stops the queue by stopping its tick.
 
 ## Going live in a repository
@@ -87,4 +87,4 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 2. An open lane: the queue lands the pull requests labelled for it, and the merge button still works for everyone else.
 3. Exclusive: a ruleset requires `merge-queue/build` on the trunk, and only Banyan's App updates it. Rollback is disabling that ruleset.
 
-Each stage is scored by `banyan report` against the simulated row.
+Each stage is scored against the simulated row, by the same indicators read from GitHub.
