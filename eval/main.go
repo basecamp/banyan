@@ -52,7 +52,7 @@ func dials(slots, batch int, probes bool) queue.Config {
 // challenger is the configuration each shape would ship with. The hillclimb moves these.
 var challenger = map[string]queue.Config{
 	"hey2":            dials(12, 1, false),
-	"hey-native-apps": dials(4, 12, true),
+	"hey-native-apps": dials(3, 12, true),
 }
 
 // configs is the challenger and the baselines it has to beat, all settings of one planner.
