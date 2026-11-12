@@ -45,6 +45,7 @@ type Shape struct {
 	Others, Burst float64
 	Hold          time.Duration
 	// Cancels says the CI stops a build whose branch the queue deleted, and frees its agent.
+	// The queue is always configured to match.
 	Cancels bool
 	// Silent says the CI does not report when a build started.
 	Silent bool
@@ -126,6 +127,7 @@ type Sim struct {
 const tick = 2 * time.Minute
 
 func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
+	cfg.Cancels = shape.Cancels
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
 		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}

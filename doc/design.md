@@ -64,7 +64,7 @@ A verdict belongs to one commit for good. A retry is the same merge carrying `Ba
 
 1. **A whole build of every push to the queue's branches,** reported as one commit status. Whatever decides that status is the repository's own: a gate that counts a job skipped by design as passed is the repository's gate. Several CI systems may each report, and the queue waits for every context its config names.
 2. **Probes, optionally.** A commit carrying `Banyan-Probe-Of: <sha>` runs only what failed in the build of that SHA, and reports under the probe context, which the trunk's rule never accepts.
-3. **Cancelling, optionally.** The queue deletes the branch of a build it no longer needs. The repository's CI may cancel a build whose branch is gone.
+3. **Cancelling, optionally.** The queue deletes the branch of a build it no longer needs. The repository's CI may cancel a build whose branch is gone. `cancels` says whether it does. Where it does not, the build runs to its end and holds an agent, so a candidate the queue no longer wants is left until it reports and holds its slot. Otherwise every head that moves leaves a chain's worth of builds behind, and on a small pool the queue's own leavings outrun the agents.
 
 The queue never calls a CI provider's API and never reads a log.
 

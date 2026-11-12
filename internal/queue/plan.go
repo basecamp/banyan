@@ -130,8 +130,15 @@ func (p *plan) queued(chain []Member) bool {
 	return true
 }
 
+// drop deletes builds the queue no longer wants. Where CI would run one to its end anyway, a
+// candidate is left until it reports and holds its slot, so the queue never has more
+// candidates in CI than its slots.
 func (p *plan) drop(builds ...Build) {
 	for _, b := range builds {
+		if b.Verdict == Pending && b.Kind == Candidate && !p.c.Cancels {
+			p.pending++
+			continue
+		}
 		p.act(Action{Do: "delete", SHA: b.SHA})
 	}
 }

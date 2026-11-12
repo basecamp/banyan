@@ -140,6 +140,9 @@ type Config struct {
 	MaxBatch int
 	// Probes says the repository's CI answers a probe commit by running only what failed.
 	Probes bool
+	// Cancels says the repository's CI stops a build whose branch is deleted. Where it does
+	// not, a build the queue no longer wants holds its slot until it reports.
+	Cancels bool
 	// Timeout is how long a build may go without a verdict before it is built again.
 	Timeout time.Duration
 	// Recheck is the wait before a red trunk, or a CI that errored, is tried again.

@@ -31,20 +31,20 @@ import (
 //
 // hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. The pipeline does not
 // cancel a build whose branch is deleted. hey-native-apps is moving to a CI nobody has
-// measured yet, so its pool has no limit.
+// measured yet, so its pool has no limit and is taken to cancel.
 var shapes = []Shape{
 	{Name: "hey2", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
 		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
 		Break: 0.015, Clash: 0.005, Conflict: 0.08, Ahead: 0.03, Lost: 0.005, Errored: 0.01,
-		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1},
+		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1, Cancels: true},
 }
 
 // storm is the world the invariants are held in: everything that can go wrong, often.
 var storm = Shape{Name: "storm", Build: 25 * time.Minute, Probe: 8 * time.Minute, Flake: 0.05, ProbeFlake: 0.03,
 	Break: 0.05, Clash: 0.05, Conflict: 0.05, Ahead: 0.05, Lost: 0.03, Errored: 0.05,
-	Backlog: 8, Arrivals: 6, Hours: 6, Moves: 1, Removals: 0.5, Outside: 0.4, Crash: 0.15, Race: 0.3,
+	Backlog: 8, Arrivals: 6, Hours: 6, Moves: 1, Removals: 0.5, Outside: 0.4, Crash: 0.15, Race: 0.3, Cancels: true,
 	Episodes: []Episode{{At: time.Hour, For: 70 * time.Minute}, {At: 4 * time.Hour, NeedsFix: true, Fix: 20 * time.Minute}}}
 
 type named struct {
@@ -186,13 +186,13 @@ func percentile(xs []float64, p int) float64 {
 var kinds = []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)}
 
 // invariants holds the planner to the charter in the storm, with and without flakes and on a
-// pool so small that builds outwait the timeout, under each kind of configuration, and in
-// every small world.
+// pool of three agents that builds deleted branches to their end, where builds wait their
+// turn and outwait the timeout, under each kind of configuration, and in every small world.
 func invariants(m mutant, worlds int) []string {
 	var broken []string
 	calm, tight := storm, storm
 	calm.Name, calm.Flake, calm.ProbeFlake = "storm without flakes", 0, 0
-	tight.Name, tight.Agents, tight.Others, tight.Hold, tight.Cancels = "storm on three agents", 3, 2, storm.Build, true
+	tight.Name, tight.Agents, tight.Others, tight.Hold, tight.Cancels = "storm on three agents", 3, 2, storm.Build, false
 	for _, shape := range []Shape{storm, calm, tight} {
 		if m.uncrashed {
 			shape.Crash = 0
@@ -484,7 +484,7 @@ func replay(spec string) {
 		shape.Flake, shape.ProbeFlake = 0, 0
 	}
 	if name == "tight" {
-		shape.Agents, shape.Others, shape.Hold, shape.Cancels = 3, 2, storm.Build, true
+		shape.Agents, shape.Others, shape.Hold, shape.Cancels = 3, 2, storm.Build, false
 	}
 	s := NewSim(shape, dials(slots, batch, probes), seed)
 	s.Trace = os.Stdout
