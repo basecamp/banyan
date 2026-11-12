@@ -155,26 +155,22 @@ func (r *rollup) statuses() map[string]Status {
 }
 
 // Verdict is what the named contexts say together: failure once one failed, success once
-// all passed, and no verdict where one ended without one. A name may list alternatives,
-// "review|security-review", and says what the best of them says. Beside the verdict is the
-// name that keeps it from success.
+// all passed, and no verdict where one ended without one. Beside the verdict is the name
+// that keeps it from success.
 func Verdict(statuses map[string]Status, contexts []string) (queue.Verdict, string) {
 	v, gate := queue.Success, ""
 	for _, c := range contexts {
-		name := strings.ReplaceAll(c, "|", " or ")
 		state := queue.Pending
-		for _, alt := range strings.Split(c, "|") {
-			if s, ok := statuses[alt]; ok && (s.State == queue.Success || state == queue.Pending) {
-				state = s.State
-			}
+		if s, ok := statuses[c]; ok {
+			state = s.State
 		}
 		switch {
 		case state == queue.Failure:
-			return queue.Failure, name
+			return queue.Failure, c
 		case state == queue.Error && v != queue.Error:
-			v, gate = queue.Error, name
+			v, gate = queue.Error, c
 		case state == queue.Pending && v == queue.Success:
-			v, gate = queue.Pending, name
+			v, gate = queue.Pending, c
 		}
 	}
 	return v, gate

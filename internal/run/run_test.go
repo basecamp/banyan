@@ -547,30 +547,28 @@ func TestAReviewWithdrawnAsTheLandingBeginsStopsIt(t *testing.T) {
 	}
 }
 
-func TestAnAdmissionCheckPassesOnAnyOfItsAlternatives(t *testing.T) {
-	w := newWorld(t, `{"admit": ["signoff", "review|factory/review"]}`)
-	ours, theirs, neither, failed := w.open(1, "a", "1\n"), w.open(2, "b", "2\n"), w.open(3, "c", "3\n"), w.open(4, "d", "4\n")
-	for _, p := range []*pull{ours, theirs, neither, failed} {
+func TestAPullRequestThatWaitsOnACheckNamesIt(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff", "review"]}`)
+	passed, unreviewed, failed := w.open(1, "a", "1\n"), w.open(2, "b", "2\n"), w.open(3, "c", "3\n")
+	for _, p := range []*pull{passed, unreviewed, failed} {
 		w.set(p.heads[0], "signoff", "success")
 	}
-	w.set(ours.heads[0], "review", "success")
-	w.set(theirs.heads[0], "factory/review", "success")
-	w.set(theirs.heads[0], "review", "failure")
-	w.set(failed.heads[0], "factory/review", "failure")
-	for n := 1; n <= 3; n++ {
+	w.set(passed.heads[0], "review", "success")
+	w.set(failed.heads[0], "review", "failure")
+	for n := 1; n <= 2; n++ {
 		if _, err := w.q.Add(n, false); err != nil {
 			t.Fatalf("adding #%d: %v", n, err)
 		}
 	}
-	if _, err := w.q.Add(4, false); err == nil || !strings.HasPrefix(err.Error(), "refused #4: checks: review or factory/review failed at ") {
-		t.Errorf("no alternative passed and one failed: %v", err)
+	if _, err := w.q.Add(3, false); err == nil || !strings.HasPrefix(err.Error(), "refused #3: checks: review failed at ") {
+		t.Errorf("its review failed: %v", err)
 	}
 	w.rounds(5)
-	if s := w.last(neither.heads[0], "merge-queue"); s.Description != "waits: review or factory/review has not passed" {
-		t.Errorf("#3 waits on a review and its status says %q", s.Description)
+	if s := w.last(unreviewed.heads[0], "merge-queue"); s.Description != "waits: review has not passed" {
+		t.Errorf("#2 waits on a review and its status says %q", s.Description)
 	}
-	if !w.landed(1) || !w.landed(2) || w.landed(3) || !w.queued(3) {
-		t.Errorf("landed: ours %v, theirs %v, neither %v\n%s", w.landed(1), w.landed(2), w.landed(3), w.log)
+	if !w.landed(1) || w.landed(2) || !w.queued(2) {
+		t.Errorf("landed: passed %v, unreviewed %v\n%s", w.landed(1), w.landed(2), w.log)
 	}
 }
 
