@@ -484,15 +484,7 @@ func (p *plan) rounds() {
 			// The probes passed on the red tree itself, so a whole build of it decides.
 			points, whole = []int{k}, true
 		case r.none:
-			// The tip, the top, and the prefix that ends at a pull request labelled as the
-			// trunk's fix, which is where a green would show.
 			points = []int{0, k}
-			for j := k - 1; j > 0; j-- {
-				if p.open[r.chain[j-1].Number].First {
-					points = []int{0, j, k}
-					break
-				}
-			}
 		default:
 			points = []int{r.lo}
 			n := min(max(p.c.Slots, 2)-1, span-1)
