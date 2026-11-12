@@ -1,0 +1,7 @@
+{
+  "story": "Found by the simulator on 2026-11-12, once its CI had a limited pool of agents. A candidate waited past the timeout, so the queue built its prefix again. Then the first build passed and landed, which left the second testing a tree the trunk already held. When the second failed, the planner panicked. The second build is dropped, and nobody leaves.",
+  "build": 25,
+  "prs": [{"number": 1, "at": 0}, {"number": 2, "at": 106}],
+  "builds": [{"takes": 100}, {"flakes": true}],
+  "ejected": []
+}

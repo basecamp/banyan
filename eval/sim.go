@@ -31,10 +31,21 @@ type Shape struct {
 	Removals     float64 // labels taken off
 	Outside      float64 // trunk commits that did not come through the queue
 	Episodes     []Episode
-	Crash        float64  // a tick dies after one of its actions
-	Race         float64  // a head moves between a tick's read and its landing
-	Script       []bool   // exhaustive cases: whether the nth build flakes, in place of Flake
-	Queue        []Queued // a case's pull requests, each queued at its own time
+	Crash        float64         // a tick dies after one of its actions
+	Race         float64         // a head moves between a tick's read and its landing
+	Script       []bool          // exhaustive cases: whether the nth build flakes, in place of Flake
+	Queue        []Queued        // a case's pull requests, each queued at its own time
+	Takes        []time.Duration // a case's builds: how long the nth takes, in place of Build
+
+	// The CI's pool: how many builds run at once, 0 for no limit. A build waits for an agent
+	// behind every build that came before it, the queue's or not.
+	Agents int
+	// The other builds that share the pool: Others come an hour, Burst of them together on
+	// average, and each holds an agent for Hold.
+	Others, Burst float64
+	Hold          time.Duration
+	// Cancels says the CI stops a build whose branch the queue deleted, and frees its agent.
+	Cancels bool
 }
 
 // Queued is a pull request a case queues by hand, with its hidden facts.
@@ -94,6 +105,8 @@ type Sim struct {
 	seen    map[queue.SHA]bool
 	started int
 	next    int
+	pool    *pool // the CI's agents, nil where they are unlimited
+	alone   *pool // the same pool and the same other builds, with no queue
 
 	Trace    io.Writer
 	Broken   []string // invariants broken, each with what happened
@@ -114,6 +127,9 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
 		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
+	if shape.Agents > 0 {
+		s.pool, s.alone = newPool(shape, seed), newPool(shape, seed)
+	}
 	for i := 0; i < shape.Backlog; i++ {
 		s.arrive()
 	}
@@ -269,6 +285,10 @@ func (s *Sim) verdict(b *simBuild) queue.Verdict {
 // Step advances the world one tick: people and CI act, then the queue takes its tick.
 func (s *Sim) Step() {
 	s.now += tick
+	if s.pool != nil {
+		s.pool.advance(s.now)
+		s.alone.advance(s.now)
+	}
 	if s.now.Hours() < s.shape.Hours && s.hourly(s.shape.Arrivals) {
 		s.arrive()
 	}
@@ -436,6 +456,9 @@ func (s *Sim) apply(a queue.Action) {
 	case "note":
 		s.prs[a.PR].Note = a.Text
 	case "delete":
+		if b := s.builds[a.SHA]; b != nil && s.pool != nil && s.shape.Cancels {
+			s.pool.cancel(b, s.now)
+		}
 		delete(s.builds, a.SHA)
 	case "push":
 		s.push(a.Build)
@@ -464,7 +487,14 @@ func (s *Sim) push(b queue.Build) {
 	} else {
 		s.Whole++
 	}
+	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
+		d = s.shape.Takes[s.started]
+	}
 	sb := &simBuild{Build: b, start: s.now, end: s.now + d, lost: s.chance(s.shape.Lost)}
+	if s.pool != nil {
+		sb.end = never
+		s.pool.add(sb, d, s.now)
+	}
 	if s.shape.Script != nil {
 		sb.flake = s.started < len(s.shape.Script) && s.shape.Script[s.started]
 	} else {

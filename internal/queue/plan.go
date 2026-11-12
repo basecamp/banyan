@@ -27,9 +27,8 @@ func Plan(w World, c Config) []Action {
 		return p.acts
 	}
 	p.retry()
-	if !p.rounds() {
-		p.fill()
-	}
+	p.rounds()
+	p.fill()
 	p.notes()
 	return p.acts
 }
@@ -45,7 +44,6 @@ type plan struct {
 	builds  []Build        // live candidates on the chain, each standing on the trunk
 	above   []Build        // candidates stacked on a red one that may still land it
 	reds    []*red
-	kept    []SHA // every build left standing
 	pushed  []SHA // every build this tick begins
 	pending int   // candidates with no verdict yet, which is what the slots count
 	held    bool  // a round on the trunk's tip found the trunk red
@@ -167,7 +165,7 @@ func (p *plan) read() {
 				continue
 			}
 		}
-		if rest, ok := b.above(trunk); ok && p.queued(rest) {
+		if rest, ok := b.above(trunk); ok && len(rest) > 0 && p.queued(rest) {
 			b.Base, b.Chain = trunk, rest
 			stacked = append(stacked, b)
 		} else {
@@ -227,19 +225,11 @@ func (p *plan) read() {
 		for _, m := range r.suspects() {
 			p.waits[m.Number] = "a build that holds it failed, and the queue is finding the cause"
 		}
-		for _, b := range r.builds {
-			p.keep(b)
-		}
 	}
 	for _, b := range append(p.builds, p.above...) {
-		p.keep(b)
-	}
-}
-
-func (p *plan) keep(b Build) {
-	p.kept = append(p.kept, b.SHA)
-	if b.Verdict == Pending && b.Kind == Candidate {
-		p.pending++
+		if b.Verdict == Pending {
+			p.pending++
+		}
 	}
 }
 
@@ -326,7 +316,11 @@ func (p *plan) weigh(r *red) {
 		r.lo = g
 		if r.confirmed = low > 0; r.confirmed {
 			r.hi = low
-			r.fails[r.hi]++
+			for _, b := range rounds[n] {
+				if len(b.Chain) == low && b.Verdict == Failure {
+					r.fails[low]++
+				}
+			}
 			r.proof = []SHA{gSHA, lowSHA}
 		} else if r.hi <= r.lo {
 			r.hi = k
@@ -446,9 +440,8 @@ func (p *plan) retry() {
 	}
 }
 
-// rounds begins the next round of each red candidate that is ready for one. It says whether
-// it dropped everything instead, for a fix to a red trunk that waits to be built on the tip.
-func (p *plan) rounds() bool {
+// rounds begins the next round of each red candidate that is ready for one.
+func (p *plan) rounds() {
 	for _, r := range p.reds {
 		wait := ((r.none && r.tip) || r.void) && p.w.Now.Sub(r.pushed) < p.c.Recheck
 		if r.running || r.passed || wait {
@@ -461,9 +454,6 @@ func (p *plan) rounds() bool {
 			// The probes passed on the red tree itself, so a whole build of it decides.
 			points, whole = []int{k}, true
 		case r.none:
-			if r.tip && p.fixWaits(r) {
-				return true
-			}
 			// The tip, the top, and the prefix that ends at a pull request labelled as the
 			// trunk's fix, which is where a green would show.
 			points = []int{0, k}
@@ -472,13 +462,6 @@ func (p *plan) rounds() bool {
 					points = []int{0, j, k}
 					break
 				}
-			}
-		case span == 1:
-			// With no failed build stacked on the red one to bear it out, the suspect's
-			// prefix is built twice, so that one more flake does not convict it.
-			points = []int{r.lo, r.hi}
-			if !r.backed {
-				points = append(points, r.hi)
 			}
 		default:
 			points = []int{r.lo}
@@ -489,12 +472,24 @@ func (p *plan) rounds() bool {
 			for i := 1; i <= n; i++ {
 				points = append(points, r.lo+i*span/(n+1))
 			}
+			// A round that can convict builds the top of the span, which has failed before.
+			// With no failed build stacked on the red candidate to bear it out, it builds
+			// the top twice, so that one more flake does not convict it. A round of whole
+			// builds that reaches every prefix builds each of them twice, and so convicts
+			// by itself wherever the culprit is.
+			if whole && n == span-1 {
+				points = append(append(points, points[1:]...), r.hi)
+			} else if span == 1 {
+				points = append(points, r.hi)
+			}
+			if !r.backed && points[len(points)-1] == r.hi {
+				points = append(points, r.hi)
+			}
 		}
 		for _, j := range points {
 			p.push(p.evidence(r, j, whole))
 		}
 	}
-	return false
 }
 
 // evidence is a round's build of prefix j of a red candidate, which never lands: a probe
@@ -512,30 +507,18 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 	return b
 }
 
-// fixWaits drops every build while the trunk is red and a pull request labelled first is not
-// among the red candidate's own, so the next tick builds the fix on the tip, ahead of everything.
-func (p *plan) fixWaits(r *red) bool {
-	for _, pr := range p.order {
-		if pr.First && !slices.ContainsFunc(r.chain, func(m Member) bool { return m.Number == pr.Number }) {
-			for _, sha := range p.kept {
-				p.act(Action{Do: "delete", SHA: sha})
-			}
-			return true
-		}
-	}
-	return false
-}
-
 // fill stacks new candidates on the chain while slots are free. It waits while the trunk is
-// red, while probes are deciding whether a red candidate is real, and while any of the chain
-// is red above a build still running.
+// red, unless a pull request labelled as its fix has yet to be built, while probes are
+// deciding whether a red candidate is real, and while any of the chain is red above a build
+// still running.
 func (p *plan) fill() {
-	if p.held || p.wait {
-		return
-	}
 	in := map[int]bool{}
 	for _, m := range p.chain {
 		in[m.Number] = true
+	}
+	fix := slices.ContainsFunc(p.order, func(pr PR) bool { return pr.First && !in[pr.Number] && p.waits[pr.Number] == "" })
+	if p.wait || (p.held && !fix) {
+		return
 	}
 	for _, k := range p.stacked() {
 		if p.red(k) {
@@ -555,7 +538,7 @@ func (p *plan) fill() {
 			}
 			p.chain = append(p.chain, Member{pr.Number, pr.Head, sha})
 			in[pr.Number], parent = true, sha
-			if added++; added == max(p.c.MaxBatch, 1) {
+			if added++; added == max(p.c.MaxBatch, 1) || pr.First {
 				break
 			}
 		}

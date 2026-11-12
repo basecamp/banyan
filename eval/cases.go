@@ -16,8 +16,8 @@ import (
 var caseFiles embed.FS
 
 // A Case is a world built by hand from something that happened to a real queue, and what the
-// queue has to make of it. Times are in minutes. No build flakes and no tick crashes, so a
-// case plays the same way every time.
+// queue has to make of it. Times are in minutes. No tick crashes, and a build flakes or runs
+// long only where the case says so, so a case plays the same way every time.
 type Case struct {
 	Name  string `json:"-"`
 	Story string `json:"story"`
@@ -28,6 +28,11 @@ type Case struct {
 		Breaks  bool `json:"breaks"`  // it passes its own checks and fails the whole build
 		Clashes int  `json:"clashes"` // it fails the whole build only together with this one
 	} `json:"prs"`
+	// Builds is what happens to the first builds the queue begins, in the order it begins them.
+	Builds []struct {
+		Takes  int  `json:"takes"`  // minutes, in place of the usual
+		Flakes bool `json:"flakes"` // it fails though its tree is good
+	} `json:"builds"`
 	// Red is when the trunk fails by the clock, whatever is built on it.
 	Red []struct {
 		At  int `json:"at"`
@@ -64,6 +69,9 @@ func (c Case) shape() Shape {
 	for _, pr := range c.PRs {
 		s.Queue = append(s.Queue, Queued{Number: pr.Number, At: minutes(pr.At), Breaks: pr.Breaks, Clash: pr.Clashes})
 		s.Hours = max(s.Hours, minutes(pr.At).Hours())
+	}
+	for _, b := range c.Builds {
+		s.Script, s.Takes = append(s.Script, b.Flakes), append(s.Takes, minutes(b.Takes))
 	}
 	for _, r := range c.Red {
 		s.Episodes = append(s.Episodes, Episode{At: minutes(r.At), For: minutes(r.For)})
