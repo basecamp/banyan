@@ -581,12 +581,13 @@ func commit() string {
 	return sha
 }
 
-// engineLines counts the Go the queue ships: everything outside tests and the eval.
+// engineLines counts the Go the queue ships: everything outside tests, the tests' helpers in
+// internal/gittest, and the eval.
 func engineLines() int {
 	n := 0
 	for _, dir := range []string{"internal", "cmd"} {
 		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			if err == nil && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") && filepath.Dir(path) != filepath.Join("internal", "gittest") {
 				data, _ := os.ReadFile(path)
 				n += strings.Count(string(data), "\n")
 			}
