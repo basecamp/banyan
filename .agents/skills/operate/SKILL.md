@@ -41,12 +41,12 @@ Do these in order, and prove each before the next.
 
 1. **CI builds every `merge-queue/**` branch whole** and reports one commit status, `merge-queue/build` unless `build` names others. Push a branch there by hand and watch the status arrive.
 2. **No branch is named `merge-queue` itself.** Git can't hold it beside the queue's branches, and every push is refused while it exists.
-3. **The tick's identity** can push to the trunk and to `merge-queue/**`, write statuses, comments and labels, and change workflow files if pull requests do. Where the trunk requires pull requests, that identity bypasses the rule and nobody else does.
+3. **The tick's identity** can push to the trunk and to `merge-queue/**`, write statuses, comments and labels, and change workflow files if pull requests do. Where the trunk requires pull requests, that identity bypasses the rule and nobody else does. Where the trunk requires a status, CI posts it on the queue's builds too, or that identity bypasses it: GitHub takes a push of one merge on its pull request's statuses, and refuses a push of two.
 4. **The tick runs one at a time,** on a schedule and when: one of the queue's labels goes on or comes off, the trunk moves, a build begins or reports, and a status in `admit` reports. GitHub runs a five-minute schedule every six to fifteen, so the events carry the queue and the schedule only catches what they miss.
 5. **`.github/merge-queue.json`** holds what differs from the defaults. Set `started` where the CI's pending status says a build is running, and `cancels` where it stops the build of a deleted branch.
 6. **The binary is pinned** by release and checksum, and a new release is a pull request that changes both.
 
-Then rehearse before the real repository: a clash (one pull request that passes alone and fails behind another), a flake, and a trunk that fails by itself. The queue must take out only the first's culprit, and nobody in the other two.
+Then rehearse before the real repository: a clash (one pull request that passes alone and fails behind another), a flake, a trunk that fails by itself, and two pull requests that land in one push under the trunk's real protection. The queue must take out only the first's culprit, and nobody in the others.
 
 ## What to know about CI
 

@@ -101,6 +101,8 @@ type Queue struct {
 	Log    io.Writer
 	Record string
 	DryRun bool
+	// refused is the landing the remote refused earlier in this tick.
+	refused queue.SHA
 }
 
 // New is the queue of the clone at dir.
@@ -210,6 +212,7 @@ func (q *Queue) Tick() (err error) {
 	if err := q.settle(); err != nil {
 		return err
 	}
+	q.refused = ""
 	for pass := 0; pass < 6; pass++ {
 		r, err := q.Read()
 		if err != nil {
@@ -245,11 +248,23 @@ func (q *Queue) Tick() (err error) {
 	return nil
 }
 
+// reason is the line of an error that says why: the rule a remote names as it refuses a push,
+// as GitHub lists them, or else its last line.
+func reason(why error) string {
+	lines := strings.Split(strings.TrimSpace(why.Error()), "\n")
+	for _, line := range lines {
+		if rule, ok := strings.CutPrefix(strings.TrimSpace(line), "remote: - "); ok {
+			before, _, _ := strings.Cut(lines[0], ":")
+			return before + ": " + strings.TrimSpace(rule)
+		}
+	}
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
 // stopped says on every pinned pull request why the queue could not go on, once: the next
 // tick that can act writes its place over it.
 func (q *Queue) stopped(r *Read, why error) {
-	lines := strings.Split(strings.TrimSpace(why.Error()), "\n")
-	text := "the queue is stopped: " + strings.TrimSpace(lines[len(lines)-1])
+	text := "the queue is stopped: " + reason(why)
 	if len(text) > 140 {
 		text = text[:140]
 	}
@@ -336,7 +351,8 @@ func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 }
 
 // land reads the world once more and moves the trunk only if the landing still holds there.
-// A landing the world or the remote refuses is not an error: the next pass plans again.
+// A landing the world refuses, or the remote refuses once, is not an error: the next pass plans
+// again. One the remote refuses twice in a tick lost no race, and stops the queue.
 func (q *Queue) land(a queue.Action) error {
 	r, err := q.Read()
 	if err != nil {
@@ -348,7 +364,11 @@ func (q *Queue) land(a queue.Action) error {
 	}
 	if err := q.Git.Land(a.SHA); err != nil {
 		fmt.Fprintf(q.Log, "{\"refused\":%q}\n", err.Error())
-		return nil
+		if q.refused != a.SHA {
+			q.refused = a.SHA
+			return nil
+		}
+		return err
 	}
 	if err := q.Hub.SetStatus(a.SHA, q.Status, queue.Success, "landed", ""); err != nil {
 		return err

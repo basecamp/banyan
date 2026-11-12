@@ -22,7 +22,7 @@ A candidate is a whole build of a prefix. A new candidate stacks on the last whe
 
 The highest prefix whose whole build passed lands, with everything under it. A red below a green was a flake, or a break that a later pull request fixed, and the tree that lands is the one that was built.
 
-The landing is one atomic push: the trunk moves to the candidate, and the candidate's branch is deleted on the condition that it still points there. Just before the push the queue is read again, and the landing is dropped unless every pull request in it is still queued at the head that was merged.
+The landing is one atomic push: the trunk moves to the candidate, and the candidate's branch is deleted on the condition that it still points there. Just before the push the queue is read again, and the landing is dropped unless every pull request in it is still queued at the head that was merged. A push the remote refuses is planned again, since the trunk may have moved under it. One it refuses twice in a tick lost no race: the queue stops, and says the remote's reason on every pull request it holds.
 
 ## Blame
 

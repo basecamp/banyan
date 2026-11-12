@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -499,6 +500,36 @@ func TestAQueueThatCannotPushSaysSoOnWhatWaits(t *testing.T) {
 	w.rounds(3)
 	if !w.landed(1) {
 		t.Errorf("#1 never landed once the branch was gone\n%s", w.log)
+	}
+}
+
+func TestALandingTheTrunkKeepsRefusingStopsTheQueueAndSaysWhy(t *testing.T) {
+	w := newWorld(t, `{}`)
+	p := w.queue(1, "a", "1\n")
+	w.round() // pushed, and CI passed it
+	// As GitHub refuses a push its branch protection does not take.
+	hook := filepath.Join(w.o.Bare, "hooks", "update")
+	os.MkdirAll(filepath.Dir(hook), 0o755)
+	os.WriteFile(hook, []byte(`#!/bin/sh
+[ "$1" = refs/heads/main ] || exit 0
+echo 'error: GH013: Repository rule violations found for refs/heads/main.' >&2
+echo '- Required status check "signoff" is expected.' >&2
+exit 1
+`), 0o755)
+	w.now = w.now.Add(2 * time.Minute)
+	if err := w.q.Tick(); err == nil {
+		t.Fatalf("the tick ended well though the trunk refused its landing\n%s", w.log)
+	}
+	if n := strings.Count(w.log.String(), `{"refused"`); n != 2 {
+		t.Errorf("the tick tried the refused landing %d times, where twice tells a refusal from a race\n%s", n, w.log)
+	}
+	if s := w.last(p.heads[0], "merge-queue"); s.State != "pending" || s.Description != `the queue is stopped: land: Required status check "signoff" is expected.` {
+		t.Errorf("#1's status is %q %q", s.State, s.Description)
+	}
+	os.Remove(hook)
+	w.rounds(2)
+	if !w.landed(1) {
+		t.Errorf("#1 never landed once the trunk took the push\n%s", w.log)
 	}
 }
 
