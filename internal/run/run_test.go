@@ -411,11 +411,15 @@ func TestARedTrunkEjectsNobody(t *testing.T) {
 	w := newWorld(t, `{"slots": 2, "recheck": "4m"}`)
 	broken := true
 	w.red = func(string) bool { return broken }
-	w.queue(1, "a", "1\n")
-	w.queue(2, "b", "2\n")
+	a, b := w.queue(1, "a", "1\n"), w.queue(2, "b", "2\n")
 	w.rounds(10)
 	if !w.queued(1) || !w.queued(2) || len(w.pulls[1].comments)+len(w.pulls[2].comments) != 0 {
 		t.Fatalf("a red trunk took a pull request out\n%s", w.log)
+	}
+	for _, p := range []*pull{a, b} {
+		if s := w.last(p.heads[0], "merge-queue"); s.Description != "waits: the trunk itself is failing, and the queue holds until it passes" {
+			t.Errorf("the trunk is red and a waiting pull request's status says %q", s.Description)
+		}
 	}
 	broken = false
 	w.rounds(8)
@@ -558,10 +562,13 @@ func TestAnAdmissionCheckPassesOnAnyOfItsAlternatives(t *testing.T) {
 			t.Fatalf("adding #%d: %v", n, err)
 		}
 	}
-	if _, err := w.q.Add(4, false); err == nil || !strings.HasPrefix(err.Error(), "refused #4: checks: ") {
+	if _, err := w.q.Add(4, false); err == nil || !strings.HasPrefix(err.Error(), "refused #4: checks: review or factory/review failed at ") {
 		t.Errorf("no alternative passed and one failed: %v", err)
 	}
 	w.rounds(5)
+	if s := w.last(neither.heads[0], "merge-queue"); s.Description != "waits: review or factory/review has not passed" {
+		t.Errorf("#3 waits on a review and its status says %q", s.Description)
+	}
 	if !w.landed(1) || !w.landed(2) || w.landed(3) || !w.queued(3) {
 		t.Errorf("landed: ours %v, theirs %v, neither %v\n%s", w.landed(1), w.landed(2), w.landed(3), w.log)
 	}

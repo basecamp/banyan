@@ -166,7 +166,8 @@ func (q *Queue) Read() (*Read, error) {
 		if b.Kind == queue.Probe {
 			contexts = []string{q.Probe}
 		}
-		b.Verdict, b.Pushed = github.Verdict(st, contexts), st[q.Status].At
+		b.Verdict, _ = github.Verdict(st, contexts)
+		b.Pushed = st[q.Status].At
 		for _, c := range contexts {
 			if s := st[c]; s.State == queue.Pending && (s.Running || q.Started != "" && strings.Contains(s.Description, q.Started)) {
 				b.Started = s.At
@@ -394,7 +395,7 @@ func (q *Queue) Add(number int, first bool) (string, error) {
 	case p.Wait != "":
 		return refuse("ready", p.Wait)
 	case p.Checks == queue.Failure || p.Checks == queue.Error:
-		return refuse("checks", "its own checks failed at "+p.Head[:12])
+		return refuse("checks", p.Gate+" failed at "+p.Head[:12])
 	}
 	if q.DryRun {
 		return fmt.Sprintf("would queue #%d at %s", number, p.Head), nil

@@ -156,10 +156,12 @@ func (r *rollup) statuses() map[string]Status {
 
 // Verdict is what the named contexts say together: failure once one failed, success once
 // all passed, and no verdict where one ended without one. A name may list alternatives,
-// "review|security-review", and says what the best of them says.
-func Verdict(statuses map[string]Status, contexts []string) queue.Verdict {
-	v := queue.Success
+// "review|security-review", and says what the best of them says. Beside the verdict is the
+// name that keeps it from success.
+func Verdict(statuses map[string]Status, contexts []string) (queue.Verdict, string) {
+	v, gate := queue.Success, ""
 	for _, c := range contexts {
+		name := strings.ReplaceAll(c, "|", " or ")
 		state := queue.Pending
 		for _, alt := range strings.Split(c, "|") {
 			if s, ok := statuses[alt]; ok && (s.State == queue.Success || state == queue.Pending) {
@@ -168,14 +170,14 @@ func Verdict(statuses map[string]Status, contexts []string) queue.Verdict {
 		}
 		switch {
 		case state == queue.Failure:
-			return queue.Failure
-		case state == queue.Error:
-			v = queue.Error
+			return queue.Failure, name
+		case state == queue.Error && v != queue.Error:
+			v, gate = queue.Error, name
 		case state == queue.Pending && v == queue.Success:
-			v = queue.Pending
+			v, gate = queue.Pending, name
 		}
 	}
-	return v
+	return v, gate
 }
 
 // Names are the labels and contexts a repository's queue goes by.
@@ -276,7 +278,7 @@ func (n Names) pull(node pullNode) Pull {
 			}
 		}
 	}
-	p.Checks = Verdict(head, n.Admit)
+	p.Checks, p.Gate = Verdict(head, n.Admit)
 	switch open := 0; {
 	case labels[n.Hold]:
 		p.Wait = "it is labelled " + n.Hold

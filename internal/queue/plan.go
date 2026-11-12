@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"sort"
@@ -103,9 +104,9 @@ func (p *plan) admit() {
 		case pr.Wait != "":
 			p.waits[pr.Number] = pr.Wait
 		case pr.Checks == Pending:
-			p.waits[pr.Number] = "its own checks are running"
+			p.waits[pr.Number] = cmp.Or(pr.Gate, "a check of its own") + " has not passed"
 		case pr.Checks != Success:
-			p.waits[pr.Number] = "its own checks failed"
+			p.waits[pr.Number] = cmp.Or(pr.Gate, "a check of its own") + " failed"
 		default:
 			if _, ok := p.w.Repo.Merge(p.w.Trunk, pr, ""); !ok {
 				p.act(Action{Do: "eject", PR: pr.Number, Cause: "conflict", Text: "it conflicts with the trunk"})
@@ -227,6 +228,9 @@ func (p *plan) read() {
 	for _, r := range p.reds {
 		for _, m := range r.suspects() {
 			p.waits[m.Number] = "a build that holds it failed, and the queue is finding the cause"
+			if p.held {
+				p.waits[m.Number] = redTrunk
+			}
 		}
 	}
 	for _, b := range append(p.builds, p.above...) {
@@ -554,6 +558,8 @@ func (p *plan) fill() {
 	}
 }
 
+const redTrunk = "the trunk itself is failing, and the queue holds until it passes"
+
 // notes writes each pull request's place in the queue on its head, when it changed.
 func (p *plan) notes() {
 	place := map[int]string{}
@@ -564,6 +570,8 @@ func (p *plan) notes() {
 		text := place[pr.Number]
 		if why := p.waits[pr.Number]; text == "" && why != "" {
 			text = "waits: " + why
+		} else if text == "" && p.held {
+			text = "waits: " + redTrunk
 		} else if text == "" {
 			text = "in the queue, waiting for a build"
 		}

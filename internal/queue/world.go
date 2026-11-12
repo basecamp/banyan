@@ -47,6 +47,8 @@ type PR struct {
 	// label, a draft, a base that is not the trunk, a review thread left open.
 	Wait   string
 	Checks Verdict
+	// Gate names the check that keeps it out, where the repository's are named.
+	Gate string
 	// Note is the description of the queue's status on its head, as last written.
 	Note string
 }
