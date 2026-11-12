@@ -208,8 +208,9 @@ type pullNode struct {
 	Labels      struct{ Nodes []struct{ Name string } }
 	Timeline    struct {
 		Nodes []struct {
-			CreatedAt time.Time
-			Label     struct{ Name string }
+			CreatedAt    time.Time
+			Label        struct{ Name string }
+			BeforeCommit struct{ Oid string }
 		}
 	} `json:"timelineItems"`
 	ReviewThreads struct {
@@ -228,7 +229,9 @@ type pullNode struct {
 
 const pullFields = `number isDraft merged closed baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 50) { nodes { name } }
-	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent { createdAt label { name } } } }
+	timelineItems(last: 50, itemTypes: [LABELED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) { nodes {
+		... on LabeledEvent { createdAt label { name } }
+		... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } } }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
 	commits(last: 20) { nodes { commit { oid ` + rollupFields + ` } } }`
 
@@ -262,6 +265,14 @@ func (n Names) pull(node pullNode) Pull {
 	}
 	if p.Pinned == "" {
 		p.Statuses = head
+		// A force-push takes the pinned commit out of the pull request, and its pin from
+		// sight: the head it replaced, since it was queued, is where it was pinned.
+		for _, e := range node.Timeline.Nodes {
+			if e.BeforeCommit.Oid != "" && e.CreatedAt.After(p.Queued) {
+				p.Pinned = e.BeforeCommit.Oid
+				break
+			}
+		}
 	}
 	p.Checks = Verdict(head, n.Admit)
 	switch open := 0; {

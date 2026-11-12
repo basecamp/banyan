@@ -44,6 +44,9 @@ type pull struct {
 	// holds past the page it returns.
 	threads []bool
 	unread  int
+	// forced is the head a force-push replaced, and when.
+	forced   string
+	forcedAt time.Time
 }
 
 type comment struct {
@@ -86,6 +89,9 @@ func (h *hub) node(p *pull) map[string]any {
 	for name, at := range p.labels {
 		labels = append(labels, map[string]any{"name": name})
 		events = append(events, map[string]any{"createdAt": at, "label": map[string]any{"name": name}})
+	}
+	if p.forced != "" {
+		events = append(events, map[string]any{"createdAt": p.forcedAt, "beforeCommit": map[string]any{"oid": p.forced}})
 	}
 	for _, sha := range p.heads {
 		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha)}})
@@ -433,6 +439,26 @@ func TestAConflictWithTheTrunkAndAMovedHeadLeave(t *testing.T) {
 	w.rounds(3)
 	if !w.landed(2) || !w.o.Holds(w.o.Trunk(), "b") {
 		t.Errorf("#2, queued again at its new head, did not land\n%s", w.log)
+	}
+}
+
+func TestAForcePushAfterItWasQueuedTakesAPullRequestOut(t *testing.T) {
+	w := newWorld(t, `{}`)
+	p := w.queue(1, "a", "1\n")
+	was := p.heads[0]
+	w.now = w.now.Add(time.Second)
+	// The old head, and the queue's status on it, are no longer among its commits.
+	p.heads, p.forced, p.forcedAt = []string{w.o.Amend(1, "a", "1 again\n")}, was, w.now
+	w.rounds(3)
+	if w.queued(1) || w.landed(1) || !w.said(1, "<!-- merge-queue eject "+was+" attributed=moved -->") {
+		t.Errorf("queued %v, landed %v, comments %+v\n%s", w.queued(1), w.landed(1), p.comments, w.log)
+	}
+	if _, err := w.q.Add(1, false); err != nil {
+		t.Fatal(err)
+	}
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Errorf("#1, queued again at its new head, did not land\n%s", w.log)
 	}
 }
 
