@@ -26,7 +26,7 @@ The landing is one atomic push: the trunk moves to the candidate, and the candid
 
 ## Blame
 
-A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too. While one is still running the queue waits for it, since it may yet land them all.
+A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too, or once a round shows the red is real. Until then it may yet land them all. Where rounds are probes, which answer in a fraction of a build, the chain waits for that answer. Where they are whole builds it does not wait: it is built beside the candidates still running.
 
 The red candidate is narrowed by rounds: builds of some of its prefixes, begun together. A round's build never lands. For a candidate that added one pull request, the first round is the tip and the candidate's own tree.
 

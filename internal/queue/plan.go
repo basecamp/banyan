@@ -49,6 +49,7 @@ type plan struct {
 	pushed  []SHA // every build this tick begins
 	pending int   // candidates with no verdict yet, which is what the slots count
 	held    bool  // a round on the trunk's tip found the trunk red
+	wait    bool  // probes are about to say whether candidates stacked on a red one are doomed
 }
 
 // red is a red candidate set aside, with the pull requests it added to its base. The suspects
@@ -212,14 +213,13 @@ func (p *plan) read() {
 	}
 	if ks := p.stacked(); !p.held && len(ks) > 0 && p.red(ks[0]) {
 		r := &red{of: p.chain[ks[0]-1].Merge, base: trunk, chain: p.chain[:ks[0]]}
+		r.builds, _ = p.at(ks[0])
+		p.weigh(r)
 		for _, b := range p.builds {
-			if len(b.Chain) == ks[0] {
-				r.builds = append(r.builds, b)
-			} else {
+			if len(b.Chain) > ks[0] {
 				p.stackedOn(r, b)
 			}
 		}
-		p.weigh(r)
 		p.reds, p.chain, p.builds = append(p.reds, r), nil, nil
 	}
 
@@ -253,14 +253,17 @@ func (p *plan) under(b Build) *red {
 	return nil
 }
 
-// stackedOn keeps a candidate stacked on a red one only while it may still land it.
+// stackedOn keeps a candidate stacked on a red one only while it may still land it: not once
+// it has failed, and not once a round has shown the red to be real. Where probes will say
+// which within a fraction of a build, the chain waits for them before it goes on beside it.
 func (p *plan) stackedOn(r *red, b Build) {
-	if b.Verdict != Pending && b.Verdict != Success {
+	if b.Verdict == Failure || b.Verdict == Error || (b.Verdict == Pending && r.confirmed) {
 		r.backed = r.backed || b.Verdict == Failure
 		p.drop(b)
 		return
 	}
 	r.passed = r.passed || b.Verdict == Success
+	p.wait = p.wait || (b.Verdict == Pending && !r.whole)
 	p.above = append(p.above, b)
 }
 
@@ -521,10 +524,10 @@ func (p *plan) fixWaits(r *red) bool {
 }
 
 // fill stacks new candidates on the chain while slots are free. It waits while the trunk is
-// red, while a candidate stacked on a red one may still land it, and while any of the chain
+// red, while probes are deciding whether a red candidate is real, and while any of the chain
 // is red above a build still running.
 func (p *plan) fill() {
-	if p.held || len(p.above) > 0 {
+	if p.held || p.wait {
 		return
 	}
 	in := map[int]bool{}
