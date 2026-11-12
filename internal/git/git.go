@@ -229,7 +229,9 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 		b.Chain = []queue.Member{{Number: n, Head: top.parents[1], Merge: plain}}
 		at = top.parents[0]
 	}
-	for depth := 0; at != trunk && depth < 1000; depth++ {
+	// The base is the first commit under the build that the trunk holds: the tip, or where the
+	// tip was when a red candidate was set aside.
+	for !r.Holds(trunk, at) {
 		c, err := r.read(at)
 		if err != nil {
 			return b, err

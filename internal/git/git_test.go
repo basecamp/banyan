@@ -169,3 +169,51 @@ func TestATrunkThatMovedRefusesTheLanding(t *testing.T) {
 		t.Error("a candidate landed on a trunk that had moved past its base")
 	}
 }
+
+func TestABuildKeepsItsBaseOnceTheTrunkHasMovedPastIt(t *testing.T) {
+	o := newOrigin(t)
+	a, b, c := o.pr(1, "a", "a\n"), o.pr(2, "b", "b\n"), o.pr(3, "c", "c\n")
+	trunk := o.fetch()
+	one, _ := o.Repo.Merge(trunk, a, "")
+	o.Repo.Push(one)
+	if err := o.Repo.Land(one); err != nil {
+		t.Fatal(err)
+	}
+
+	// On a trunk that is itself a landed merge, a red candidate is set aside with its round,
+	// and the chain goes on beside it and lands.
+	two, _ := o.Repo.Merge(one, b, "")
+	check := o.Repo.Mark(two, "Banyan-Try: 1\nBanyan-Round: 1\nBanyan-Of: "+two+"\nBanyan-Check: whole")
+	tip := o.Repo.Mark(one, "Banyan-Try: 1\nBanyan-Round: 1\nBanyan-Of: "+two+"\nBanyan-Check: whole")
+	three, _ := o.Repo.Merge(one, c, "")
+	for _, sha := range []queue.SHA{two, check, tip, three} {
+		if err := o.Repo.Push(sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := o.Repo.Land(three); err != nil {
+		t.Fatal(err)
+	}
+	if now := o.fetch(); now != three {
+		t.Fatalf("the trunk is at %s after landing %s", now, three)
+	}
+
+	builds, err := o.Repo.Builds(three)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[queue.SHA]queue.Build{}
+	for _, b := range builds {
+		got[b.SHA] = b
+	}
+	chain := []queue.Member{{Number: 2, Head: b.Head, Merge: two}}
+	for _, w := range []queue.Build{
+		{SHA: two, Kind: queue.Candidate, Base: one, Chain: chain},
+		{SHA: check, Kind: queue.Check, Base: one, Chain: chain, Round: 1, Of: two},
+		{SHA: tip, Kind: queue.Check, Base: one, Round: 1, Of: two},
+	} {
+		if g := got[w.SHA]; fmt.Sprint(g) != fmt.Sprint(w) {
+			t.Errorf("read back\n %+v\nwant\n %+v", g, w)
+		}
+	}
+}

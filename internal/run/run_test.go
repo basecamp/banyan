@@ -199,6 +199,8 @@ type world struct {
 	log *bytes.Buffer
 	// red says whether a whole build of the commit fails.
 	red func(sha string) bool
+	// slow says CI has yet to answer for the commit.
+	slow func(sha string) bool
 	// built is every commit CI judged, in order.
 	built []string
 }
@@ -245,7 +247,7 @@ func (w *world) ci() {
 		if strings.Contains(gittest.Sh(w.t, w.o.Bare, "git", "show", "--no-patch", "--format=%B", sha), "Banyan-Probe-Of") {
 			context = "merge-queue/probe"
 		}
-		if w.last(sha, context).State != "" {
+		if w.last(sha, context).State != "" || (w.slow != nil && w.slow(sha)) {
 			continue
 		}
 		state := "success"
@@ -496,5 +498,40 @@ func TestProbesNarrowABatchToItsCulprit(t *testing.T) {
 		if !w.landed(n) || len(w.pulls[n].comments) != 0 {
 			t.Errorf("#%d: landed %v, comments %+v", n, w.landed(n), w.pulls[n].comments)
 		}
+	}
+}
+
+func TestARedCandidateIsJudgedWhereItStoodAfterTheTrunkMovesOn(t *testing.T) {
+	w := newWorld(t, `{"slots": 2}`)
+	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }
+	w.queue(1, "a", "1\n")
+	w.rounds(2)
+	if !w.landed(1) {
+		t.Fatalf("#1 did not land\n%s", w.log)
+	}
+
+	// #2 breaks the build. Its round is still running when #3, built beside it, lands.
+	checks := true
+	w.slow = func(sha string) bool {
+		return checks && strings.Contains(gittest.Sh(t, w.o.Bare, "git", "show", "--no-patch", "--format=%B", sha), "Banyan-Check")
+	}
+	two := w.queue(2, "broken", "2\n")
+	w.queue(3, "c", "3\n")
+	w.rounds(4)
+	if !w.landed(3) || !w.queued(2) {
+		t.Fatalf("with #2's round running, #3 landed %v and #2 is queued %v\n%s", w.landed(3), w.queued(2), w.log)
+	}
+	checks = false
+	w.ci()
+	w.rounds(2)
+	if w.queued(2) || !w.said(2, "<!-- merge-queue eject "+two.heads[0]+" attributed=culprit -->") {
+		t.Errorf("#2 was not ejected as the culprit: %+v\n%s", two.comments, w.log)
+	}
+	// #1; #2 and #2 with #3; the round's two checks; #3 beside it.
+	if len(w.built) != 6 {
+		t.Errorf("CI built %d commits, and the round begun before the trunk moved should have decided it in 6\n%s", len(w.built), w.log)
+	}
+	if left := w.o.Branches("merge-queue/"); len(left) != 0 {
+		t.Errorf("branches left behind: %v", left)
 	}
 }
