@@ -30,7 +30,7 @@ A red candidate at the bottom of the chain is set aside with the pull requests i
 
 The red candidate is narrowed by rounds: builds of some of its prefixes. A round's build never lands. What the rounds have said so far is a span, from the highest prefix that passed to the lowest above it that failed. The culprit is in it.
 
-- **The candidate's tree passes:** the red was a flake, and its pull requests go back on the chain. Where probes passed, a whole build of the tree decides.
+- **The candidate's tree passes:** the red was a flake, and its pull requests go back on the chain. Where probes passed, a whole build of the tree decides. The build that passed is a round's and never lands, so a flake costs one build more than it has to. Letting it land would save that build on about three candidates in a hundred, which is under a twentieth on every indicator, so it is left as it is until a repository's own flake rate says otherwise.
 - **The tip fails:** the trunk is red. Nobody is blamed. The queue holds, and builds the tip and the candidate's tree again after `recheck`. If a pull request labelled as a fix has yet to be built, the chain goes on for it though the trunk is red. A pull request labelled as a fix ends the batch it is in, so its candidate holds nothing queued after it.
 - **A prefix that had passed fails:** nothing the rounds have said so far holds, and they start over.
 - **The span is wide:** a round narrows it. A round of probes builds every prefix in it, so one round finds the pair. A round of whole builds splits it into as many parts as there are slots.

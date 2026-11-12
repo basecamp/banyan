@@ -1,0 +1,7 @@
+{
+  "story": "hey2's first red build through the queue, on 2026-11-12. The candidate that merged #1859 failed seven minutes in. The queue built the same tree again, which passed, so it was a flake: nobody was blamed, the two builds that would have finished the fair test were cancelled, and #1859 was built once more to land. It must land, and nobody leaves.",
+  "build": 30,
+  "prs": [{"number": 1859, "at": 0}],
+  "builds": [{"takes": 7, "flakes": true}],
+  "ejected": []
+}
