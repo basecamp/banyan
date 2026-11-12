@@ -26,6 +26,15 @@ func TestOneWorldOfEachShape(t *testing.T) {
 	}
 }
 
+func TestCases(t *testing.T) {
+	if len(cases()) == 0 {
+		t.Error("no case was read from eval/cases")
+	}
+	for _, w := range history(mutant{plan: queue.Plan, verify: queue.Verify}) {
+		t.Error(w)
+	}
+}
+
 func TestMutantsAreCaught(t *testing.T) {
 	for name, m := range mutants {
 		caught := 0

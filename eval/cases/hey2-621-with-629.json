@@ -1,0 +1,16 @@
+{
+  "story": "hey2, 2026-10-19. #629 and #621 each passed its own build, and the build of the two together failed. #621 was merged after #629. Here the pair sits in the middle of a queue with others ahead, behind and still arriving: the later one is ejected, the earlier one lands, and nobody else leaves.",
+  "build": 25,
+  "prs": [
+    {"number": 625, "at": 0},
+    {"number": 626, "at": 0},
+    {"number": 629, "at": 2},
+    {"number": 621, "at": 4, "clashes": 629},
+    {"number": 630, "at": 4},
+    {"number": 631, "at": 6},
+    {"number": 633, "at": 30},
+    {"number": 634, "at": 52},
+    {"number": 636, "at": 80}
+  ],
+  "ejected": [621]
+}

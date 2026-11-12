@@ -26,7 +26,8 @@ type Kind int
 const (
 	// Candidate is a whole build of a commit the trunk may fast-forward to.
 	Candidate Kind = iota
-	// Check is a whole build of a tree that never lands: evidence about the trunk's tip.
+	// Check is a whole build of a tree that never lands: evidence about the trunk's tip, or
+	// about a prefix of a red candidate.
 	Check
 	// Probe reruns only what failed in a red candidate, on one prefix of it.
 	Probe
@@ -115,7 +116,7 @@ type World struct {
 
 // Config holds the dials.
 type Config struct {
-	// Slots is how many builds the queue keeps under test at once.
+	// Slots is how many candidates the queue keeps under test at once.
 	Slots int
 	// MaxBatch is how many pull requests one candidate adds to the chain.
 	MaxBatch int

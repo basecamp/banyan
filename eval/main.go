@@ -1,9 +1,9 @@
 // The eval: go run ./eval
 //
 // It plays the planner against simulated worlds whose hidden facts decide every verdict,
-// holds it to the charter's invariants, measures the charter's indicators, and compares them
-// with the last recorded run. It exits 1 on a broken invariant, on an eval that a broken
-// planner passes, and on an indicator that got worse.
+// holds it to the charter's invariants, plays the cases in eval/cases, measures the charter's
+// indicators, and compares them with the last recorded run. It exits 1 on a broken invariant,
+// on a failed case, on an eval that a broken planner passes, and on an indicator that got worse.
 //
 //	go run ./eval                    check against the scoreboard
 //	go run ./eval -record "<note>"   append this run's rows to the scoreboard
@@ -51,8 +51,8 @@ func dials(slots, batch int, probes bool) queue.Config {
 
 // challenger is the configuration each shape would ship with. The hillclimb moves these.
 var challenger = map[string]queue.Config{
-	"hey2":            dials(8, 1, false),
-	"hey-native-apps": dials(4, 12, true),
+	"hey2":            dials(12, 1, false),
+	"hey-native-apps": dials(3, 12, true),
 }
 
 // configs is the challenger and the baselines it has to beat, all settings of one planner.
@@ -121,12 +121,13 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	}
 	sc.WaitP50, sc.WaitP90, sc.BlameP90 = percentile(waits, 50), percentile(waits, 90), percentile(blames, 90)
 
-	// Throughput is measured on a backlog alone: forty queued, nothing arriving.
+	// Throughput is measured on a backlog alone: forty queued, nothing arriving. A world is
+	// short and its last landing is one draw, so it takes many of them to hold still.
 	backlog := shape
 	backlog.Backlog, backlog.Arrivals, backlog.Hours = 40, 0, 0
 	var landed int
 	var hours float64
-	for _, s := range each(seeds/4, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
+	for _, s := range each(2*seeds, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
 		landed, hours = landed+s.Landed, hours+s.LastLand.Hours()
 	}
 	if hours > 0 {
@@ -143,6 +144,10 @@ func percentile(xs []float64, p int) float64 {
 	return xs[min(len(xs)-1, len(xs)*p/100)]
 }
 
+// kinds is one configuration of each kind: every prefix, serial, batched with probes and
+// without, and a narrow batch.
+var kinds = []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)}
+
 // invariants holds the planner to the charter in the storm, with and without flakes, under
 // each kind of configuration, and in every small world.
 func invariants(m mutant, worlds int) []string {
@@ -150,7 +155,10 @@ func invariants(m mutant, worlds int) []string {
 	calm := storm
 	calm.Name, calm.Flake, calm.ProbeFlake = "storm without flakes", 0, 0
 	for _, shape := range []Shape{storm, calm} {
-		for _, cfg := range []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)} {
+		if m.uncrashed {
+			shape.Crash = 0
+		}
+		for _, cfg := range kinds {
 			for i, s := range each(worlds, func(i int) *Sim {
 				s := NewSim(shape, cfg, int64(i))
 				s.plan, s.verify = m.plan, m.verify
@@ -207,6 +215,9 @@ func small(m mutant) []string {
 type mutant struct {
 	plan   func(queue.World, queue.Config) []queue.Action
 	verify func(queue.World, queue.Action) error
+	// crashes marks a queue that is right until a tick dies partway, which is the sixth
+	// invariant's own failure. uncrashed plays it in worlds where no tick does.
+	crashes, uncrashed bool
 }
 
 var mutants = map[string]mutant{
@@ -239,6 +250,26 @@ var mutants = map[string]mutant{
 			}
 			return acts
 		}},
+	"holds a lock across its tick": {verify: queue.Verify, crashes: true,
+		plan: func(w queue.World, c queue.Config) []queue.Action {
+			for _, pr := range w.PRs {
+				if pr.Note == "locked" {
+					return nil
+				}
+			}
+			acts := queue.Plan(w, c)
+			if len(acts) == 0 || len(w.PRs) == 0 {
+				return acts
+			}
+			holder, after := w.PRs[0].Number, w.PRs[0].Note
+			for _, a := range acts {
+				if a.Do == "note" && a.PR == holder {
+					after = a.Text
+				}
+			}
+			acts = append([]queue.Action{{Do: "note", PR: holder, Text: "locked"}}, acts...)
+			return append(acts, queue.Action{Do: "note", PR: holder, Text: after})
+		}},
 	"builds a commit twice": {verify: queue.Verify,
 		plan: func(w queue.World, c queue.Config) []queue.Action {
 			acts := queue.Plan(w, c)
@@ -265,7 +296,7 @@ func main() {
 	}
 	failed := false
 
-	broken := invariants(mutant{queue.Plan, queue.Verify}, seeds/2)
+	broken := invariants(mutant{plan: queue.Plan, verify: queue.Verify}, seeds/2)
 	fmt.Printf("invariants: %d broken\n", len(broken))
 	for i, b := range broken {
 		if i == 12 {
@@ -276,12 +307,27 @@ func main() {
 	}
 	failed = failed || len(broken) > 0
 
+	wrong := history(mutant{plan: queue.Plan, verify: queue.Verify})
+	fmt.Printf("cases: %d played, %d failures\n", len(cases()), len(wrong))
+	for _, w := range wrong {
+		fmt.Println("  " + w)
+	}
+	failed = failed || len(wrong) > 0
+
 	var names []string
 	for name := range mutants {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	fails := map[string]int{}
 	for _, name := range names {
+		seen := map[string]bool{}
+		for _, w := range history(mutants[name]) {
+			seen[w[:strings.Index(w, ",")]] = true
+		}
+		for c := range seen {
+			fails[c]++
+		}
 		kinds := map[string]bool{}
 		for _, b := range invariants(mutants[name], 8) {
 			kinds[b[strings.Index(b, "invariant "):][:11]] = true
@@ -294,6 +340,22 @@ func main() {
 		fmt.Printf("mutant that %s: breaks %s\n", name, strings.Join(which, ", "))
 		if len(which) == 0 {
 			fmt.Println("  the eval is blind to it")
+			failed = true
+		}
+		if m := mutants[name]; m.crashes {
+			m.uncrashed = true
+			if n := len(invariants(m, 8)); n > 0 {
+				fmt.Printf("  it breaks %d worlds where no tick crashes, so it proves nothing about invariant 6\n", n)
+				failed = true
+			} else if len(which) > 0 {
+				fmt.Println("  and nothing where no tick crashes: the eval sees invariant 6")
+			}
+		}
+	}
+
+	for _, c := range cases() {
+		if fails[c.Name] == 0 {
+			fmt.Printf("case %s: no mutant fails it, so it proves nothing\n", c.Name)
 			failed = true
 		}
 	}

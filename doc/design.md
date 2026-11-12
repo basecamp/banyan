@@ -26,13 +26,19 @@ The landing is one atomic push: the trunk moves to the candidate, and the candid
 
 ## Blame
 
-A red candidate that is the lowest on the chain starts a round: builds of some of its prefixes, begun together. The first round is the tip and the candidate itself.
+A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too, or once a round shows the red is real. Until then it may yet land them all. Where rounds are probes, which answer in a fraction of a build, the chain waits for that answer. Where they are whole builds it does not wait: it is built beside the candidates still running.
 
-- **The candidate passes this time:** the red was a flake, and it lands.
-- **Nothing passes, the tip included:** the trunk is red. Nobody is blamed. The queue holds and tries a round again after `recheck`. If a pull request labelled as a fix is in the chain, the prefix that ends at it is built too, since that is where a green would show. If one waits outside the chain, the chain is dropped so that the fix is built on the tip.
-- **Prefix g passes and a prefix above it fails:** the next round narrows between them. When they are next to each other, the pull request between them is the suspect. It leaves once its prefix has failed twice, one of those in the same round as the pass below it.
+The red candidate is narrowed by rounds: builds of some of its prefixes, begun together. A round's build never lands. For a candidate that added one pull request, the first round is the tip and the candidate's own tree.
+
+- **The candidate's tree passes this time:** the red was a flake, and its pull requests go back on the chain. Where probes passed, a whole build of the tree decides.
+- **Nothing passes, the tip included:** the trunk is red. Nobody is blamed. The queue holds, drops the failed candidates built on it, and tries a round again after `recheck`. If a pull request labelled as a fix is among the red candidate's own, the prefix that ends at it is built too, since that is where a green would show. If one waits elsewhere, every build is dropped so that the fix is built on the tip.
+- **Prefix g passes and a prefix above it fails:** the next round narrows between them. A round of probes builds every prefix in between, so one round finds the pair. A round of whole builds splits the span into as many parts as there are slots. When they are next to each other, the pull request between them is the suspect. It leaves once its prefix has failed twice, one of those in the same round as the pass below it. Unless a candidate stacked on the red one failed as well, that round builds the suspect's prefix twice, and a pass of either clears it.
 
 "Begun together" is what makes blame safe against the clock. A commit that passed an hour ago proves nothing about a red now.
+
+Only the pull requests the rounds have not ruled out stay off the chain. The rest go back on it at once.
+
+A red candidate and its rounds stand while the trunk moves under them, since they prove what they prove about the commits they were built on. They go when a pull request in the trees they build leaves the queue, and when their base is no longer the tip and fails by itself. So several red candidates are narrowed at once, each beside a chain that keeps landing.
 
 A round's builds are whole builds by default. Where a repository's CI offers probes, a round uses them instead: a probe is an empty commit on a prefix that asks CI to run only what failed in the red build.
 
@@ -44,7 +50,7 @@ Only `failure` is evidence. A build that was lost, cancelled or timed out is bui
 - **A conflict with the trunk itself.**
 - **A head that moved** after it was queued.
 
-Everything else waits in place: a conflict with a pull request ahead, the pull request's own checks running or red, a hold label, a red trunk.
+Everything else waits in place: a conflict with a pull request ahead, the pull request's own checks running or red, a hold label, a red trunk, a red candidate being narrowed.
 
 Every ejection is a comment that names the head judged, the cause and the builds it rests on, with the marker `<!-- banyan eject <head> attributed=<cause> -->`.
 
@@ -72,7 +78,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 
 ## Dials
 
-`slots` is how many builds are under test at once. `max_batch` is how many pull requests a candidate adds. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
+`slots` is how many candidates are under test at once. A round's builds are beside them and are not counted. `max_batch` is how many pull requests a candidate adds. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
 
 ## Not in the engine
 

@@ -31,9 +31,18 @@ type Shape struct {
 	Removals     float64 // labels taken off
 	Outside      float64 // trunk commits that did not come through the queue
 	Episodes     []Episode
-	Crash        float64 // a tick dies after one of its actions
-	Race         float64 // a head moves between a tick's read and its landing
-	Script       []bool  // exhaustive cases: whether the nth build flakes, in place of Flake
+	Crash        float64  // a tick dies after one of its actions
+	Race         float64  // a head moves between a tick's read and its landing
+	Script       []bool   // exhaustive cases: whether the nth build flakes, in place of Flake
+	Queue        []Queued // a case's pull requests, each queued at its own time
+}
+
+// Queued is a pull request a case queues by hand, with its hidden facts.
+type Queued struct {
+	Number int
+	At     time.Duration
+	Breaks bool
+	Clash  int
 }
 
 // Episode turns the trunk red from At. A plain one heals by itself after For, as a clock or
@@ -91,6 +100,7 @@ type Sim struct {
 	Landed   int
 	Wrong    int
 	Ejected  map[string]int
+	Left     map[int]string // the cause each ejected pull request last left for
 	Whole    int
 	Probes   int
 	Waits    []float64 // queue to landed, in build times
@@ -103,11 +113,27 @@ const tick = 2 * time.Minute
 func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
-		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}}
+		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
 	for i := 0; i < shape.Backlog; i++ {
 		s.arrive()
 	}
+	s.queue()
 	return s
+}
+
+// queue labels the case's pull requests whose time has come. The queue has posted nothing on
+// them yet, so each is pinned by the tick that first reads it.
+func (s *Sim) queue() {
+	for _, q := range s.shape.Queue {
+		if q.At <= s.now-tick || q.At > s.now {
+			continue
+		}
+		p := &simPR{arrived: s.now, queued: true, breaks: q.Breaks, clash: q.Clash}
+		p.Number, p.Head = q.Number, fmt.Sprintf("head%d", q.Number)
+		p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
+		s.prs[p.Number], s.byHead[p.Head] = p, p.Number
+		s.next = max(s.next, q.Number)
+	}
 }
 
 // The Repo the planner merges with: SHAs are a hash of what went in, as git's are.
@@ -246,6 +272,7 @@ func (s *Sim) Step() {
 	if s.now.Hours() < s.shape.Hours && s.hourly(s.shape.Arrivals) {
 		s.arrive()
 	}
+	s.queue()
 	for i, e := range s.shape.Episodes {
 		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
@@ -451,6 +478,7 @@ func (s *Sim) eject(a queue.Action) {
 	p := s.prs[a.PR]
 	p.queued = false
 	s.Ejected[a.Cause]++
+	s.Left[a.PR] = a.Cause
 	switch a.Cause {
 	case "moved":
 		p.back = s.now + 10*time.Minute
