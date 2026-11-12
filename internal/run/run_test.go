@@ -482,6 +482,30 @@ func TestAReviewWithdrawnAsTheLandingBeginsStopsIt(t *testing.T) {
 	}
 }
 
+func TestAnAdmissionCheckPassesOnAnyOfItsAlternatives(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff", "review|factory/review"]}`)
+	ours, theirs, neither, failed := w.open(1, "a", "1\n"), w.open(2, "b", "2\n"), w.open(3, "c", "3\n"), w.open(4, "d", "4\n")
+	for _, p := range []*pull{ours, theirs, neither, failed} {
+		w.set(p.heads[0], "signoff", "success")
+	}
+	w.set(ours.heads[0], "review", "success")
+	w.set(theirs.heads[0], "factory/review", "success")
+	w.set(theirs.heads[0], "review", "failure")
+	w.set(failed.heads[0], "factory/review", "failure")
+	for n := 1; n <= 3; n++ {
+		if _, err := w.q.Add(n, false); err != nil {
+			t.Fatalf("adding #%d: %v", n, err)
+		}
+	}
+	if _, err := w.q.Add(4, false); err == nil || !strings.HasPrefix(err.Error(), "refused #4: checks: ") {
+		t.Errorf("no alternative passed and one failed: %v", err)
+	}
+	w.rounds(5)
+	if !w.landed(1) || !w.landed(2) || w.landed(3) || !w.queued(3) {
+		t.Errorf("landed: ours %v, theirs %v, neither %v\n%s", w.landed(1), w.landed(2), w.landed(3), w.log)
+	}
+}
+
 func TestAddRefusesInOneLineAndTwiceIsOnce(t *testing.T) {
 	w := newWorld(t, `{"admit": ["signoff"]}`)
 	draft := w.open(1, "a", "1\n")
