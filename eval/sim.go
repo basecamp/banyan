@@ -407,9 +407,6 @@ func (s *Sim) World() queue.World {
 		if sb.end != never && !s.shape.Silent {
 			b.Started = s.epoch.Add(sb.start)
 		}
-		if b.Verdict != queue.Pending {
-			b.Finished = s.epoch.Add(sb.end)
-		}
 		w.Builds = append(w.Builds, b)
 	}
 	return w

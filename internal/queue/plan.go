@@ -328,15 +328,15 @@ func (p *plan) weigh(r *red) {
 			continue
 		}
 		r.hi = low
-		// A pass below a failure proves the red real only if the trunk cannot have gone
-		// red by the clock between them: the failures began at the same moment as the
-		// pass, or on both sides of it, and ran while it ran. Builds that waited their
+		// A pass below a failure proves the red real only if one red spell cannot explain
+		// both: the failures began at the same moment as the pass, or on both sides of
+		// it, so a spell that caught them caught the pass too. Builds that waited their
 		// turn for an agent may not have, and then the next round builds them again.
 		for _, ok := range passes {
 			var before, after bool
 			var failed SHA
 			for _, b := range rounds[n] {
-				if len(b.Chain) == low && b.Verdict == Failure && b.overlaps(ok) {
+				if len(b.Chain) == low && b.Verdict == Failure {
 					before, after = before || !b.began().After(ok.began()), after || !b.began().Before(ok.began())
 					failed = b.SHA
 				}

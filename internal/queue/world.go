@@ -73,9 +73,8 @@ type Build struct {
 	// Started is when CI began running the build, if it made the build wait for an agent:
 	// zero while it waits, zero where CI began it as soon as it was pushed, and always zero
 	// where the repository's CI does not say. The planner compares these times exactly, and
-	// takes builds pushed together with no Started to have begun together. Finished is
-	// when CI reported the verdict.
-	Started, Finished time.Time
+	// takes builds pushed together with no Started to have begun together.
+	Started time.Time
 }
 
 // Tests is the prefix whose tree this build has.
@@ -92,12 +91,6 @@ func (b Build) began() time.Time {
 		return b.Pushed
 	}
 	return b.Started
-}
-
-// overlaps says the two builds ran at overlapping times. Builds with no time on their
-// verdicts are taken to have, as builds pushed together do on a CI that never makes one wait.
-func (b Build) overlaps(o Build) bool {
-	return b.Finished.IsZero() || o.Finished.IsZero() || (b.began().Before(o.Finished) && o.began().Before(b.Finished))
 }
 
 // above is the part of the build's chain above the trunk, and whether the trunk is on it.

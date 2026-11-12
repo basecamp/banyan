@@ -264,6 +264,10 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 // Holds says whether the trunk at this tip already holds the commit.
 func (r *Repo) Holds(trunk, sha queue.SHA) bool {
 	_, err := r.git("merge-base", "--is-ancestor", sha, trunk)
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
+		panic(err)
+	}
 	return err == nil
 }
 
