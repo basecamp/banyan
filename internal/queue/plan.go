@@ -197,8 +197,6 @@ func (p *plan) read() {
 		switch r := p.under(b); {
 		case r != nil:
 			p.stackedOn(r, b)
-		case p.held && (b.Verdict == Failure || b.Verdict == Error):
-			p.drop(b)
 		default:
 			free = append(free, b)
 			if len(b.Chain) > len(p.chain) {
