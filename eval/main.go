@@ -330,7 +330,18 @@ func main() {
 	trace := flag.String("trace", "", `replay one world and print what the queue did: "<shape> <slots> <batch> <probes> <seed>"`)
 	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes>; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
+	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
 	flag.Parse()
+	if *recordings != "" {
+		sc, err := live(*recordings)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "blame90", "builds/pr", "per hour")
+		sc.print(Shape{})
+		return
+	}
 	if *trace != "" {
 		replay(*trace)
 		return
