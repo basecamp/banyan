@@ -29,3 +29,11 @@ when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	blame_p90	build
 2026-11-12T01:14Z	e09cf23+	hey-native-apps	challenger	34913	0.00	1.67	4.13	4.33	0.61	15.1	766	without probes, build the chain beside candidates still running on a red one; with probes, wait only until a round shows the red is real, then drop them: kept, hey2 wait p50 1.44 to 1.20 and p90 down 11% for 3% more builds, hey-native-apps landings an hour up 5% for 2% more builds
 2026-11-12T01:17Z	24b7386+	hey2	challenger	12315	0.00	1.12	2.32	2.88	1.60	14.5	766	hey2 at 12 slots, not 8: kept, wait p50 1.20 to 1.12, p90 2.64 to 2.32 and landings an hour 11.7 to 14.5 for 3% more builds; the three meet their targets
 2026-11-12T01:17Z	24b7386+	hey-native-apps	challenger	34913	0.00	1.67	4.13	4.33	0.61	15.1	766	hey2 at 12 slots, not 8: kept, wait p50 1.20 to 1.12, p90 2.64 to 2.32 and landings an hour 11.7 to 14.5 for 3% more builds; the three meet their targets
+2026-11-12T01:21Z	e30a75f	hey2	challenger	12315	0.00	1.12	2.32	2.88	1.60	15.1	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey2	serial	12113	0.00	26.80	45.44	1.04	1.37	2.0	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey2	every-prefix	12393	0.00	1.20	2.64	3.12	1.56	12.3	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey2	batched	12355	0.00	1.44	4.24	12.32	1.18	7.1	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey-native-apps	challenger	34913	0.00	1.67	4.13	4.33	0.61	16.4	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey-native-apps	serial	33241	0.48	83.93	156.20	3.00	1.44	1.7	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey-native-apps	every-prefix	34941	0.11	4.67	8.13	3.00	1.38	11.1	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
+2026-11-12T01:21Z	e30a75f	hey-native-apps	batched	34869	0.03	1.93	6.07	8.67	0.42	12.7	766	baseline: the same planner, with landings an hour measured on 400 backlog worlds, not 50
