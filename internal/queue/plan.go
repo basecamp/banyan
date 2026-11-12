@@ -316,7 +316,11 @@ func (p *plan) weigh(r *red) {
 		r.lo = g
 		if r.confirmed = low > 0; r.confirmed {
 			r.hi = low
-			r.fails[r.hi]++
+			for _, b := range rounds[n] {
+				if len(b.Chain) == low && b.Verdict == Failure {
+					r.fails[low]++
+				}
+			}
 			r.proof = []SHA{gSHA, lowSHA}
 		} else if r.hi <= r.lo {
 			r.hi = k
@@ -459,13 +463,6 @@ func (p *plan) rounds() {
 					break
 				}
 			}
-		case span == 1:
-			// With no failed build stacked on the red one to bear it out, the suspect's
-			// prefix is built twice, so that one more flake does not convict it.
-			points = []int{r.lo, r.hi}
-			if !r.backed {
-				points = append(points, r.hi)
-			}
 		default:
 			points = []int{r.lo}
 			n := min(max(p.c.Slots, 2)-1, span-1)
@@ -474,6 +471,19 @@ func (p *plan) rounds() {
 			}
 			for i := 1; i <= n; i++ {
 				points = append(points, r.lo+i*span/(n+1))
+			}
+			// A round that can convict builds the top of the span, which has failed before.
+			// With no failed build stacked on the red candidate to bear it out, it builds
+			// the top twice, so that one more flake does not convict it. A round of whole
+			// builds that reaches every prefix builds each of them twice, and so convicts
+			// by itself wherever the culprit is.
+			if whole && n == span-1 {
+				points = append(append(points, points[1:]...), r.hi)
+			} else if span == 1 {
+				points = append(points, r.hi)
+			}
+			if !r.backed && points[len(points)-1] == r.hi {
+				points = append(points, r.hi)
 			}
 		}
 		for _, j := range points {
