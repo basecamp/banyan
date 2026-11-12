@@ -26,9 +26,14 @@ import (
 
 // The shapes the indicators are measured on. Each rate is an estimate until `banyan report`
 // replaces it with a measured one.
+//
+// hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. Whether the pipeline
+// cancels a build whose branch is deleted is assumed, not measured. hey-native-apps is moving
+// to a CI nobody has measured yet, so its pool has no limit.
 var shapes = []Shape{
 	{Name: "hey2", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
-		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05},
+		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
+		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
 		Break: 0.015, Clash: 0.005, Conflict: 0.08, Ahead: 0.03, Lost: 0.005, Errored: 0.01,
 		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1},
@@ -72,6 +77,19 @@ type Score struct {
 	Landed                                    int
 	Wrong, WaitP50, WaitP90, BlameP90, Builds float64
 	PerHour                                   float64
+	// What the queue costs everyone else: how long the other builds wait for an agent, in
+	// minutes, beside the queue and with no queue. It is printed, and not on the scoreboard.
+	Beside, Alone agentWait
+}
+
+type agentWait struct{ Mean, P90 float64 }
+
+func waited(minutes []float64) agentWait {
+	var sum float64
+	for _, m := range minutes {
+		sum += m
+	}
+	return agentWait{sum / float64(max(len(minutes), 1)), percentile(minutes, 90)}
 }
 
 const seeds = 200
@@ -104,7 +122,11 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	var waits, blames []float64
 	var broken []string
 	var wrong, whole, probes int
+	var beside, alone []float64
 	for i, s := range each(seeds, func(i int) *Sim { s := NewSim(shape, cfg, int64(i)); s.Run(); return s }) {
+		if s.pool != nil {
+			beside, alone = append(beside, s.pool.Waited...), append(alone, s.alone.Waited...)
+		}
 		sc.Landed += s.Landed
 		wrong, whole, probes = wrong+s.Wrong, whole+s.Whole, probes+s.Probes
 		waits, blames = append(waits, s.Waits...), append(blames, s.Blames...)
@@ -120,6 +142,7 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(sc.Landed), cost/float64(sc.Landed)
 	}
 	sc.WaitP50, sc.WaitP90, sc.BlameP90 = percentile(waits, 50), percentile(waits, 90), percentile(blames, 90)
+	sc.Beside, sc.Alone = waited(beside), waited(alone)
 
 	// Throughput is measured on a backlog alone: forty queued, nothing arriving. A world is
 	// short and its last landing is one draw, so it takes many of them to hold still.
@@ -148,13 +171,15 @@ func percentile(xs []float64, p int) float64 {
 // without, and a narrow batch.
 var kinds = []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)}
 
-// invariants holds the planner to the charter in the storm, with and without flakes, under
-// each kind of configuration, and in every small world.
+// invariants holds the planner to the charter in the storm, with and without flakes and on a
+// pool so small that builds outwait the timeout, under each kind of configuration, and in
+// every small world.
 func invariants(m mutant, worlds int) []string {
 	var broken []string
-	calm := storm
+	calm, tight := storm, storm
 	calm.Name, calm.Flake, calm.ProbeFlake = "storm without flakes", 0, 0
-	for _, shape := range []Shape{storm, calm} {
+	tight.Name, tight.Agents, tight.Others, tight.Hold, tight.Cancels = "storm on three agents", 3, 2, storm.Build, true
+	for _, shape := range []Shape{storm, calm, tight} {
 		if m.uncrashed {
 			shape.Crash = 0
 		}
@@ -289,9 +314,14 @@ func main() {
 	record := flag.String("record", "", "append this run to the scoreboard, with this note")
 	baselines := flag.Bool("baselines", false, "measure the baselines too, as -record does")
 	trace := flag.String("trace", "", `replay one world and print what the queue did: "<shape> <slots> <batch> <probes> <seed>"`)
+	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	flag.Parse()
 	if *trace != "" {
 		replay(*trace)
+		return
+	}
+	if *fitted {
+		fit()
 		return
 	}
 	failed := false
@@ -376,6 +406,10 @@ func main() {
 				failed = true
 			}
 			fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.BlameP90, sc.Builds, sc.PerHour)
+			if shape.Agents > 0 {
+				fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
+					sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
+			}
 			rows = append(rows, fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%d\t%s",
 				time.Now().UTC().Format("2006-01-02T15:04Z"), commit(), sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.BlameP90, sc.Builds, sc.PerHour, lines, *record))
 			if was, ok := last[sc.Shape+"\t"+sc.Config]; ok && cfg.Name == "challenger" && *record == "" {
@@ -422,10 +456,79 @@ func replay(spec string) {
 	if name == "calm" {
 		shape.Flake, shape.ProbeFlake = 0, 0
 	}
+	if name == "tight" {
+		shape.Agents, shape.Others, shape.Hold, shape.Cancels = 3, 2, storm.Build, true
+	}
 	s := NewSim(shape, dials(slots, batch, probes), seed)
 	s.Trace = os.Stdout
 	s.Run()
 	fmt.Printf("landed %d, wrong %d, ejected %v, broken %v\n", s.Landed, s.Wrong, s.Ejected, s.Broken)
+}
+
+// pipelines is what each shape's CI measured with no queue of ours running. hey2's is its
+// pipeline's newest 800 builds, 37 hours of them, read on 2026-11-11.
+var pipelines = map[string]pipeline{
+	"hey2": {Running: 6, AtMost10: 0.72, Full: 0.147, Wait: [3]float64{0.3, 6.8, 11.1}, Starts: [2]float64{20, 39}},
+}
+
+// pipeline is a pool with no queue: the builds running at once at the median, the share of
+// the time at ten or fewer and with no agent free, a build's wait for an agent in minutes at
+// p50, p90 and p99, and the builds that start in an hour at p50 and p90.
+type pipeline struct {
+	Running, AtMost10, Full float64
+	Wait                    [3]float64
+	Starts                  [2]float64
+}
+
+// fit plays each shape's pool with no queue, 37 hours at a time, and prints what it does
+// beside what the pipeline measured.
+func fit() {
+	for _, shape := range shapes {
+		if shape.Agents == 0 {
+			fmt.Printf("%s: no limit on its agents, and nothing measured\n", shape.Name)
+			continue
+		}
+		quiet := Shape{Name: shape.Name, Build: shape.Build, Hours: 37, Agents: shape.Agents, Others: shape.Others, Burst: shape.Burst, Hold: shape.Hold}
+		var busy, waits, starts []float64
+		var sim pipeline
+		for _, s := range each(seeds, func(i int) *Sim { s := NewSim(quiet, queue.Config{}, int64(i)); s.Run(); return s }) {
+			for _, n := range s.pool.Busy {
+				busy = append(busy, float64(n))
+				if n <= 10 {
+					sim.AtMost10++
+				}
+				if n >= shape.Agents {
+					sim.Full++
+				}
+			}
+			for _, n := range s.pool.Came[:min(37, len(s.pool.Came))] {
+				starts = append(starts, float64(n))
+			}
+			waits = append(waits, s.pool.Waited...)
+		}
+		sim.Running, sim.AtMost10, sim.Full = percentile(busy, 50), sim.AtMost10/float64(len(busy)), sim.Full/float64(len(busy))
+		sim.Wait = [3]float64{percentile(waits, 50), percentile(waits, 90), percentile(waits, 99)}
+		sim.Starts = [2]float64{percentile(starts, 50), percentile(starts, 90)}
+		was := pipelines[shape.Name]
+		fmt.Printf("%s: %d agents, %.0f other builds an hour in bursts of %.1f, %s each, over %d worlds of 37 hours\n",
+			shape.Name, shape.Agents, shape.Others, shape.Burst, shape.Hold, seeds)
+		fmt.Printf("  %-42s %9s %9s\n", "", "simulated", "measured")
+		for _, row := range []struct {
+			name      string
+			sim, real float64
+		}{
+			{"builds running at once, median", sim.Running, was.Running},
+			{"share of the time at 10 or fewer", sim.AtMost10, was.AtMost10},
+			{"share of the time with no agent free", sim.Full, was.Full},
+			{"wait for an agent, p50, minutes", sim.Wait[0], was.Wait[0]},
+			{"wait for an agent, p90, minutes", sim.Wait[1], was.Wait[1]},
+			{"wait for an agent, p99, minutes", sim.Wait[2], was.Wait[2]},
+			{"builds started in an hour, p50", sim.Starts[0], was.Starts[0]},
+			{"builds started in an hour, p90", sim.Starts[1], was.Starts[1]},
+		} {
+			fmt.Printf("  %-42s %9.2f %9.2f\n", row.name, row.sim, row.real)
+		}
+	}
 }
 
 // worse lists the indicators that moved the wrong way by more than a twentieth.
