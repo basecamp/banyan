@@ -1,0 +1,13 @@
+{
+  "story": "hey2, 2026-10-19. #599 and #615 each passed its own build. #615 was merged after #599, and the build of the two together failed: the trunk went red. Queued one after the other, the later one is ejected, the earlier one lands, and nobody else leaves.",
+  "build": 25,
+  "prs": [
+    {"number": 599, "at": 0},
+    {"number": 615, "at": 2, "clashes": 599},
+    {"number": 616, "at": 2},
+    {"number": 617, "at": 4},
+    {"number": 618, "at": 14},
+    {"number": 620, "at": 40}
+  ],
+  "ejected": [615]
+}

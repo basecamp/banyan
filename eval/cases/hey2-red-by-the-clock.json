@@ -1,0 +1,20 @@
+{
+  "story": "hey2, 2026-11-10. A test that depended on the day of the month began to fail, and #1642 was blamed for it until its parent, green that night, was built again and failed the same way. Here the trunk is red by the clock for three hours while pull requests are queued and others keep arriving: nobody is ejected for it, and the queue drains once it clears.",
+  "build": 25,
+  "prs": [
+    {"number": 1640, "at": 0},
+    {"number": 1641, "at": 0},
+    {"number": 1642, "at": 30},
+    {"number": 1643, "at": 30},
+    {"number": 1645, "at": 32},
+    {"number": 1646, "at": 40},
+    {"number": 1648, "at": 70},
+    {"number": 1650, "at": 110},
+    {"number": 1651, "at": 150},
+    {"number": 1653, "at": 184},
+    {"number": 1655, "at": 220},
+    {"number": 1656, "at": 260}
+  ],
+  "red": [{"at": 30, "for": 180}],
+  "ejected": []
+}

@@ -1,9 +1,9 @@
 // The eval: go run ./eval
 //
 // It plays the planner against simulated worlds whose hidden facts decide every verdict,
-// holds it to the charter's invariants, measures the charter's indicators, and compares them
-// with the last recorded run. It exits 1 on a broken invariant, on an eval that a broken
-// planner passes, and on an indicator that got worse.
+// holds it to the charter's invariants, plays the cases in eval/cases, measures the charter's
+// indicators, and compares them with the last recorded run. It exits 1 on a broken invariant,
+// on a failed case, on an eval that a broken planner passes, and on an indicator that got worse.
 //
 //	go run ./eval                    check against the scoreboard
 //	go run ./eval -record "<note>"   append this run's rows to the scoreboard
@@ -143,6 +143,10 @@ func percentile(xs []float64, p int) float64 {
 	return xs[min(len(xs)-1, len(xs)*p/100)]
 }
 
+// kinds is one configuration of each kind: every prefix, serial, batched with probes and
+// without, and a narrow batch.
+var kinds = []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)}
+
 // invariants holds the planner to the charter in the storm, with and without flakes, under
 // each kind of configuration, and in every small world.
 func invariants(m mutant, worlds int) []string {
@@ -153,7 +157,7 @@ func invariants(m mutant, worlds int) []string {
 		if m.uncrashed {
 			shape.Crash = 0
 		}
-		for _, cfg := range []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)} {
+		for _, cfg := range kinds {
 			for i, s := range each(worlds, func(i int) *Sim {
 				s := NewSim(shape, cfg, int64(i))
 				s.plan, s.verify = m.plan, m.verify
@@ -302,12 +306,27 @@ func main() {
 	}
 	failed = failed || len(broken) > 0
 
+	wrong := history(mutant{plan: queue.Plan, verify: queue.Verify})
+	fmt.Printf("cases: %d played, %d failures\n", len(cases()), len(wrong))
+	for _, w := range wrong {
+		fmt.Println("  " + w)
+	}
+	failed = failed || len(wrong) > 0
+
 	var names []string
 	for name := range mutants {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	fails := map[string]int{}
 	for _, name := range names {
+		seen := map[string]bool{}
+		for _, w := range history(mutants[name]) {
+			seen[w[:strings.Index(w, ",")]] = true
+		}
+		for c := range seen {
+			fails[c]++
+		}
 		kinds := map[string]bool{}
 		for _, b := range invariants(mutants[name], 8) {
 			kinds[b[strings.Index(b, "invariant "):][:11]] = true
@@ -330,6 +349,13 @@ func main() {
 			} else if len(which) > 0 {
 				fmt.Println("  and nothing where no tick crashes: the eval sees invariant 6")
 			}
+		}
+	}
+
+	for _, c := range cases() {
+		if fails[c.Name] == 0 {
+			fmt.Printf("case %s: no mutant fails it, so it proves nothing\n", c.Name)
+			failed = true
 		}
 	}
 
