@@ -79,7 +79,7 @@ type simPR struct {
 	landed      bool
 	gone        bool // ejected with cause, or removed by its author, and not coming back
 	back        time.Duration
-	firstRed    time.Duration
+	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
 	checksGreen time.Duration
 }
 
@@ -119,8 +119,8 @@ type Sim struct {
 	Left     map[int]string // the cause each ejected pull request last left for
 	Whole    int
 	Probes   int
-	Waits    []float64 // queue to landed, in build times
-	Blames   []float64 // first red to ejection, in build times
+	Waits    []float64 // ready to landed, in build times
+	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
 }
 
@@ -148,7 +148,7 @@ func (s *Sim) queue() {
 		if q.At <= s.now-tick || q.At > s.now {
 			continue
 		}
-		p := &simPR{arrived: s.now, queued: true, breaks: q.Breaks, clash: q.Clash}
+		p := &simPR{arrived: s.now, ready: s.now, queued: true, breaks: q.Breaks, clash: q.Clash}
 		p.Number, p.Head = q.Number, fmt.Sprintf("head%d", q.Number)
 		p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 		s.prs[p.Number], s.byHead[p.Head] = p, p.Number
@@ -213,6 +213,9 @@ func (s *Sim) arrive() *simPR {
 	}
 	if s.chance(0.2) {
 		p.Checks, p.checksGreen = queue.Pending, s.now+10*time.Minute
+	}
+	if p.Checks == queue.Success {
+		p.ready = s.now
 	}
 	s.prs[p.Number], s.byHead[p.Head] = p, p.Number
 	return p
@@ -302,16 +305,16 @@ func (s *Sim) Step() {
 			p := s.arrive()
 			p.First, p.fix, p.breaks, p.clash, p.conflict, p.ahead = true, i+1, false, 0, false, 0
 			s.say("the fix for the red trunk is queued as #%d", p.Number)
-			p.Checks = queue.Success
+			p.Checks, p.ready = queue.Success, s.now
 		}
 	}
 	for _, n := range s.numbers() {
 		p := s.prs[n]
 		if p.Checks == queue.Pending && s.now >= p.checksGreen {
-			p.Checks = queue.Success
+			p.Checks, p.ready = queue.Success, s.now
 		}
 		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
-			p.queued, p.back, p.Pinned, p.Note = true, 0, p.Head, ""
+			p.queued, p.back, p.Pinned, p.Note, p.ready = true, 0, p.Head, "", s.now
 			p.Queued = s.epoch.Add(s.now)
 		}
 	}
@@ -335,13 +338,6 @@ func (s *Sim) Step() {
 			}
 			b.Verdict = s.verdict(b)
 			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
-			if b.Verdict == queue.Failure {
-				for _, m := range b.Chain {
-					if p := s.prs[m.Number]; p.firstRed == 0 {
-						p.firstRed = s.now
-					}
-				}
-			}
 		}
 	}
 	s.tick()
@@ -535,7 +531,7 @@ func (s *Sim) eject(a queue.Action) {
 	case "culprit":
 		if s.culprit(p) {
 			p.gone = true
-			s.Blames = append(s.Blames, float64(s.now-p.firstRed)/float64(s.shape.Build))
+			s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
 			return
 		}
 		s.Wrong++
@@ -575,7 +571,7 @@ func (s *Sim) land(a queue.Action) {
 		}
 		p.landed, p.queued = true, false
 		s.Landed++
-		s.Waits = append(s.Waits, float64(s.now-p.arrived)/float64(s.shape.Build))
+		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))
 	}
 	s.trunk, s.LastLand = a.SHA, s.now
 	delete(s.builds, a.SHA)

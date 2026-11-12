@@ -54,7 +54,7 @@ func TestMutantsAreCaught(t *testing.T) {
 // row, which is how hey2 went from 1.44 to 1.60. Held to the best kept row since the fresh
 // baselines, the second is refused, where the sum passes a twentieth, and so is each after it.
 func TestSmallLossesDoNotAddUp(t *testing.T) {
-	sc := Score{Shape: "hey2", Config: "challenger", WaitP50: 1.2, WaitP90: 2.5, BlameP90: 3, Builds: 1.44, PerHour: 12}
+	sc := Score{Shape: "hey2", Config: "challenger", WaitP50: 1.2, WaitP90: 2.5, EjectP90: 3, Builds: 1.44, PerHour: 12}
 	key := sc.Shape + "\t" + sc.Config
 	rows := []string{sc.row(0, "an older run: kept"), sc.row(0, "baseline: fresh")}
 	newest := sc

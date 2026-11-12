@@ -28,6 +28,6 @@ Read `CHARTER.md` first. It holds the invariants and the targets. Do not change 
 
 ## What the numbers mean
 
-`wait` is queue to landed and `blame` is first red to ejection, both in whole-build times. `builds/pr` counts a probe as its share of a whole build. `per hour` is landings an hour on a backlog of forty with nothing arriving. `wrong/1k` is innocent pull requests ejected per thousand landed.
+A pull request's clock starts when it is labelled and its own checks have passed, whichever is later. `wait` is from then to landed and `eject` from then to ejected as the cause, both in whole-build times. `builds/pr` counts a probe as its share of a whole build. `per hour` is landings an hour on a backlog of forty with nothing arriving. `wrong/1k` is innocent pull requests ejected per thousand landed.
 
 hey2's builds share a pool of agents with the other builds of its pipeline, first come first served, so a queue build's wait for an agent is in every number. `go run ./eval -fit` shows the pool beside what the pipeline measured. Under hey2's row the eval prints how much longer the other builds wait for an agent with the queue running. That is what the queue costs everyone else; it is not an indicator. hey-native-apps has no limit until its CI is measured.

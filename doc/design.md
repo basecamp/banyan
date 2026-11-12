@@ -36,7 +36,7 @@ The red candidate is narrowed by rounds: builds of some of its prefixes, pushed 
 
 Pushed together is not begun together where builds wait for an agent, and a trunk that goes red by the clock between two starts looks like a culprit: the build below passes and the one above fails. So a pass below a failure convicts only when CI began the failure at the same moment as the pass, or began failures on both sides of it, all while the pass ran. A round therefore builds from the top down and up again. When its builds ran apart, the next round builds them again. Where CI does not say when a build began, its push stands in, and builds pushed together count as begun together.
 
-"Begun together" is what makes blame safe against the clock. A commit that passed an hour ago proves nothing about a red now.
+The order the builds started in is what makes blame safe against the clock. A pass proves the red real only when a failure of the suspect started before it or with it, and another after it or with it: a trunk or a CI broken for a while would have caught the pass too.
 
 Only the pull requests the rounds have not ruled out stay off the chain. The rest go back on it at once.
 

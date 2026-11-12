@@ -16,7 +16,7 @@ import (
 func TestLiveScoresRecordedTicksByTheEvalsDefinitions(t *testing.T) {
 	noon := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 	at := func(m int) time.Time { return noon.Add(time.Duration(m) * time.Minute) }
-	one, two := queue.PR{Number: 1, Head: "h1", Queued: noon}, queue.PR{Number: 2, Head: "h2", Queued: noon}
+	one, two := queue.PR{Number: 1, Head: "h1", Queued: noon, Checks: queue.Success}, queue.PR{Number: 2, Head: "h2", Queued: noon, Checks: queue.Success}
 	chain := []queue.Member{{Number: 1, Head: "h1", Merge: "m1"}, {Number: 2, Head: "h2", Merge: "m2"}}
 	red := queue.Build{SHA: "m1", Chain: chain[:1], Pushed: noon}
 	green := queue.Build{SHA: "m2b", Chain: chain, Pushed: at(50)}
@@ -41,8 +41,8 @@ func TestLiveScoresRecordedTicksByTheEvalsDefinitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A whole build took 10 minutes, so an hour's wait is 6 builds and 20 minutes of blame is 2.
-	want := Score{Shape: filepath.Base(dir), Config: "live", Landed: 2, Wrong: 500, WaitP50: 6, WaitP90: 6, BlameP90: 2, Builds: 1, PerHour: 2 / (61.0 / 60)}
+	// A whole build took 10 minutes, so an hour to land is 6 builds and half an hour to an ejection is 3.
+	want := Score{Shape: filepath.Base(dir), Config: "live", Landed: 2, Wrong: 500, WaitP50: 6, WaitP90: 6, EjectP90: 3, Builds: 1, PerHour: 2 / (61.0 / 60)}
 	if fmt.Sprintf("%.3v", sc) != fmt.Sprintf("%.3v", want) {
 		t.Errorf("scored\n %+v\nwant\n %+v", sc, want)
 	}
