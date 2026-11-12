@@ -28,11 +28,13 @@ The landing is one atomic push: the trunk moves to the candidate, and the candid
 
 A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too, or once a round shows the red is real. Until then it may yet land them all. Where rounds are probes, which answer in a fraction of a build, the chain waits for that answer. Where they are whole builds it does not wait: it is built beside the candidates still running.
 
-The red candidate is narrowed by rounds: builds of some of its prefixes, begun together. A round's build never lands. For a candidate that added one pull request, the first round is the tip and the candidate's own tree.
+The red candidate is narrowed by rounds: builds of some of its prefixes, pushed together. A round's build never lands. For a candidate that added one pull request, the first round is the tip and the candidate's own tree.
 
 - **The candidate's tree passes this time:** the red was a flake, and its pull requests go back on the chain. Where probes passed, a whole build of the tree decides.
-- **Nothing passes, the tip included:** the trunk is red. Nobody is blamed. The queue holds, drops the failed candidates built on it, and tries a round again after `recheck`. If a pull request labelled as a fix is among the red candidate's own, the prefix that ends at it is built too, since that is where a green would show. If one waits elsewhere, the chain goes on for it though the trunk is red. A pull request labelled as a fix ends the batch it is in, so its candidate holds nothing queued after it.
+- **Nothing passes, the tip included:** the trunk is red. Nobody is blamed. The queue holds, and tries a round again after `recheck`. If a pull request labelled as a fix has yet to be built, the chain goes on for it though the trunk is red. A pull request labelled as a fix ends the batch it is in, so its candidate holds nothing queued after it.
 - **Prefix g passes and a prefix above it fails:** the next round narrows between them. A round of probes builds every prefix in between, so one round finds the pair. A round of whole builds splits the span into as many parts as there are slots. When they are next to each other, the pull request between them is the suspect. It leaves once its prefix has failed twice, one of those in the same round as the pass below it. So the round that can convict builds the top of its span again, and twice unless a candidate stacked on the red one failed as well; a pass of either clears it. A round of whole builds that reaches every prefix of its span builds each of them twice, and so convicts in one round wherever the culprit is.
+
+Pushed together is not begun together where builds wait for an agent, and a trunk that goes red by the clock between two starts looks like a culprit: the build below passes and the one above fails. So a pass below a failure convicts only when CI began the failure at the same moment as the pass, or began failures on both sides of it, all while the pass ran. A round therefore builds from the top down and up again. When its builds ran apart, the next round builds them again. Where CI does not say when a build began, its push stands in, and builds pushed together count as begun together.
 
 "Begun together" is what makes blame safe against the clock. A commit that passed an hour ago proves nothing about a red now.
 
@@ -62,7 +64,7 @@ A verdict belongs to one commit for good. A retry is the same merge carrying `Ba
 
 1. **A whole build of every push to the queue's branches,** reported as one commit status. Whatever decides that status is the repository's own: a gate that counts a job skipped by design as passed is the repository's gate. Several CI systems may each report, and the queue waits for every context its config names.
 2. **Probes, optionally.** A commit carrying `Banyan-Probe-Of: <sha>` runs only what failed in the build of that SHA, and reports under the probe context, which the trunk's rule never accepts.
-3. **Cancelling, optionally.** The queue deletes the branch of a build it no longer needs. The repository's CI may cancel a build whose branch is gone.
+3. **Cancelling, optionally.** The queue deletes the branch of a build it no longer needs. The repository's CI may cancel a build whose branch is gone. `cancels` says whether it does. Where it does not, the build runs to its end and holds an agent, so a candidate the queue no longer wants is left until it reports and holds its slot. Otherwise every head that moves leaves a chain's worth of builds behind, and on a small pool the queue's own leavings outrun the agents.
 
 The queue never calls a CI provider's API and never reads a log.
 

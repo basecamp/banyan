@@ -70,6 +70,12 @@ type Build struct {
 	Of      SHA
 	Verdict Verdict
 	Pushed  time.Time
+	// Started is when CI began running the build, if it made the build wait for an agent:
+	// zero while it waits, zero where CI began it as soon as it was pushed, and always zero
+	// where the repository's CI does not say. The planner compares these times exactly, and
+	// takes builds pushed together with no Started to have begun together. Finished is
+	// when CI reported the verdict.
+	Started, Finished time.Time
 }
 
 // Tests is the prefix whose tree this build has.
@@ -78,6 +84,20 @@ func (b Build) Tests() SHA {
 		return b.Base
 	}
 	return b.Chain[len(b.Chain)-1].Merge
+}
+
+// began is when CI began running the build, or its push where CI does not say.
+func (b Build) began() time.Time {
+	if b.Started.IsZero() {
+		return b.Pushed
+	}
+	return b.Started
+}
+
+// overlaps says the two builds ran at overlapping times. Builds with no time on their
+// verdicts are taken to have, as builds pushed together do on a CI that never makes one wait.
+func (b Build) overlaps(o Build) bool {
+	return b.Finished.IsZero() || o.Finished.IsZero() || (b.began().Before(o.Finished) && o.began().Before(b.Finished))
 }
 
 // above is the part of the build's chain above the trunk, and whether the trunk is on it.
@@ -122,6 +142,9 @@ type Config struct {
 	MaxBatch int
 	// Probes says the repository's CI answers a probe commit by running only what failed.
 	Probes bool
+	// Cancels says the repository's CI stops a build whose branch is deleted. Where it does
+	// not, a build the queue no longer wants holds its slot until it reports.
+	Cancels bool
 	// Timeout is how long a build may go without a verdict before it is built again.
 	Timeout time.Duration
 	// Recheck is the wait before a red trunk, or a CI that errored, is tried again.

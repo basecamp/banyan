@@ -22,7 +22,10 @@ type Case struct {
 	Name  string `json:"-"`
 	Story string `json:"story"`
 	Build int    `json:"build"`
-	PRs   []struct {
+	// Agents is how many builds the CI runs at once, 0 for no limit. A deleted branch's build
+	// runs to its end.
+	Agents int `json:"agents"`
+	PRs    []struct {
 		Number  int  `json:"number"`
 		At      int  `json:"at"`
 		Breaks  bool `json:"breaks"`  // it passes its own checks and fails the whole build
@@ -65,7 +68,7 @@ func cases() []Case {
 
 func (c Case) shape() Shape {
 	minutes := func(n int) time.Duration { return time.Duration(n) * time.Minute }
-	s := Shape{Name: c.Name, Build: minutes(c.Build), Probe: minutes(c.Build) / 3}
+	s := Shape{Name: c.Name, Build: minutes(c.Build), Probe: minutes(c.Build) / 3, Agents: c.Agents}
 	for _, pr := range c.PRs {
 		s.Queue = append(s.Queue, Queued{Number: pr.Number, At: minutes(pr.At), Breaks: pr.Breaks, Clash: pr.Clashes})
 		s.Hours = max(s.Hours, minutes(pr.At).Hours())

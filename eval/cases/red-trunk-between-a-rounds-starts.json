@@ -1,0 +1,8 @@
+{
+  "story": "Found by the simulator on 2026-11-12, in a storm on three agents that kept building deleted branches (4 slots of 12, probes, seed 91). A round's builds waited for agents and started one after another. The trunk went red by the clock between two of them, so the build without the suspect passed and the suspect's own failed, and an innocent pull request was ejected for a red trunk. Here one agent builds everything in turn: the candidate fails while the trunk is red, the round's build of the tip runs after the trunk heals, and the trunk is red again when the suspect's builds start. Nobody leaves, and the pull request lands once the trunk is green.",
+  "build": 25,
+  "agents": 1,
+  "prs": [{"number": 1, "at": 0}],
+  "red": [{"at": 0, "for": 20}, {"at": 50, "for": 60}],
+  "ejected": []
+}
