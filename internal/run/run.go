@@ -232,7 +232,9 @@ func (q *Queue) Tick() (err error) {
 				continue
 			}
 			if err := q.apply(r, a); err != nil {
-				return fmt.Errorf("%s: %w", a.Do, err)
+				err = fmt.Errorf("%s: %w", a.Do, err)
+				q.stopped(r, err)
+				return err
 			}
 		}
 		if len(rec.Actions) == 0 || q.DryRun {
@@ -240,6 +242,21 @@ func (q *Queue) Tick() (err error) {
 		}
 	}
 	return nil
+}
+
+// stopped says on every pinned pull request why the queue could not go on, once: the next
+// tick that can act writes its place over it.
+func (q *Queue) stopped(r *Read, why error) {
+	lines := strings.Split(strings.TrimSpace(why.Error()), "\n")
+	text := "the queue is stopped: " + strings.TrimSpace(lines[len(lines)-1])
+	if len(text) > 140 {
+		text = text[:140]
+	}
+	for _, pr := range r.World.PRs {
+		if pr.Pinned != "" && pr.Note != text {
+			q.Hub.SetStatus(pr.Pinned, q.Status, queue.Pending, text, "")
+		}
+	}
 }
 
 func (q *Queue) apply(r *Read, a queue.Action) error {

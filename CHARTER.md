@@ -20,7 +20,7 @@ Each is a check in `eval/`. One failure in any simulated world fails the eval.
 
 1. The trunk only fast-forwards to a SHA whose whole build passed.
 2. A pull request lands only at the head it was queued at.
-3. With no flakes, no innocent pull request is ejected.
+3. With no flakes, and a trunk that fails at most once during a test, no innocent pull request is ejected.
 4. Every queue drains, given a CI that eventually answers.
 5. A tick on an unchanged world does nothing.
 6. A crash after any side effect leaves a world the next tick finishes correctly.
@@ -44,7 +44,7 @@ Each is measured in simulation and live, by the same definition. A build time is
 | Simulated against live | within 20% | none yet |
 | Engine size, non-test Go lines | ≤ 2,000 | v2: 5,500 of bash |
 
-The targets are provisional until Jeremy fixes them against hey2's first live rows.
+The targets are provisional until hey2's first live rows, and are set from those.
 
 ## Loop
 

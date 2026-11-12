@@ -470,6 +470,33 @@ func TestAForcePushAfterItWasQueuedTakesAPullRequestOut(t *testing.T) {
 	}
 }
 
+func TestAQueueThatCannotPushSaysSoOnWhatWaits(t *testing.T) {
+	w := newWorld(t, `{}`)
+	p := w.queue(1, "a", "1\n")
+	// Git can't hold a branch named as the queue's own are prefixed, so every push is refused.
+	gittest.Sh(t, w.o.Bare, "git", "branch", "merge-queue", "main")
+	for i := 0; i < 2; i++ {
+		w.now = w.now.Add(2 * time.Minute)
+		if err := w.q.Tick(); err == nil {
+			t.Fatalf("the tick pushed past a branch named merge-queue\n%s", w.log)
+		}
+	}
+	said := 0
+	for _, s := range w.statuses[p.heads[0]] {
+		if s.Context == "merge-queue" && strings.HasPrefix(s.Description, "the queue is stopped: ") {
+			said++
+		}
+	}
+	if s := w.last(p.heads[0], "merge-queue"); said != 1 || s.State != "pending" || len(s.Description) > 140 {
+		t.Errorf("after two refused ticks #1's status is %q %q, said %d times", s.State, s.Description, said)
+	}
+	gittest.Sh(t, w.o.Bare, "git", "branch", "-D", "merge-queue")
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Errorf("#1 never landed once the branch was gone\n%s", w.log)
+	}
+}
+
 func TestARemovalRefusesTheLandingUnderWay(t *testing.T) {
 	w := newWorld(t, `{}`)
 	w.queue(1, "a", "1\n")
