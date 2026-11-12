@@ -44,6 +44,8 @@ type Case struct {
 	// Ejected is the pull requests that must leave as culprits and never reach the trunk.
 	// Every other one must land, and must never be ejected for any cause.
 	Ejected []int `json:"ejected"`
+	// Whole is the most whole builds the queue may begin, 0 for any number.
+	Whole int `json:"whole"`
 }
 
 // cases reads every case in eval/cases, in the order of their names.
@@ -88,6 +90,9 @@ func (c Case) play(m mutant, cfg queue.Config) []string {
 	s.plan, s.verify = m.plan, m.verify
 	s.Run()
 	wrong := slices.Clone(s.Broken)
+	if c.Whole > 0 && s.Whole > c.Whole {
+		wrong = append(wrong, fmt.Sprintf("it began %d whole builds, where %d are enough", s.Whole, c.Whole))
+	}
 	for _, pr := range c.PRs {
 		n, left := pr.Number, s.Left[pr.Number]
 		switch culprit := slices.Contains(c.Ejected, n); {

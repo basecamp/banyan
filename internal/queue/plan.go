@@ -118,6 +118,12 @@ func (p *plan) admit() {
 	}
 }
 
+// same says two chains merge the same heads in the same order, whatever attempts they were
+// built on.
+func same(a, b []Member) bool {
+	return slices.EqualFunc(a, b, func(x, y Member) bool { return x.Number == y.Number && x.Head == y.Head })
+}
+
 // queued says every member is admitted at the head that was merged.
 func (p *plan) queued(chain []Member) bool {
 	for _, m := range chain {
@@ -203,19 +209,16 @@ func (p *plan) read() {
 		}
 	}
 	for _, b := range free {
-		on := true
-		for i := range b.Chain {
-			on = on && b.Chain[i].Merge == p.chain[i].Merge
-		}
-		if !on {
+		if !same(b.Chain, p.chain[:len(b.Chain)]) {
 			p.drop(b)
 			continue
 		}
 		p.builds = append(p.builds, b)
 	}
 	if ks := p.stacked(); !p.held && len(ks) > 0 && p.red(ks[0]) {
-		r := &red{of: p.chain[ks[0]-1].Merge, base: trunk, chain: p.chain[:ks[0]]}
-		r.builds, _ = p.at(ks[0])
+		all, _ := p.at(ks[0])
+		last := all[len(all)-1]
+		r := &red{of: last.Tests(), base: trunk, chain: slices.Clone(last.Chain), builds: all}
 		p.weigh(r)
 		for _, b := range p.builds {
 			if len(b.Chain) > ks[0] {
@@ -223,6 +226,14 @@ func (p *plan) read() {
 			}
 		}
 		p.reds, p.chain, p.builds = append(p.reds, r), nil, nil
+	}
+	// A prefix stands as its newest attempt while that one may still pass, so whatever is
+	// stacked on it next is built on the commit that can land.
+	for _, k := range p.stacked() {
+		all, _ := p.at(k)
+		if b := all[len(all)-1]; b.Verdict == Pending || b.Verdict == Success {
+			p.chain[k-1].Merge = b.SHA
+		}
 	}
 
 	for _, r := range p.reds {
@@ -243,7 +254,7 @@ func (p *plan) read() {
 // under is the red candidate on the trunk that this candidate is stacked on, if any.
 func (p *plan) under(b Build) *red {
 	for _, r := range p.reds {
-		if k := len(r.chain); r.base == p.w.Trunk && len(b.Chain) > k && b.Chain[k-1].Merge == r.of {
+		if k := len(r.chain); r.base == p.w.Trunk && len(b.Chain) > k && same(b.Chain[:k], r.chain) {
 			return r
 		}
 	}
@@ -431,17 +442,20 @@ func (p *plan) fresh(commit func(n int) SHA) SHA {
 	}
 }
 
-// candidate is a whole build of prefix j that may land: the chain's own merge the first time,
-// and after that the same merge carrying a try number.
+// candidate is a whole build of prefix j that may land: its pull request merged onto what the
+// prefix below stands as, the first time plainly and after that carrying a try number.
 func (p *plan) candidate(j int) Build {
 	b := Build{Kind: Candidate, Base: p.w.Trunk, Chain: slices.Clone(p.chain[:j])}
-	m := p.chain[j-1]
+	merge := func(text string) SHA {
+		sha, _ := p.w.Repo.Merge(p.prefix(j-1), p.open[b.Chain[j-1].Number], text)
+		return sha
+	}
+	b.Chain[j-1].Merge = merge("")
 	b.SHA = p.fresh(func(n int) SHA {
 		if n == 1 {
-			return m.Merge
+			return b.Chain[j-1].Merge
 		}
-		sha, _ := p.w.Repo.Merge(p.prefix(j-1), p.open[m.Number], note(Candidate, 0, "", "", n))
-		return sha
+		return merge(note(Candidate, 0, "", "", n))
 	})
 	return b
 }

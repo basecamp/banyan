@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -698,5 +699,46 @@ func TestARedCandidateIsJudgedWhereItStoodAfterTheTrunkMovesOn(t *testing.T) {
 	}
 	if left := w.o.Branches("merge-queue/"); len(left) != 0 {
 		t.Errorf("branches left behind: %v", left)
+	}
+}
+
+func TestAPullRequestQueuedBehindABuildBegunAgainIsBuiltOnIt(t *testing.T) {
+	w := newWorld(t, `{"slots": 2}`)
+	failed, first, second := false, false, true
+	w.red = func(sha string) bool {
+		flake := !failed && w.o.Holds(sha, "a")
+		failed = failed || flake
+		return flake
+	}
+	w.slow = func(sha string) bool {
+		if w.o.Holds(sha, "b") {
+			return second
+		}
+		return first
+	}
+	holding := func() (shas []string) {
+		for _, sha := range w.o.Branches("merge-queue/") {
+			if w.o.Holds(sha, "b") {
+				shas = append(shas, sha)
+			}
+		}
+		return shas
+	}
+	w.queue(1, "a", "1\n")
+	w.rounds(2) // its build failed, and the same tree then passed
+	first = true
+	w.round() // so it is built again to land
+	w.queue(2, "b", "2\n")
+	w.round()
+	behind := holding()
+	first = false
+	w.rounds(2)
+	if after := holding(); !w.landed(1) || len(behind) != 1 || !slices.Equal(behind, after) {
+		t.Fatalf("#1 landed %v, and #2's build was %v before and is %v after\n%s", w.landed(1), behind, after, w.log)
+	}
+	second = false
+	w.rounds(2)
+	if !w.landed(2) {
+		t.Errorf("#2 did not land\n%s", w.log)
 	}
 }

@@ -1,0 +1,8 @@
+{
+  "story": "hey2, 2026-11-12. #1859's first build flaked, the same tree passed when built again, and #1859 was built once more to land. #1755 was queued while that last build ran. The queue merged it onto the build of #1859 that had failed, not the one running, so when #1859 landed #1755's build stood on a commit the trunk never held: it was thrown away 22 minutes in and begun again. A pull request queued behind a build that was begun again is built on that build.",
+  "build": 30,
+  "prs": [{"number": 1859, "at": 0}, {"number": 1755, "at": 60}],
+  "builds": [{"takes": 7, "flakes": true}],
+  "ejected": [],
+  "whole": 6
+}

@@ -16,7 +16,7 @@ Commits are deterministic. A merge is built from its parents, the head it merges
 
 The chain is the admitted pull requests merged one onto the next on the tip. Prefix j is the tip plus the first j of them; prefix 0 is the tip alone.
 
-A candidate is a whole build of a prefix. A new candidate stacks on the last whenever a slot is free, adding up to `max_batch` pull requests. With `max_batch: 1` every prefix is built; with a large one only every Nth is.
+A candidate is a whole build of a prefix. A new candidate stacks on the last whenever a slot is free, adding up to `max_batch` pull requests. It is merged onto the newest build of the prefix below that may still pass, so a pull request queued behind a build that was begun again is built on the commit that can land. With `max_batch: 1` every prefix is built; with a large one only every Nth is.
 
 ## Landing
 
