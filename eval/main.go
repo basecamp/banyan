@@ -29,13 +29,13 @@ import (
 // The shapes the indicators are measured on. Each rate is an estimate until `banyan report`
 // replaces it with a measured one.
 //
-// hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. Whether the pipeline
-// cancels a build whose branch is deleted is assumed, not measured. hey-native-apps is moving
-// to a CI nobody has measured yet, so its pool has no limit.
+// hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. The pipeline does not
+// cancel a build whose branch is deleted. hey-native-apps is moving to a CI nobody has
+// measured yet, so its pool has no limit.
 var shapes = []Shape{
 	{Name: "hey2", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
-		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
+		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
 		Break: 0.015, Clash: 0.005, Conflict: 0.08, Ahead: 0.03, Lost: 0.005, Errored: 0.01,
 		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1},
