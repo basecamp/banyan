@@ -44,8 +44,8 @@ func (p *pool) draw(after time.Duration) {
 	}
 }
 
-// advance plays the pool up to a time: builds end, the other builds come, and each freed
-// agent goes to the build that has waited longest.
+// advance plays the pool up to a time: builds end, the queue's builds and the other builds
+// come, and each free agent goes to the build that came first.
 func (p *pool) advance(to time.Duration) {
 	for {
 		first := -1
@@ -54,30 +54,44 @@ func (p *pool) advance(to time.Duration) {
 				first = i
 			}
 		}
+		at, ends, came := p.next, first >= 0 && p.running[first].ends <= p.next, false
+		if ends {
+			at = p.running[first].ends
+		}
+		if len(p.waiting) > 0 && len(p.running) < p.shape.Agents && p.waiting[0].came < at {
+			at, ends, came = p.waiting[0].came, false, true
+		}
 		switch {
-		case first >= 0 && p.running[first].ends <= min(to, p.next):
-			at := p.running[first].ends
+		case at > to:
+			p.Busy = append(p.Busy, len(p.running))
+			return
+		case ends:
 			p.running = slices.Delete(p.running, first, first+1)
-			p.start(at)
-		case p.next <= to:
+		case !came:
 			for n := 0; n == 0 || p.rng.Float64() < 1-1/max(p.shape.Burst, 1); n++ {
 				for len(p.Came) <= int(p.next/time.Hour) {
 					p.Came = append(p.Came, 0)
 				}
 				p.Came[len(p.Came)-1]++
-				p.waiting = append(p.waiting, &job{came: p.next, hold: p.shape.Hold})
+				p.line(&job{came: p.next, hold: p.shape.Hold})
 			}
-			p.start(p.next)
 			p.draw(p.next)
-		default:
-			p.Busy = append(p.Busy, len(p.running))
-			return
 		}
+		p.start(at)
 	}
 }
 
+// line puts a build in the line for an agent, behind every build that came before it.
+func (p *pool) line(j *job) {
+	i := len(p.waiting)
+	for i > 0 && p.waiting[i-1].came > j.came {
+		i--
+	}
+	p.waiting = slices.Insert(p.waiting, i, j)
+}
+
 func (p *pool) start(at time.Duration) {
-	for len(p.waiting) > 0 && len(p.running) < p.shape.Agents {
+	for len(p.waiting) > 0 && p.waiting[0].came <= at && len(p.running) < p.shape.Agents {
 		j := p.waiting[0]
 		p.waiting = p.waiting[1:]
 		j.ends = at + j.hold
@@ -90,10 +104,9 @@ func (p *pool) start(at time.Duration) {
 	}
 }
 
-// add queues one of the queue's builds for an agent.
+// add puts one of the queue's builds in the line from the moment the CI takes it up.
 func (p *pool) add(b *simBuild, hold, at time.Duration) {
-	p.waiting = append(p.waiting, &job{build: b, came: at, hold: hold})
-	p.start(at)
+	p.line(&job{build: b, came: at, hold: hold})
 }
 
 // cancel stops one of the queue's builds, wherever it is, and frees its agent.

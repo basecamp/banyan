@@ -14,10 +14,10 @@ import (
 //
 //   - The highest prefix whose whole build passed lands, with everything under it.
 //   - A red candidate at the bottom of the chain is set aside with its pull requests, and the
-//     chain goes on without them. It is narrowed by rounds of builds of its prefixes, begun
-//     together. A pull request leaves only when, in one round, the prefix below it passed and
-//     its own failed, and its own has failed twice.
-//   - A round in which nothing passed, the tip included, is a red trunk: nobody is blamed.
+//     chain goes on without them. Rounds of builds of its prefixes narrow it to one pull
+//     request, which leaves only after a fair test: its prefix failed, the prefix below it
+//     passed in a later round, and its own failed again in a later round still.
+//   - A tip that fails is a red trunk: nobody is blamed.
 func Plan(w World, c Config) []Action {
 	p := &plan{w: w, c: c, open: map[int]PR{}, waits: map[int]string{}}
 	p.admit()
@@ -56,27 +56,25 @@ type red struct {
 	of     SHA // the prefix it tests, which names it whatever attempt was built
 	base   SHA
 	chain  []Member
-	builds []Build // its attempts, and the rounds run on it
-	sha    SHA     // the attempt that failed last
+	builds []Build         // its attempts, and the rounds run on it
+	rounds map[int][]Build // the same by round
+	sha    SHA             // the attempt that failed last
 
-	// What the rounds say so far: the culprit is in prefixes lo+1 to hi.
-	lo, hi    int
-	fails     map[int]int
-	last      int // the newest round
-	pushed    time.Time
-	proof     []SHA
-	running   bool // a round's build has no verdict yet
-	confirmed bool // the last round had a pass below a failure, and they ran together
-	none, tip bool // nothing passed in the last round, and the tip failed in it
-	flake     bool // probes passed on the red tree itself
-	cleared   bool // a whole build of the red tree passed
-	void      bool // the last round lost a build
-	whole     bool // rounds are whole builds, not probes
-	passed    bool // a candidate stacked on it passed, so it lands
-	backed    bool // a candidate stacked on it failed too, as this tick found
+	// What the rounds say so far: the culprit is in prefixes lo+1 to hi, and lo is -1 while
+	// nothing has passed.
+	lo, hi  int
+	last    int // the newest round
+	pushed  time.Time
+	running bool // a round's build has no verdict yet
+	tip     bool // the tip failed in the last round that passed nothing
+	flake   bool // probes passed on the red tree itself
+	cleared bool // a whole build of the red tree passed
+	void    bool // the last round lost a build
+	whole   bool // rounds are whole builds, not probes
+	passed  bool // a candidate stacked on it passed, so it lands
 }
 
-func (r *red) suspects() []Member { return r.chain[r.lo:r.hi] }
+func (r *red) suspects() []Member { return r.chain[max(r.lo, 0):r.hi] }
 
 func (p *plan) act(a Action) { p.acts = append(p.acts, a) }
 
@@ -183,12 +181,12 @@ func (p *plan) read() {
 		p.weigh(r)
 		// It goes when a pull request in the trees its rounds build has left, when a whole
 		// build of the red tree passed, and when its base is no longer the tip and fails by itself.
-		if len(r.chain) == 0 || !p.queued(r.chain[:r.hi]) || r.cleared || (r.none && r.tip && r.base != trunk) {
+		if len(r.chain) == 0 || !p.queued(r.chain[:r.hi]) || r.cleared || (r.tip && r.base != trunk) {
 			p.drop(r.builds...)
 			continue
 		}
 		p.reds = append(p.reds, r)
-		p.held = p.held || (r.none && r.tip)
+		p.held = p.held || r.tip
 	}
 
 	var free []Build
@@ -248,12 +246,11 @@ func (p *plan) under(b Build) *red {
 	return nil
 }
 
-// stackedOn keeps a candidate stacked on a red one only while it may still land it: not once
-// it has failed, and not once a round has shown the red to be real. Where probes will say
-// which within a fraction of a build, the chain waits for them before it goes on beside it.
+// stackedOn keeps a candidate stacked on a red one while it may still land it, which is until
+// it fails. Where probes will say within a fraction of a build whether the red is real, the
+// chain waits for them before it goes on beside it.
 func (p *plan) stackedOn(r *red, b Build) {
-	if b.Verdict == Failure || b.Verdict == Error || (b.Verdict == Pending && r.confirmed) {
-		r.backed = r.backed || b.Verdict == Failure
+	if b.Verdict == Failure || b.Verdict == Error {
 		p.drop(b)
 		return
 	}
@@ -262,95 +259,94 @@ func (p *plan) stackedOn(r *red, b Build) {
 	p.above = append(p.above, b)
 }
 
-// weigh reads a red candidate's rounds in order, and leaves what they say on it.
+// weigh reads a red candidate's rounds in order, up to the first with a build still running,
+// and leaves what they say on it.
 func (p *plan) weigh(r *red) {
 	k := len(r.chain)
-	r.lo, r.hi, r.fails, r.whole = 0, k, map[int]int{}, !p.c.Probes
-	rounds := map[int][]Build{}
+	r.lo, r.hi, r.whole, r.rounds = -1, k, !p.c.Probes, map[int][]Build{}
 	for _, b := range r.builds {
-		switch {
-		case b.Round > 0:
-			rounds[b.Round] = append(rounds[b.Round], b)
-			r.last = max(r.last, b.Round)
-			r.whole = r.whole || (b.Kind == Check && b.Verdict == Failure)
-		case b.Verdict == Failure:
-			r.fails[k]++
+		if b.Round == 0 && b.Verdict == Failure {
 			r.sha = b.SHA
 		}
+		if b.Round > 0 && b.Pushed.After(r.pushed) {
+			r.pushed = b.Pushed
+		}
+		r.rounds[b.Round] = append(r.rounds[b.Round], b)
+		r.last = max(r.last, b.Round)
 	}
 	for n := 1; n <= r.last; n++ {
-		g, low := -1, -1
-		tip := false
-		r.void = false
-		var passes []Build // the builds of prefix g that passed
-		for _, b := range rounds[n] {
-			if b.Pushed.After(r.pushed) {
-				r.pushed = b.Pushed
-			}
-			switch j := len(b.Chain); b.Verdict {
-			case Pending:
+		// The highest prefix that passed in this round, and the lowest above it that failed.
+		g, low, probe := -1, -1, false
+		r.void = len(r.rounds[n]) == 0
+		for _, b := range r.rounds[n] {
+			switch j := len(b.Chain); {
+			case b.Verdict == Pending:
 				r.running = true
 				return
-			case Error:
+			case b.Verdict == Error:
 				r.void = true
-			case Failure:
-				tip = tip || j == 0
-			case Success:
-				if j > g {
-					g, passes = j, nil
-				}
-				if j == g {
-					passes = append(passes, b)
-				}
+			case b.Verdict == Success:
+				g = max(g, j)
 			}
+			probe = b.Kind == Probe
 		}
-		if r.void || len(rounds[n]) == 0 {
-			continue
-		}
-		if g < 0 {
-			r.none, r.tip, r.flake, r.confirmed, r.lo, r.hi = true, tip, false, false, 0, k
-			continue
-		}
-		for _, b := range rounds[n] {
+		for _, b := range r.rounds[n] {
 			if j := len(b.Chain); b.Verdict == Failure && j > g && (low < 0 || j < low) {
 				low = j
 			}
 		}
-		r.none, r.tip, r.flake, r.cleared = false, false, g >= k && passes[0].Kind == Probe, g >= k && passes[0].Kind != Probe
-		if g >= k {
+		switch {
+		case r.void:
 			continue
-		}
-		r.lo, r.confirmed = g, false
-		if low < 0 {
-			if r.hi <= r.lo {
-				r.hi = k
-			}
+		case g >= k:
+			r.flake, r.cleared = probe, !probe
 			continue
+		case g >= 0:
+			r.tip, r.lo = false, max(r.lo, g)
 		}
-		r.hi = low
-		// A pass below a failure proves the red real only if one red spell cannot explain
-		// both: the failures began at the same moment as the pass, or on both sides of
-		// it, so a spell that caught them caught the pass too. Builds that waited their
-		// turn for an agent may not have, and then the next round builds them again.
-		for _, ok := range passes {
-			var before, after bool
-			var failed SHA
-			for _, b := range rounds[n] {
-				if len(b.Chain) == low && b.Verdict == Failure {
-					before, after = before || !b.began().After(ok.began()), after || !b.began().Before(ok.began())
-					failed = b.SHA
-				}
-			}
-			if before && after {
-				r.confirmed, r.proof = true, []SHA{ok.SHA, failed}
-			}
-		}
-		for _, b := range rounds[n] {
-			if len(b.Chain) == low && b.Verdict == Failure {
-				r.fails[low]++
-			}
+		switch {
+		case low < 0 && r.hi <= r.lo:
+			r.hi = k
+		case low < 0:
+		case low <= r.lo, low == 0, !probe && !r.whole:
+			// The tip failed, or a prefix that had passed, or a whole build where probes
+			// had passed: nothing the rounds have said so far holds.
+			r.lo, r.hi, r.tip, r.whole, r.flake = -1, k, low == 0, r.whole || !probe, false
+		case low < r.hi || r.hi <= r.lo:
+			r.hi = low
 		}
 	}
+}
+
+// test is how far the fair test of the pull request that prefix s adds has got: the builds,
+// in order, of its prefix that failed, of the prefix below that passed in the next round, and
+// of its own that failed in the round after that. A round is pushed only once CI has begun
+// every build of the round before, so each began after the last, and a trunk or a CI that
+// was broken for a while and failed both would have failed the pass between them. A test
+// that is not whole counts only if it ends at the newest round, where it can still go on.
+// With hope, a build still running counts as the verdict the test wants of it.
+func (r *red) test(s int, hope bool) (t []Build) {
+	for n := 1; n <= r.last && len(t) < 3; n++ {
+		for c := min(n, 3); c > 0; c-- {
+			t = nil
+			for i := 0; i < c; i++ {
+				j, want := s-i%2, Failure
+				if i == 1 {
+					want = Success
+				}
+				for _, b := range r.rounds[n-c+1+i] {
+					if len(t) == i && len(b.Chain) == j && (b.Verdict == want || (hope && b.Verdict == Pending)) {
+						t = append(t, b)
+					}
+				}
+			}
+			if len(t) == c {
+				break
+			}
+			t = nil
+		}
+	}
+	return t
 }
 
 // stacked is the lengths of the prefixes of the chain that hold a candidate, lowest first.
@@ -390,17 +386,16 @@ func (p *plan) prefix(j int) SHA {
 	return p.chain[j-1].Merge
 }
 
-// judge ejects the pull request a red candidate's rounds have proved the culprit, and says
-// whether it ejected any.
+// judge ejects the pull request that a red candidate's rounds have put to a fair test, and
+// says whether it ejected any.
 func (p *plan) judge() bool {
 	ejected := false
 	for _, r := range p.reds {
-		if r.running || r.passed || r.hi != r.lo+1 || !r.confirmed || r.fails[r.hi] < 2 {
-			continue
+		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 {
+			p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: []SHA{t[1].SHA, t[0].SHA, t[2].SHA},
+				Text: fmt.Sprintf("the build with it failed, the build without it then passed (%.12s), and the build with it failed again", t[1].SHA)})
+			ejected = true
 		}
-		p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: append(r.proof, r.sha),
-			Text: fmt.Sprintf("the build of the queue up to it failed twice, and the build without it passed (%.12s)", r.proof[0])})
-		ejected = true
 	}
 	return ejected
 }
@@ -468,40 +463,38 @@ func (p *plan) retry() {
 // rounds begins the next round of each red candidate that is ready for one.
 func (p *plan) rounds() {
 	for _, r := range p.reds {
-		wait := ((r.none && r.tip) || r.void) && p.w.Now.Sub(r.pushed) < p.c.Recheck
-		if r.running || r.passed || wait {
-			continue
-		}
-		k, whole := len(r.chain), r.whole
+		k, whole, low := len(r.chain), r.whole, max(r.lo, 0)
+		span := r.hi - low
+		// A span of one, and a span that one round of whole builds reaches all of, is put
+		// to the test at once: each round is the next build of every suspect's test, pushed
+		// as soon as CI has begun the round before, whatever that round will say.
+		test := span == 1 || (whole && span <= max(p.c.Slots, 2))
+		begun := !slices.ContainsFunc(r.rounds[r.last], func(b Build) bool { return !b.begun() })
 		var points []int
-		switch span := r.hi - r.lo; {
+		switch {
+		case r.passed, (r.tip || r.void) && p.w.Now.Sub(r.pushed) < p.c.Recheck, r.running && (r.flake || r.tip || !test || !begun):
+			continue
 		case r.flake:
 			// The probes passed on the red tree itself, so a whole build of it decides.
 			points, whole = []int{k}, true
-		case r.none:
+		case r.tip:
 			points = []int{0, k}
+		case test:
+			for s := r.hi; s > low; s-- {
+				if n := len(r.test(s, true)); n < 3 && !slices.Contains(points, s-n%2) {
+					points = append(points, s-n%2)
+				}
+			}
 		default:
-			points = []int{r.lo}
-			n := min(max(p.c.Slots, 2)-1, span-1)
-			if !whole {
-				n = span - 1
+			n := span - 1
+			if whole {
+				n = min(max(p.c.Slots, 2)-1, n)
 			}
 			for i := 1; i <= n; i++ {
-				points = append(points, r.lo+i*span/(n+1))
+				points = append(points, low+i*span/(n+1))
 			}
-			// A round that can convict builds the top of the span, which has failed before,
-			// and a round of whole builds that reaches every prefix builds each of them
-			// twice, so that it convicts by itself wherever the culprit is. The builds go
-			// from the top down and up again, so that where they start one after another
-			// each pass has a failure above it on both sides. The top is built the second
-			// time only when no failed build stacked on the red candidate bears it out.
-			if span == 1 || (whole && n == span-1) {
-				down := slices.Clone(points[1:])
-				slices.Reverse(down)
-				points = slices.Concat([]int{r.hi}, down, points)
-				if !r.backed {
-					points = append(points, r.hi)
-				}
+			if r.lo < 0 {
+				points = append(points, 0)
 			}
 		}
 		for _, j := range points {

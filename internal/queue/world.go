@@ -72,10 +72,8 @@ type Build struct {
 	Of      SHA
 	Verdict Verdict
 	Pushed  time.Time
-	// Started is when CI began running the build, if it made the build wait for an agent:
-	// zero while it waits, zero where CI began it as soon as it was pushed, and always zero
-	// where the repository's CI does not say. The planner compares these times exactly, and
-	// takes builds pushed together with no Started to have begun together.
+	// Started is when CI began running the build: zero until it has, and always zero where
+	// the repository's CI does not say. The planner reads only whether it is set.
 	Started time.Time
 }
 
@@ -87,13 +85,8 @@ func (b Build) Tests() SHA {
 	return b.Chain[len(b.Chain)-1].Merge
 }
 
-// began is when CI began running the build, or its push where CI does not say.
-func (b Build) began() time.Time {
-	if b.Started.IsZero() {
-		return b.Pushed
-	}
-	return b.Started
-}
+// begun says CI has begun running the build: it says so, or it has reported on it.
+func (b Build) begun() bool { return !b.Started.IsZero() || b.Verdict != Pending }
 
 // above is the part of the build's chain above the trunk, and whether the trunk is on it.
 func (b Build) above(trunk SHA) ([]Member, bool) {

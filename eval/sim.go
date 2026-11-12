@@ -49,6 +49,10 @@ type Shape struct {
 	Cancels bool
 	// Silent says the CI does not report when a build started.
 	Silent bool
+	// Instant says the CI begins every build the moment it is pushed, which no real one does.
+	// Otherwise it takes a build up a few seconds after the push, and builds pushed together
+	// in no order: that is the order they join the line for an agent in.
+	Instant bool
 }
 
 // Queued is a pull request a case queues by hand, with its hidden facts.
@@ -400,7 +404,7 @@ func (s *Sim) World() queue.World {
 	for _, sha := range s.shas() {
 		sb := s.builds[sha]
 		b := sb.Build
-		if sb.end != never && !s.shape.Silent {
+		if sb.end != never && sb.start <= s.now && !s.shape.Silent {
 			b.Started = s.epoch.Add(sb.start)
 		}
 		w.Builds = append(w.Builds, b)
@@ -498,10 +502,10 @@ func (s *Sim) push(b queue.Build) {
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
 	}
-	sb := &simBuild{Build: b, start: s.now, end: s.now + d, lost: s.chance(s.shape.Lost)}
+	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
 	if s.pool != nil {
 		sb.end = never
-		s.pool.add(sb, d, s.now)
+		s.pool.add(sb, d-s.pickup(b.SHA), sb.start)
 	}
 	if s.shape.Script != nil {
 		sb.flake = s.started < len(s.shape.Script) && s.shape.Script[s.started]
@@ -510,6 +514,17 @@ func (s *Sim) push(b queue.Build) {
 	}
 	s.started++
 	s.builds[b.SHA] = sb
+}
+
+// pickup is how long after its push the CI takes a build up: one to ten seconds, by the commit
+// alone, so a world replays exactly. It is part of the build's time, not added to it.
+func (s *Sim) pickup(sha queue.SHA) time.Duration {
+	if s.shape.Instant {
+		return 0
+	}
+	var n int64
+	fmt.Sscanf(sha[:min(len(sha), 4)], "%x", &n)
+	return time.Second + time.Duration(n%9000)*time.Millisecond
 }
 
 func (s *Sim) eject(a queue.Action) {
@@ -529,6 +544,9 @@ func (s *Sim) eject(a queue.Action) {
 		p.Head = fmt.Sprintf("%s+", p.Head)
 		s.byHead[p.Head] = p.Number
 	case "culprit":
+		if !s.fair(a) {
+			s.broke(8, "#%d was blamed with no fair test in %.7s", a.PR, a.Evidence)
+		}
 		if s.culprit(p) {
 			p.gone = true
 			s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
@@ -536,23 +554,40 @@ func (s *Sim) eject(a queue.Action) {
 		}
 		s.Wrong++
 		p.back = s.now + 10*time.Minute
-		// The failures it was ejected for all began while the trunk's own tip failed.
-		under := s.red(s.holds[s.trunk], s.now)
-		for _, sha := range a.Evidence {
-			if b := s.builds[sha]; b != nil && b.Verdict == queue.Failure {
-				under = s.red(s.holds[s.trunk], b.start)
-				if !under {
-					break
-				}
-			}
-		}
-		if under {
-			s.broke(8, "#%d was ejected while the trunk's own tip fails", a.PR)
-		}
 		if !s.flakes() {
 			s.broke(3, "#%d is innocent and was ejected with no flake in play", a.PR)
 		}
 	}
+}
+
+// fair says an ejection's evidence is a fair test of its pull request, by when CI really began
+// each build: the first is a build that passed without it, and among the rest are two builds
+// of that tree with it that failed, one begun no later than the pass and one no earlier.
+func (s *Sim) fair(a queue.Action) bool {
+	if len(a.Evidence) == 0 || s.builds[a.Evidence[0]] == nil {
+		return false
+	}
+	pass := s.builds[a.Evidence[0]]
+	without := s.holds[pass.SHA]
+	var failed, before, after int
+	for _, sha := range a.Evidence[1:] {
+		b, with := s.builds[sha], s.holds[sha]
+		same := b != nil && b.Verdict == queue.Failure && with[a.PR] && len(with) == len(without)+1
+		for n := range without {
+			same = same && with[n]
+		}
+		if !same {
+			continue
+		}
+		failed++
+		if b.start <= pass.start {
+			before++
+		}
+		if b.start >= pass.start {
+			after++
+		}
+	}
+	return pass.Verdict == queue.Success && !without[a.PR] && failed >= 2 && before >= 1 && after >= 1
 }
 
 func (s *Sim) land(a queue.Action) {
