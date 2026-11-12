@@ -8,6 +8,7 @@
 //
 //	go run ./eval                    check against the scoreboard
 //	go run ./eval -record "<note>"   append this run's rows to the scoreboard
+//	go run ./eval -try "<dials>"     measure a shape under other dials, and record nothing
 package main
 
 import (
@@ -94,6 +95,18 @@ func waited(minutes []float64) agentWait {
 }
 
 const seeds = 200
+
+const columns = "%-16s %-13s %7s %9s %8s %8s %9s %10s %8s\n"
+
+// print is the score's line in a run's output, and under it what the queue costs the other
+// builds, where the shape's pool has a limit.
+func (sc Score) print(shape Shape) {
+	fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.BlameP90, sc.Builds, sc.PerHour)
+	if shape.Agents > 0 {
+		fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
+			sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
+	}
+}
 
 // each runs fn for 1..n on every core and returns the results in order, so a run's output
 // does not depend on scheduling.
@@ -315,6 +328,7 @@ func main() {
 	record := flag.String("record", "", "append this run to the scoreboard, with this note")
 	baselines := flag.Bool("baselines", false, "measure the baselines too, as -record does")
 	trace := flag.String("trace", "", `replay one world and print what the queue did: "<shape> <slots> <batch> <probes> <seed>"`)
+	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes>; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	flag.Parse()
 	if *trace != "" {
@@ -323,6 +337,23 @@ func main() {
 	}
 	if *fitted {
 		fit()
+		return
+	}
+	if *try != "" {
+		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "blame90", "builds/pr", "per hour")
+		for _, spec := range strings.Split(*try, ";") {
+			var name string
+			var slots, batch int
+			var probes bool
+			fmt.Sscan(spec, &name, &slots, &batch, &probes)
+			for _, shape := range shapes {
+				if shape.Name == name {
+					sc, _ := measure(shape, dials(slots, batch, probes))
+					sc.Shape, sc.Config = name, fmt.Sprintf("%d of %d", slots, batch)
+					sc.print(shape)
+				}
+			}
+		}
 		return
 	}
 	failed := false
@@ -394,7 +425,7 @@ func main() {
 	lines := engineLines()
 	last := recorded()
 	var rows []string
-	fmt.Printf("\n%-16s %-13s %7s %9s %8s %8s %9s %10s %8s\n", "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "blame90", "builds/pr", "per hour")
+	fmt.Printf("\n"+columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "blame90", "builds/pr", "per hour")
 	for _, shape := range shapes {
 		for _, cfg := range configs(shape) {
 			if cfg.Name != "challenger" && !*baselines {
@@ -406,11 +437,7 @@ func main() {
 				fmt.Printf("  %s broke %d invariants, the first: %s\n", cfg.Name, len(br), br[0])
 				failed = true
 			}
-			fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.BlameP90, sc.Builds, sc.PerHour)
-			if shape.Agents > 0 {
-				fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
-					sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
-			}
+			sc.print(shape)
 			rows = append(rows, sc.row(lines, *record))
 			if was, ok := last[sc.Shape+"\t"+sc.Config]; ok && cfg.Name == "challenger" && *record == "" {
 				for _, w := range worse(was, sc) {
