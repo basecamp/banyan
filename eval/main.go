@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,16 +31,30 @@ import (
 // The shapes the indicators are measured on. Each rate is an estimate until `banyan report`
 // replaces it with a measured one.
 //
-// hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. The pipeline does not
-// cancel a build whose branch is deleted. hey-native-apps is moving to a CI nobody has
+// hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. Its pipeline cancels a
+// build whose branch is deleted, since 2026-11-12. The shape is hey2 with every landing in the
+// queue but a rare merge by hand; `stages` holds the shapes on the way there. hey-native-apps is moving to a CI nobody has
 // measured yet, so its pool has no limit and is taken to cancel.
 var shapes = []Shape{
 	{Name: "hey2", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
-		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
-		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute},
+		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 0.1,
+		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
 		Break: 0.015, Clash: 0.005, Conflict: 0.08, Ahead: 0.03, Lost: 0.005, Errored: 0.01,
 		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1, Cancels: true},
+}
+
+// stages are the shapes of a repository on its way to the queue, which -try measures. In hey2's
+// open lane the merge button still lands three pull requests an hour on the trunk, as its
+// history from 2026-11-05 to 2026-11-12 shows, and only one lane's pull requests are queued.
+var stages = []Shape{
+	{Name: "hey2-open", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
+		Lost: 0.005, Errored: 0.01, Backlog: 3, Arrivals: 1, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 3,
+		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
+	// The factory's landings go through the queue, and everyone else still merges by hand.
+	{Name: "hey2-mostly", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
+		Lost: 0.005, Errored: 0.01, Backlog: 9, Arrivals: 3, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 1.2,
+		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 }
 
 // storm is the world the invariants are held in: everything that can go wrong, often.
@@ -359,7 +374,7 @@ func main() {
 			var slots, batch int
 			var probes bool
 			fmt.Sscan(spec, &name, &slots, &batch, &probes)
-			for _, shape := range shapes {
+			for _, shape := range slices.Concat(shapes, stages) {
 				if shape.Name == name {
 					sc, _ := measure(shape, dials(slots, batch, probes))
 					sc.Shape, sc.Config = name, fmt.Sprintf("%d of %d", slots, batch)
