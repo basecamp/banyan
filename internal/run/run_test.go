@@ -37,6 +37,10 @@ type pull struct {
 	base     string
 	comments []comment
 	merged   bool
+	// threads is its review threads, true where resolved, and unread is how many more GitHub
+	// holds past the page it returns.
+	threads []bool
+	unread  int
 }
 
 type comment struct {
@@ -72,6 +76,10 @@ func (h *hub) last(sha, context string) status {
 
 func (h *hub) node(p *pull) map[string]any {
 	var labels, events, commits []any
+	threads := []any{}
+	for _, resolved := range p.threads {
+		threads = append(threads, map[string]any{"isResolved": resolved})
+	}
 	for name, at := range p.labels {
 		labels = append(labels, map[string]any{"name": name})
 		events = append(events, map[string]any{"createdAt": at, "label": map[string]any{"name": name}})
@@ -82,7 +90,7 @@ func (h *hub) node(p *pull) map[string]any {
 	return map[string]any{"number": p.number, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base,
 		"headRefName": fmt.Sprintf("pr%d", p.number), "headRepositoryOwner": map[string]any{"login": "o"},
 		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": map[string]any{"nodes": events},
-		"reviewThreads": map[string]any{"nodes": []any{}}, "commits": map[string]any{"nodes": commits}}
+		"reviewThreads": map[string]any{"totalCount": len(p.threads) + p.unread, "nodes": threads}, "commits": map[string]any{"nodes": commits}}
 }
 
 func (h *hub) rollup(sha string) any {
@@ -462,6 +470,29 @@ func TestAddRefusesInOneLineAndTwiceIsOnce(t *testing.T) {
 	w.rounds(3)
 	if e, _ := w.q.Entries(3); len(e) != 1 || e[0].State != "landed" {
 		t.Errorf("#3 after its checks passed: %+v\n%s", e, w.log)
+	}
+}
+
+func TestAnUnresolvedThreadKeepsAPullRequestOutAndSoDoThreadsTheQueueCannotRead(t *testing.T) {
+	w := newWorld(t, `{"threads": true}`)
+	open := w.open(1, "a", "1\n")
+	open.threads = []bool{true, false}
+	if _, err := w.q.Add(1, false); err == nil || err.Error() != "refused #1: ready: 1 review threads are unresolved" {
+		t.Errorf("an unresolved thread: %v", err)
+	}
+	// GitHub hands over the first hundred threads, and any past them may be unresolved.
+	long := w.open(2, "b", "2\n")
+	long.threads, long.unread = []bool{true}, 1
+	if _, err := w.q.Add(2, false); err == nil || err.Error() != "refused #2: ready: it has more review threads than the queue reads" {
+		t.Errorf("threads past the page: %v", err)
+	}
+	open.threads[1] = true
+	if _, err := w.q.Add(1, false); err != nil {
+		t.Errorf("every thread resolved: %v", err)
+	}
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Errorf("#1 never landed\n%s", w.log)
 	}
 }
 

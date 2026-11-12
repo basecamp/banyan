@@ -205,8 +205,11 @@ type pullNode struct {
 			Label     struct{ Name string }
 		}
 	} `json:"timelineItems"`
-	ReviewThreads struct{ Nodes []struct{ IsResolved bool } }
-	Commits       struct {
+	ReviewThreads struct {
+		TotalCount int
+		Nodes      []struct{ IsResolved bool }
+	}
+	Commits struct {
 		Nodes []struct {
 			Commit struct {
 				Oid    string
@@ -219,7 +222,7 @@ type pullNode struct {
 const pullFields = `number isDraft merged closed baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 50) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent { createdAt label { name } } } }
-	reviewThreads(first: 100) { nodes { isResolved } }
+	reviewThreads(first: 100) { totalCount nodes { isResolved } }
 	commits(last: 20) { nodes { commit { oid ` + rollupFields + ` } } }`
 
 func (n Names) pull(node pullNode) Pull {
@@ -269,6 +272,9 @@ func (n Names) pull(node pullNode) Pull {
 		}
 		if open > 0 {
 			p.Wait = fmt.Sprintf("%d review threads are unresolved", open)
+		} else if node.ReviewThreads.TotalCount > len(node.ReviewThreads.Nodes) {
+			// One past the page read may be unresolved, so it waits rather than lands unread.
+			p.Wait = "it has more review threads than the queue reads"
 		}
 	}
 	return p
