@@ -222,6 +222,7 @@ func invariants(m mutant, worlds int) []string {
 		if m.unwaited && shape.Agents > 0 {
 			continue
 		}
+		shape.Instant = m.unwaited
 		for _, cfg := range kinds {
 			for i, s := range each(worlds, func(i int) *Sim {
 				s := NewSim(shape, cfg, int64(i))
@@ -248,7 +249,7 @@ func small(m mutant) []string {
 			for _, b := range kinds {
 				for _, c := range kinds {
 					for script := 0; script < 64; script++ {
-						shape := Shape{Name: "small", Build: 20 * time.Minute, Probe: 6 * time.Minute, Backlog: 3, Script: make([]bool, 6)}
+						shape := Shape{Name: "small", Build: 20 * time.Minute, Probe: 6 * time.Minute, Backlog: 3, Script: make([]bool, 6), Instant: m.unwaited}
 						for i := range shape.Script {
 							shape.Script[i] = script>>i&1 == 1
 						}

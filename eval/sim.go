@@ -49,6 +49,10 @@ type Shape struct {
 	Cancels bool
 	// Silent says the CI does not report when a build started.
 	Silent bool
+	// Instant says the CI begins every build the moment it is pushed, which no real one does.
+	// Otherwise it takes a build up a few seconds after the push, and builds pushed together
+	// in no order: that is the order they join the line for an agent in.
+	Instant bool
 }
 
 // Queued is a pull request a case queues by hand, with its hidden facts.
@@ -400,7 +404,7 @@ func (s *Sim) World() queue.World {
 	for _, sha := range s.shas() {
 		sb := s.builds[sha]
 		b := sb.Build
-		if sb.end != never && !s.shape.Silent {
+		if sb.end != never && sb.start <= s.now && !s.shape.Silent {
 			b.Started = s.epoch.Add(sb.start)
 		}
 		w.Builds = append(w.Builds, b)
@@ -498,10 +502,10 @@ func (s *Sim) push(b queue.Build) {
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
 	}
-	sb := &simBuild{Build: b, start: s.now, end: s.now + d, lost: s.chance(s.shape.Lost)}
+	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
 	if s.pool != nil {
 		sb.end = never
-		s.pool.add(sb, d, s.now)
+		s.pool.add(sb, d-s.pickup(b.SHA), sb.start)
 	}
 	if s.shape.Script != nil {
 		sb.flake = s.started < len(s.shape.Script) && s.shape.Script[s.started]
@@ -510,6 +514,17 @@ func (s *Sim) push(b queue.Build) {
 	}
 	s.started++
 	s.builds[b.SHA] = sb
+}
+
+// pickup is how long after its push the CI takes a build up: one to ten seconds, by the commit
+// alone, so a world replays exactly. It is part of the build's time, not added to it.
+func (s *Sim) pickup(sha queue.SHA) time.Duration {
+	if s.shape.Instant {
+		return 0
+	}
+	var n int64
+	fmt.Sscanf(sha[:min(len(sha), 4)], "%x", &n)
+	return time.Second + time.Duration(n%9000)*time.Millisecond
 }
 
 func (s *Sim) eject(a queue.Action) {
