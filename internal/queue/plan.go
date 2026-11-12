@@ -398,7 +398,13 @@ func (p *plan) judge() bool {
 		if r.running || r.passed || r.hi != r.lo+1 || !r.confirmed || r.fails[r.hi] < 2 {
 			continue
 		}
-		p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: append(r.proof, r.sha),
+		proof := r.proof[:1]
+		for _, b := range r.builds {
+			if at := len(r.chain); b.Verdict == Failure && ((b.Round > 0 && len(b.Chain) == r.hi) || (b.Round == 0 && r.hi == at)) {
+				proof = append(proof, b.SHA)
+			}
+		}
+		p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: proof,
 			Text: fmt.Sprintf("the build of the queue up to it failed twice, and the build without it passed (%.12s)", r.proof[0])})
 		ejected = true
 	}

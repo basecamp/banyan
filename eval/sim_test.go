@@ -39,7 +39,11 @@ func TestMutantsAreCaught(t *testing.T) {
 	for name, m := range mutants {
 		caught := 0
 		for seed := int64(1); seed <= 20 && caught == 0; seed++ {
-			s := NewSim(storm, dials(6, 1, false), seed)
+			shape := storm
+			if m.waits {
+				shape = tight()
+			}
+			s := NewSim(shape, dials(6, 1, false), seed)
 			s.plan, s.verify = m.plan, m.verify
 			s.Run()
 			caught += len(s.Broken)

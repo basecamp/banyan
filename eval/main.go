@@ -63,6 +63,14 @@ var storm = Shape{Name: "storm", Build: 25 * time.Minute, Probe: 8 * time.Minute
 	Backlog: 8, Arrivals: 6, Hours: 6, Moves: 1, Removals: 0.5, Outside: 0.4, Crash: 0.15, Race: 0.3, Cancels: true,
 	Episodes: []Episode{{At: time.Hour, For: 70 * time.Minute}, {At: 4 * time.Hour, NeedsFix: true, Fix: 20 * time.Minute}}}
 
+// tight is the storm on a pool of three agents that builds deleted branches to their end,
+// where builds wait their turn and outwait the timeout.
+func tight() Shape {
+	s := storm
+	s.Name, s.Agents, s.Others, s.Hold, s.Cancels = "storm on three agents", 3, 2, storm.Build, false
+	return s
+}
+
 type named struct {
 	Name string
 	queue.Config
@@ -202,16 +210,17 @@ func percentile(xs []float64, p int) float64 {
 var kinds = []queue.Config{dials(6, 1, false), dials(1, 1, false), dials(4, 12, true), dials(2, 24, false), dials(3, 6, true)}
 
 // invariants holds the planner to the charter in the storm, with and without flakes and on a
-// pool of three agents that builds deleted branches to their end, where builds wait their
-// turn and outwait the timeout, under each kind of configuration, and in every small world.
+// tight pool, under each kind of configuration, and in every small world.
 func invariants(m mutant, worlds int) []string {
 	var broken []string
-	calm, tight := storm, storm
+	calm := storm
 	calm.Name, calm.Flake, calm.ProbeFlake = "storm without flakes", 0, 0
-	tight.Name, tight.Agents, tight.Others, tight.Hold, tight.Cancels = "storm on three agents", 3, 2, storm.Build, false
-	for _, shape := range []Shape{storm, calm, tight} {
+	for _, shape := range []Shape{storm, calm, tight()} {
 		if m.uncrashed {
 			shape.Crash = 0
+		}
+		if m.unwaited && shape.Agents > 0 {
+			continue
 		}
 		for _, cfg := range kinds {
 			for i, s := range each(worlds, func(i int) *Sim {
@@ -273,6 +282,9 @@ type mutant struct {
 	// crashes marks a queue that is right until a tick dies partway, which is the sixth
 	// invariant's own failure. uncrashed plays it in worlds where no tick does.
 	crashes, uncrashed bool
+	// waits marks a queue that is right until a build waits to begin, which is what the
+	// eighth invariant's fair test is for. unwaited plays it in worlds where none does.
+	waits, unwaited bool
 }
 
 var mutants = map[string]mutant{
@@ -292,6 +304,14 @@ var mutants = map[string]mutant{
 				if b.Kind == queue.Candidate && b.Verdict == queue.Failure && len(b.Chain) > 0 {
 					return []queue.Action{{Do: "eject", PR: b.Chain[len(b.Chain)-1].Number, Cause: "culprit"}}
 				}
+			}
+			return queue.Plan(w, c)
+		}},
+	"blames whatever order a test's builds began in": {verify: queue.Verify, waits: true,
+		plan: func(w queue.World, c queue.Config) []queue.Action {
+			w.Builds = slices.Clone(w.Builds)
+			for i := range w.Builds {
+				w.Builds[i].Started = time.Time{}
 			}
 			return queue.Plan(w, c)
 		}},
@@ -449,6 +469,15 @@ func main() {
 				fmt.Println("  and nothing where no tick crashes: the eval sees invariant 6")
 			}
 		}
+		if m := mutants[name]; m.waits {
+			m.unwaited = true
+			if n := len(invariants(m, 8)); n > 0 {
+				fmt.Printf("  it breaks %d worlds where no build waits to begin, so it proves nothing about the order of a fair test\n", n)
+				failed = true
+			} else if len(which) > 0 {
+				fmt.Println("  and nothing where no build waits to begin: the eval sees the order of a fair test")
+			}
+		}
 	}
 
 	for _, c := range cases() {
@@ -532,7 +561,7 @@ func replay(spec string) {
 		shape.Flake, shape.ProbeFlake = 0, 0
 	}
 	if name == "tight" {
-		shape.Agents, shape.Others, shape.Hold, shape.Cancels = 3, 2, storm.Build, false
+		shape = tight()
 	}
 	s := NewSim(shape, dials(slots, batch, probes), seed)
 	s.Trace = os.Stdout
