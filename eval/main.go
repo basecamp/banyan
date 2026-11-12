@@ -8,6 +8,7 @@
 //
 //	go run ./eval                    check against the scoreboard
 //	go run ./eval -record "<note>"   append this run's rows to the scoreboard
+//	go run ./eval -judge "<idea>"    append them with the verdict the rule gives: kept or rejected
 //	go run ./eval -try "<dials>"     measure a shape under other dials, and record nothing
 package main
 
@@ -326,6 +327,7 @@ const header = "when\tcommit\tshape\tconfig\tlanded\twrong_per_1000\twait_p50\tw
 
 func main() {
 	record := flag.String("record", "", "append this run to the scoreboard, with this note")
+	judge := flag.String("judge", "", "record this run as the test of this hypothesis, with the verdict the rule gives it: kept, or rejected and why")
 	baselines := flag.Bool("baselines", false, "measure the baselines too, as -record does")
 	trace := flag.String("trace", "", `replay one world and print what the queue did: "<shape> <slots> <batch> <probes> <seed>"`)
 	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes>; ..."`)
@@ -357,8 +359,12 @@ func main() {
 		return
 	}
 	failed := false
+	var why []string // what the rule holds against this run
 
 	broken := invariants(mutant{plan: queue.Plan, verify: queue.Verify}, seeds/2)
+	if len(broken) > 0 {
+		why = append(why, fmt.Sprintf("%d invariants broken, the first in %s", len(broken), broken[0]))
+	}
 	fmt.Printf("invariants: %d broken\n", len(broken))
 	for i, b := range broken {
 		if i == 12 {
@@ -373,6 +379,9 @@ func main() {
 	fmt.Printf("cases: %d played, %d failures\n", len(cases()), len(wrong))
 	for _, w := range wrong {
 		fmt.Println("  " + w)
+	}
+	if len(wrong) > 0 {
+		why = append(why, "a case fails: "+wrong[0])
 	}
 	failed = failed || len(wrong) > 0
 
@@ -402,6 +411,7 @@ func main() {
 		fmt.Printf("mutant that %s: breaks %s\n", name, strings.Join(which, ", "))
 		if len(which) == 0 {
 			fmt.Println("  the eval is blind to it")
+			why = append(why, "the mutant that "+name+" is not caught")
 			failed = true
 		}
 		if m := mutants[name]; m.crashes {
@@ -424,7 +434,7 @@ func main() {
 
 	lines := engineLines()
 	last := recorded()
-	var rows []string
+	var scores []Score
 	fmt.Printf("\n"+columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "blame90", "builds/pr", "per hour")
 	for _, shape := range shapes {
 		for _, cfg := range configs(shape) {
@@ -435,13 +445,15 @@ func main() {
 			sc.Shape, sc.Config = shape.Name, cfg.Name
 			if len(br) > 0 && cfg.Name == "challenger" {
 				fmt.Printf("  %s broke %d invariants, the first: %s\n", cfg.Name, len(br), br[0])
+				why = append(why, fmt.Sprintf("%d invariants broken, the first in %s", len(br), br[0]))
 				failed = true
 			}
 			sc.print(shape)
-			rows = append(rows, sc.row(lines, *record))
+			scores = append(scores, sc)
 			if was, ok := last[sc.Shape+"\t"+sc.Config]; ok && cfg.Name == "challenger" && *record == "" {
 				for _, w := range worse(was, sc) {
 					fmt.Println("  worse than its best kept row: " + w)
+					why = append(why, w)
 					failed = true
 				}
 			}
@@ -449,7 +461,17 @@ func main() {
 	}
 	fmt.Printf("\nengine: %d lines of Go outside tests and the eval\n", lines)
 
+	if *judge != "" {
+		if *record = *judge + ": kept"; len(why) > 0 {
+			*record = *judge + ": rejected, " + strings.Join(why, "; ")
+		}
+		fmt.Println(*record)
+	}
 	if *record != "" {
+		var rows []string
+		for _, sc := range scores {
+			rows = append(rows, sc.row(lines, *record))
+		}
 		f, err := os.OpenFile(scoreboard, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			fmt.Println(err)
