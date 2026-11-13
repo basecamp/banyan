@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -52,6 +53,7 @@ func live(dir string) (Score, error) {
 		ejected  = map[[2]any]bool{} // a number and a head ejected as the cause, however often queued
 		trunks   = map[queue.SHA]bool{}
 		took     = map[queue.Kind][]float64{}
+		verdicts = map[queue.SHA][]queue.Verdict{} // each tree's whole builds, by the prefix they test
 		waits    []time.Duration
 		ejects   []time.Duration
 		busy     time.Duration
@@ -82,6 +84,9 @@ func live(dir string) (Score, error) {
 			}
 			answered[b.SHA] = now
 			took[b.Kind] = append(took[b.Kind], now.Sub(b.Pushed).Minutes())
+			if b.Kind != queue.Probe {
+				verdicts[b.Tests()] = append(verdicts[b.Tests()], b.Verdict)
+			}
 		}
 		for _, a := range rec.Actions {
 			switch {
@@ -141,5 +146,18 @@ func live(dir string) (Score, error) {
 	}
 	fmt.Printf("%d ticks over %s with something queued; a whole build took %.1f min at the median, as the ticks saw it\n",
 		len(recs), busy.Round(time.Minute), whole)
+	fmt.Printf("ready to landed: %.0f min at the median, %.0f at p90\n", sc.WaitP50*whole, sc.WaitP90*whole)
+	// A tree that a whole build passed is good, so every other verdict on it is CI's own failure.
+	for _, vs := range verdicts {
+		if slices.Contains(vs, queue.Success) {
+			sc.Good += len(vs)
+			for _, v := range vs {
+				if v != queue.Success {
+					sc.Flaked++
+				}
+			}
+		}
+	}
+	fmt.Printf("of %d whole builds of trees that passed, %d did not pass\n", sc.Good, sc.Flaked)
 	return sc, nil
 }

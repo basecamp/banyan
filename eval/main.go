@@ -113,6 +113,9 @@ type Score struct {
 	// What the queue costs everyone else: how long the other builds wait for an agent, in
 	// minutes, beside the queue and with no queue. It is printed, and not on the scoreboard.
 	Beside, Alone agentWait
+	// CI's own failures, which only a live score counts: the whole builds of trees that some
+	// whole build passed, and those of them that did not pass.
+	Good, Flaked int
 }
 
 type agentWait struct{ Mean, P90 float64 }
