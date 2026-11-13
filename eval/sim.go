@@ -20,6 +20,7 @@ type Shape struct {
 	Flake        float64 // a whole build fails though its tree is good
 	ProbeFlake   float64
 	Break        float64 // a pull request passes its own checks and fails the whole build
+	Fails        float64 // a whole build of a tree a pull request breaks reports after this share of its time, 0 for all of it
 	Clash        float64 // a pull request fails only with one queued ahead of it
 	Conflict     float64 // it conflicts with the trunk
 	Ahead        float64 // it conflicts with one queued ahead of it
@@ -501,6 +502,9 @@ func (s *Sim) push(b queue.Build) {
 	}
 	if s.shape.Spread > 0 {
 		d += time.Duration(float64(d) * s.shape.Spread * (2*s.rng.Float64() - 1))
+	}
+	if s.shape.Fails > 0 && b.Kind != queue.Probe && s.guilty(s.holds[b.SHA]) {
+		d = time.Duration(float64(d) * s.shape.Fails)
 	}
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
