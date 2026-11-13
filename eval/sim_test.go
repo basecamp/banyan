@@ -98,3 +98,22 @@ func TestBestKeptRow(t *testing.T) {
 }
 
 var _ = queue.Plan
+
+// Forty wrong ejections in sixty thousand landings scatter by six or seven with nothing
+// changed, so eight more are not held against a run, and twenty more are.
+func TestAFewMoreWrongEjectionsAreScatter(t *testing.T) {
+	was := Score{Shape: "hey2", Config: "challenger", Landed: 12000, Wrong: 1000 * 40.0 / 60000}
+	for more, refused := range map[float64]bool{8: false, 20: true} {
+		now := was
+		now.Wrong = 1000 * (40 + more) / 60000
+		if got := len(worse(was, now)) > 0; got != refused {
+			t.Errorf("%v more wrong ejections than 40: refused %v", more, got)
+		}
+	}
+	none := Score{Shape: "hey2", Config: "challenger", Landed: 12000}
+	two, four := none, none
+	two.Wrong, four.Wrong = 1000*2.0/60000, 1000*4.0/60000
+	if len(worse(none, two)) > 0 || len(worse(none, four)) == 0 {
+		t.Error("against none, two wrong ejections are scatter and four are not")
+	}
+}

@@ -16,6 +16,7 @@ import (
 type Shape struct {
 	Name         string
 	Build, Probe time.Duration
+	Spread       float64 // a build takes this share of its time more or less, evenly
 	Flake        float64 // a whole build fails though its tree is good
 	ProbeFlake   float64
 	Break        float64 // a pull request passes its own checks and fails the whole build
@@ -497,6 +498,9 @@ func (s *Sim) push(b queue.Build) {
 		s.Probes++
 	} else {
 		s.Whole++
+	}
+	if s.shape.Spread > 0 {
+		d += time.Duration(float64(d) * s.shape.Spread * (2*s.rng.Float64() - 1))
 	}
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]

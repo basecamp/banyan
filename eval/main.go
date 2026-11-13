@@ -15,6 +15,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,11 +34,12 @@ import (
 // hey2 is fitted to what it measured. Its pool is its pipeline's, as `go run ./eval -fit`
 // shows, and it cancels a build whose branch is deleted. Its build time and its flakes are its
 // queue's own builds from 2026-11-12 to 2026-11-13: a whole build that passed took 34 minutes,
-// and of 45 builds of trees that also passed, 8 failed, 5 of them on an agent that was lost.
+// 29 at its tenth fastest in a hundred and 38 at its tenth slowest, and of 45 builds of trees
+// that also passed, 8 failed, 5 of them on an agent that was lost.
 // Nothing reaches its trunk but through the queue. hey-native-apps is moving to a CI nobody has
 // measured yet, so its pool has no limit and is taken to cancel, and its rates are estimates.
 var shapes = []Shape{
-	{Name: "hey2", Build: 34 * time.Minute, Flake: 0.18, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
+	{Name: "hey2", Build: 34 * time.Minute, Spread: 0.15, Flake: 0.18, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
 		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
@@ -130,6 +132,11 @@ func waited(minutes []float64) agentWait {
 
 const seeds = 200
 
+// wide is how many times more worlds wrong ejections are counted over than the rest. They are
+// a few in ten thousand landings: over one set of worlds the same planner counts 5 in one
+// thousand worlds and 15 in the next.
+const wide = 5
+
 const columns = "%-16s %-13s %7s %9s %8s %8s %9s %10s %8s\n"
 
 // print is the score's line in a run's output, and under it what the queue costs the other
@@ -169,25 +176,29 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	var sc Score
 	var waits, ejects []float64
 	var broken []string
-	var wrong, whole, probes int
+	var wrong, landed, whole, probes int
 	var beside, alone []float64
-	for i, s := range each(seeds, func(i int) *Sim { s := NewSim(shape, cfg, int64(i)); s.Run(); return s }) {
+	for i, s := range each(wide*seeds, func(i int) *Sim { s := NewSim(shape, cfg, int64(i)); s.Run(); return s }) {
+		wrong, landed = wrong+s.Wrong, landed+s.Landed
+		for _, b := range s.Broken {
+			broken = append(broken, fmt.Sprintf("%s seed %d: %s", shape.Name, i+1, b))
+		}
+		if i >= seeds {
+			continue
+		}
 		if s.pool != nil {
 			beside, alone = append(beside, s.pool.Waited...), append(alone, s.alone.Waited...)
 		}
 		sc.Landed += s.Landed
-		wrong, whole, probes = wrong+s.Wrong, whole+s.Whole, probes+s.Probes
+		whole, probes = whole+s.Whole, probes+s.Probes
 		waits, ejects = append(waits, s.Waits...), append(ejects, s.Ejects...)
-		for _, b := range s.Broken {
-			broken = append(broken, fmt.Sprintf("%s seed %d: %s", shape.Name, i+1, b))
-		}
 	}
 	if sc.Landed > 0 {
 		cost := float64(whole)
 		if shape.Probe > 0 {
 			cost += float64(probes) * float64(shape.Probe) / float64(shape.Build)
 		}
-		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(sc.Landed), cost/float64(sc.Landed)
+		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(landed), cost/float64(sc.Landed)
 	}
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
 	sc.Beside, sc.Alone = waited(beside), waited(alone)
@@ -196,13 +207,13 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	// short and its last landing is one draw, so it takes many of them to hold still.
 	backlog := shape
 	backlog.Backlog, backlog.Arrivals, backlog.Hours = 40, 0, 0
-	var landed int
+	var drained int
 	var hours float64
 	for _, s := range each(2*seeds, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
-		landed, hours = landed+s.Landed, hours+s.LastLand.Hours()
+		drained, hours = drained+s.Landed, hours+s.LastLand.Hours()
 	}
 	if hours > 0 {
-		sc.PerHour = float64(landed) / hours
+		sc.PerHour = float64(drained) / hours
 	}
 	return sc, broken
 }
@@ -646,16 +657,20 @@ func fit() {
 	}
 }
 
-// worse lists the indicators that are worse than they were by more than a twentieth.
+// worse lists the indicators that are worse than they were by more than a twentieth. Wrong
+// ejections are a count of rare events, so they are worse only past twice the count's own
+// scatter, and never for fewer than three more.
 func worse(was, now Score) []string {
 	var out []string
+	if n := float64(wide * was.Landed); n > 0 && now.Wrong > was.Wrong+1000*max(3, 2*math.Sqrt(was.Wrong*n/1000))/n {
+		out = append(out, fmt.Sprintf("%s %s, wrong ejections per 1,000: %.2f, was %.2f", now.Shape, now.Config, now.Wrong, was.Wrong))
+	}
 	check := func(name string, before, after float64, lowerIsBetter bool) {
 		slack := 0.05*before + 0.01
 		if (lowerIsBetter && after > before+slack) || (!lowerIsBetter && after < before-slack) {
 			out = append(out, fmt.Sprintf("%s %s, %s: %.2f, was %.2f", now.Shape, now.Config, name, after, before))
 		}
 	}
-	check("wrong ejections per 1,000", was.Wrong, now.Wrong, true)
 	check("wait p50", was.WaitP50, now.WaitP50, true)
 	check("wait p90", was.WaitP90, now.WaitP90, true)
 	check("ejected p90", was.EjectP90, now.EjectP90, true)
@@ -685,6 +700,7 @@ func best(rows []string) map[string]Score {
 			continue
 		}
 		sc := Score{Shape: f[2], Config: f[3]}
+		fmt.Sscan(f[4], &sc.Landed)
 		fmt.Sscan(f[5]+" "+f[6]+" "+f[7]+" "+f[8]+" "+f[9]+" "+f[10], &sc.Wrong, &sc.WaitP50, &sc.WaitP90, &sc.EjectP90, &sc.Builds, &sc.PerHour)
 		key := sc.Shape + "\t" + sc.Config
 		if was, ok := out[key]; ok && !strings.HasPrefix(f[12], "baseline") {
