@@ -91,7 +91,7 @@ func dials(slots, batch int, probes bool) queue.Config {
 // challenger is the configuration each shape runs with, or would. The hillclimb moves these,
 // and hey2's moves only with the settings hey2 runs.
 var challenger = map[string]queue.Config{
-	"hey2":            dials(3, 2, false),
+	"hey2":            dials(5, 2, false),
 	"hey-native-apps": dials(3, 12, true),
 }
 
@@ -387,7 +387,7 @@ func main() {
 	judge := flag.String("judge", "", "record this run as the test of this hypothesis, with the verdict the rule gives it: kept, or rejected and why")
 	baselines := flag.Bool("baselines", false, "measure the baselines too, as -record does")
 	trace := flag.String("trace", "", `replay one world and print what the queue did: "<shape> <slots> <batch> <probes> <seed>"`)
-	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes>; ..."`)
+	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes> [<flake rate> [<build minutes>]]; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
 	flag.Parse()
@@ -415,11 +415,22 @@ func main() {
 			var name string
 			var slots, batch int
 			var probes bool
-			fmt.Sscan(spec, &name, &slots, &batch, &probes)
+			flake, minutes := -1.0, 0.0
+			fmt.Sscan(spec, &name, &slots, &batch, &probes, &flake, &minutes)
 			for _, shape := range slices.Concat(shapes, stages) {
 				if shape.Name == name {
-					sc, _ := measure(shape, dials(slots, batch, probes))
-					sc.Shape, sc.Config = name, fmt.Sprintf("%d of %d", slots, batch)
+					sc := Score{Config: fmt.Sprintf("%d of %d", slots, batch)}
+					if flake >= 0 {
+						shape.Flake = flake
+						sc.Config += fmt.Sprintf(", %.0f%% flakes", 100*flake)
+					}
+					if minutes > 0 {
+						shape.Build = time.Duration(minutes * float64(time.Minute))
+						sc.Config += fmt.Sprintf(", %.0f min", minutes)
+					}
+					config := sc.Config
+					sc, _ = measure(shape, dials(slots, batch, probes))
+					sc.Shape, sc.Config = name, config
 					sc.print(shape)
 				}
 			}
