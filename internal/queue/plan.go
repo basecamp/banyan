@@ -65,6 +65,7 @@ type red struct {
 	// nothing has passed.
 	lo, hi  int
 	last    int // the newest round
+	read    int // the newest round read whole, with every round before it
 	pushed  time.Time
 	running bool // a round's build has no verdict yet
 	tip     bool // the tip failed in the last round that passed nothing
@@ -330,6 +331,7 @@ func (p *plan) weigh(r *red) {
 		if r.running {
 			return
 		}
+		r.read = n
 	}
 }
 
@@ -402,11 +404,12 @@ func (p *plan) prefix(j int) SHA {
 }
 
 // judge ejects the pull request that a red candidate's rounds have put to a fair test, and
-// says whether it ejected any.
+// says whether it ejected any. The test's builds are all in rounds read whole, so no round
+// before them has yet to say that what they show does not hold.
 func (p *plan) judge() bool {
 	ejected := false
 	for _, r := range p.reds {
-		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 {
+		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 && t[2].Round <= r.read {
 			p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: []SHA{t[1].SHA, t[0].SHA, t[2].SHA},
 				Text: fmt.Sprintf("the build with it failed, the build without it then passed (%.12s), and the build with it failed again", t[1].SHA)})
 			ejected = true
