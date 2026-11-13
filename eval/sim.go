@@ -39,6 +39,11 @@ type Shape struct {
 	Queue        []Queued        // a case's pull requests, each queued at its own time
 	Takes        []time.Duration // a case's builds: how long the nth takes, in place of Build
 
+	// The repository's policies around the queue, which the engine does not set.
+	// Repairs says a tool merges the trunk into a pull request ejected for failing
+	// beside another, and queues it again once its own checks pass on that merge.
+	Repairs bool
+
 	// The CI's pool: how many builds run at once, 0 for no limit. A build waits for an agent
 	// behind every build that came before it, the queue's or not.
 	Agents int
@@ -86,6 +91,8 @@ type simPR struct {
 	gone        bool // ejected with cause, or removed by its author, and not coming back
 	back        time.Duration
 	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
+	repaired    bool          // a repair queued it again, and its clock runs from since
+	since       time.Duration
 	checksGreen time.Duration
 }
 
@@ -224,6 +231,15 @@ func (s *Sim) arrive() *simPR {
 	}
 	s.prs[p.Number], s.byHead[p.Head] = p, p.Number
 	return p
+}
+
+// clock is when the pull request's clock started: when it was last ready, or before a repair
+// queued it again, since the repair, not its author, sent it back.
+func (p *simPR) clock() time.Duration {
+	if p.repaired {
+		return p.since
+	}
+	return p.ready
 }
 
 // red is the episode that fails a build of this tree begun at this time, if any.
@@ -552,9 +568,13 @@ func (s *Sim) eject(a queue.Action) {
 		if !s.fair(a) {
 			s.broke(8, "#%d was blamed with no fair test in %.7s", a.PR, a.Evidence)
 		}
+		if s.culprit(p) && s.shape.Repairs && !p.breaks && !p.repaired {
+			s.repair(p)
+			return
+		}
 		if s.culprit(p) {
 			p.gone = true
-			s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
+			s.Ejects = append(s.Ejects, float64(s.now-p.clock())/float64(s.shape.Build))
 			return
 		}
 		s.Wrong++
@@ -563,6 +583,17 @@ func (s *Sim) eject(a queue.Action) {
 			s.broke(3, "#%d is innocent and was ejected with no flake in play", a.PR)
 		}
 	}
+}
+
+// repair merges the trunk into a pull request ejected for failing beside another, which leaves
+// it failing as it did, and queues it again once its own checks pass on the merge. Those checks
+// are a whole build the queue's policy spent.
+func (s *Sim) repair(p *simPR) {
+	p.repaired, p.since = true, p.ready
+	p.Head = fmt.Sprintf("%s+", p.Head)
+	s.byHead[p.Head] = p.Number
+	p.back, p.Checks, p.checksGreen = s.now+tick, queue.Pending, s.now+s.shape.Build
+	s.Whole++
 }
 
 // fair says an ejection's evidence is a fair test of its pull request, by when CI really began
@@ -611,7 +642,7 @@ func (s *Sim) land(a queue.Action) {
 		}
 		p.landed, p.queued = true, false
 		s.Landed++
-		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))
+		s.Waits = append(s.Waits, float64(s.now-p.clock())/float64(s.shape.Build))
 	}
 	s.trunk, s.LastLand = a.SHA, s.now
 	delete(s.builds, a.SHA)

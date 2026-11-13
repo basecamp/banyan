@@ -100,7 +100,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 ## Not in the engine
 
 - **A repository's own gates:** review, evidence, a person's word. They run before a pull request is queued.
-- **Repair of a trunk conflict.** A separate tool can read the eject comment and merge the trunk in. A pull request kept on a person's word is never pushed to.
+- **Repair of a trunk conflict.** A separate tool can read the eject comment and merge the trunk in. A pull request kept on a person's word is never pushed to. Only a conflict: merging the trunk into a culprit leaves it failing as it did, and queuing it again costs its own checks and another fair test (`-try hey-native-apps-repairing`, beside `hey-native-apps-stale`).
 - **A watch.** A stall alarm reads the `merge-queue` statuses.
 - **Commands to queue, take out or list.** The label is how a pull request joins and leaves, and the status on its head is where it stands. `gh` does both.
 - **A stop switch.** A person stops the queue by stopping its tick.

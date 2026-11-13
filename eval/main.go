@@ -50,7 +50,20 @@ var shapes = []Shape{
 }
 
 // stages are the other shapes -try measures.
-var stages = []Shape{sandbox()}
+var stages = slices.Concat([]Shape{sandbox()}, policies(shapes[1]))
+
+// policies are hey-native-apps under its bash queue's policies, each beside the same shape
+// without it, -try's rows for whether to keep a policy around the engine, which does neither.
+//
+// Its repair merged the trunk into a stale head, one that fails only beside a pull request
+// ahead of it, and queued it again: 8 of its 35 repairs from 2026-11-12 16:00Z to 11-13 03:40Z,
+// about 4 in 100 of the pull requests the shape queues in that time, all of which failed again.
+func policies(s Shape) []Shape {
+	stale, repairing := s, s
+	stale.Name, stale.Clash = s.Name+"-stale", 0.04
+	repairing.Name, repairing.Clash, repairing.Repairs = s.Name+"-repairing", 0.04, true
+	return []Shape{stale, repairing}
+}
 
 // sandbox is the rehearsal repository's volume run: thirty pull requests queued twenty seconds
 // apart, one in ten builds a flake and one pair that clashes, on a CI that neither cancels nor
@@ -605,7 +618,7 @@ func replay(spec string) {
 	var seed int64
 	fmt.Sscan(spec, &name, &slots, &batch, &probes, &seed)
 	shape := storm
-	for _, s := range shapes {
+	for _, s := range slices.Concat(shapes, stages) {
 		if s.Name == name {
 			shape = s
 		}
