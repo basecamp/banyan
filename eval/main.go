@@ -37,11 +37,12 @@ import (
 // 29 at its tenth fastest in a hundred and 38 at its tenth slowest. Of its first 45 builds of
 // trees that also passed, 8 failed: 5 on an agent that was lost, which its pipeline now runs
 // again, and 3 on a step that dropped its connection, since fixed. None of the 15 after both
-// failed, so its flake rate is taken as 1 in 20 until more builds say.
+// failed, so its flake rate is taken as 1 in 20 until more builds say. A queue build stops at
+// its first failed test: the four that failed on a broken tree took 19 to 23 minutes.
 // Nothing reaches its trunk but through the queue. hey-native-apps is moving to a CI nobody has
 // measured yet, so its pool has no limit and is taken to cancel, and its rates are estimates.
 var shapes = []Shape{
-	{Name: "hey2", Build: 34 * time.Minute, Spread: 0.15, Flake: 0.05, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
+	{Name: "hey2", Build: 34 * time.Minute, Spread: 0.15, Fails: 0.6, Flake: 0.05, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
 		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,

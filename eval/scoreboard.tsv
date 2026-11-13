@@ -181,3 +181,5 @@ when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	eject_p90	build
 2026-11-13T06:20Z	c7d39c0	hey-native-apps	challenger	34912	0.01	1.53	3.93	5.47	0.53	16.0	2062	The label and the status are the queue's interface: delete add, remove and status, and replay a recording from the eval. Engine lines, with every other indicator unmoved.: kept
 2026-11-13T14:56Z	9c03ee3+	hey2	challenger	12383	0.00	1.35	3.88	7.06	1.45	7.7	2062	baseline: hey2 refitted to 1 flake in 20, after its pipeline's retry of a lost agent and the Query plans fix
 2026-11-13T14:56Z	9c03ee3+	hey-native-apps	challenger	34912	0.01	1.53	3.93	5.47	0.53	16.0	2062	baseline: hey2 refitted to 1 flake in 20, after its pipeline's retry of a lost agent and the Query plans fix
+2026-11-13T21:17Z	05b5a7f+	hey2	challenger	12351	0.02	1.24	2.76	5.18	1.45	8.8	2062	baseline: hey2's broken trees fail at 0.6 of a build, as its queue builds have since they stop at the first failed test
+2026-11-13T21:17Z	05b5a7f+	hey-native-apps	challenger	34912	0.01	1.53	3.93	5.47	0.53	16.0	2062	baseline: hey2's broken trees fail at 0.6 of a build, as its queue builds have since they stop at the first failed test
