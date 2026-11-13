@@ -28,35 +28,25 @@ import (
 	"github.com/basecamp/banyan/internal/queue"
 )
 
-// The shapes the indicators are measured on. Each rate is an estimate until `banyan report`
-// replaces it with a measured one.
+// The shapes the indicators are measured on.
 //
-// hey2's pool is fitted to its pipeline, as `go run ./eval -fit` shows. Its pipeline cancels a
-// build whose branch is deleted, since 2026-11-12. The shape is hey2 with every landing in the
-// queue but a rare merge by hand; `stages` holds the shapes on the way there. hey-native-apps is moving to a CI nobody has
-// measured yet, so its pool has no limit and is taken to cancel.
+// hey2 is fitted to what it measured. Its pool is its pipeline's, as `go run ./eval -fit`
+// shows, and it cancels a build whose branch is deleted. Its build time and its flakes are its
+// queue's own builds from 2026-11-12 to 2026-11-13: a whole build that passed took 34 minutes,
+// and of 45 builds of trees that also passed, 8 failed, 5 of them on an agent that was lost.
+// Nothing reaches its trunk but through the queue. hey-native-apps is moving to a CI nobody has
+// measured yet, so its pool has no limit and is taken to cancel, and its rates are estimates.
 var shapes = []Shape{
-	{Name: "hey2", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
-		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 0.1,
+	{Name: "hey2", Build: 34 * time.Minute, Flake: 0.18, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
+		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
 		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
 		Break: 0.015, Clash: 0.005, Conflict: 0.08, Ahead: 0.03, Lost: 0.005, Errored: 0.01,
 		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1, Cancels: true},
 }
 
-// stages are the shapes of a repository on its way to the queue, which -try measures. In hey2's
-// open lane the merge button still lands three pull requests an hour on the trunk, as its
-// history from 2026-11-05 to 2026-11-12 shows, and only one lane's pull requests are queued.
-var stages = []Shape{
-	{Name: "hey2-open", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
-		Lost: 0.005, Errored: 0.01, Backlog: 3, Arrivals: 1, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 3,
-		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
-	// The factory's landings go through the queue, and everyone else still merges by hand.
-	{Name: "hey2-mostly", Build: 25 * time.Minute, Flake: 0.03, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
-		Lost: 0.005, Errored: 0.01, Backlog: 9, Arrivals: 3, Hours: 10, Moves: 0.3, Removals: 0.05, Outside: 1.2,
-		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
-	sandbox(),
-}
+// stages are the other shapes -try measures.
+var stages = []Shape{sandbox()}
 
 // sandbox is the rehearsal repository's volume run: thirty pull requests queued twenty seconds
 // apart, one in ten builds a flake and one pair that clashes, on a CI that neither cancels nor
@@ -96,9 +86,10 @@ func dials(slots, batch int, probes bool) queue.Config {
 	return queue.Config{Slots: slots, MaxBatch: batch, Probes: probes, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}
 }
 
-// challenger is the configuration each shape would ship with. The hillclimb moves these.
+// challenger is the configuration each shape runs with, or would. The hillclimb moves these,
+// and hey2's moves only with the settings hey2 runs.
 var challenger = map[string]queue.Config{
-	"hey2":            dials(6, 2, false),
+	"hey2":            dials(3, 2, false),
 	"hey-native-apps": dials(3, 12, true),
 }
 
