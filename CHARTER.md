@@ -42,9 +42,9 @@ Each is measured in simulation and live, by the same definition. A build time is
 | Whole builds per landing | ≤ 1.3 one at a time, ≤ 0.3 batched | see scoreboard |
 | Landings an hour under backlog | ≥ 12 (hey2), ≥ 16 (hey-native-apps) | see scoreboard |
 | Simulated against live | within 20% | none yet |
-| Engine size, non-test Go lines | ≤ 2,000 | v2: 5,500 of bash |
+| Engine size, non-test Go lines | none: recorded | v2: 5,500 of bash |
 
-The targets are provisional until hey2's first live rows, and are set from those.
+The targets are provisional until hey2's first live rows, and are set from those. The engine's size is on every scoreboard row so that growth shows, and has no target: a count can be met by cutting what earns its place.
 
 ## Loop
 
