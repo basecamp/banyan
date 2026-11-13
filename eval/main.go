@@ -34,12 +34,14 @@ import (
 // hey2 is fitted to what it measured. Its pool is its pipeline's, as `go run ./eval -fit`
 // shows, and it cancels a build whose branch is deleted. Its build time and its flakes are its
 // queue's own builds from 2026-11-12 to 2026-11-13: a whole build that passed took 34 minutes,
-// 29 at its tenth fastest in a hundred and 38 at its tenth slowest, and of 45 builds of trees
-// that also passed, 8 failed, 5 of them on an agent that was lost.
+// 29 at its tenth fastest in a hundred and 38 at its tenth slowest. Of its first 45 builds of
+// trees that also passed, 8 failed: 5 on an agent that was lost, which its pipeline now runs
+// again, and 3 on a step that dropped its connection, since fixed. None of the 15 after both
+// failed, so its flake rate is taken as 1 in 20 until more builds say.
 // Nothing reaches its trunk but through the queue. hey-native-apps is moving to a CI nobody has
 // measured yet, so its pool has no limit and is taken to cancel, and its rates are estimates.
 var shapes = []Shape{
-	{Name: "hey2", Build: 34 * time.Minute, Spread: 0.15, Flake: 0.18, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
+	{Name: "hey2", Build: 34 * time.Minute, Spread: 0.15, Flake: 0.05, Break: 0.03, Clash: 0.02, Conflict: 0.05, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
 		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 30 * time.Minute, Probe: 10 * time.Minute, Flake: 0.07, ProbeFlake: 0.02,
