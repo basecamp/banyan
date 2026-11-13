@@ -58,11 +58,17 @@ var stages = slices.Concat([]Shape{sandbox()}, policies(shapes[1]))
 // Its repair merged the trunk into a stale head, one that fails only beside a pull request
 // ahead of it, and queued it again: 8 of its 35 repairs from 2026-11-12 16:00Z to 11-13 03:40Z,
 // about 4 in 100 of the pull requests the shape queues in that time, all of which failed again.
+// Its candidates skipped the iPhone's tests, which ran on the trunk after it moved, so a break
+// only they saw landed and held the queue until its fix landed. From 2026-11-06 to 11-13, 1,103
+// pull requests landed, about 16 breaks at the shape's rate, and one of them was the iPhone's
+// alone: the trunk was red from 03:06Z to 07:25Z on 11-13, and its fix was queued about 3.5
+// hours after the red.
 func policies(s Shape) []Shape {
-	stale, repairing := s, s
+	stale, repairing, after := s, s, s
 	stale.Name, stale.Clash = s.Name+"-stale", 0.04
 	repairing.Name, repairing.Clash, repairing.Repairs = s.Name+"-repairing", 0.04, true
-	return []Shape{stale, repairing}
+	after.Name, after.Unseen, after.Fix = s.Name+"-after-merge", 1.0/16, 210*time.Minute
+	return []Shape{stale, repairing, after}
 }
 
 // sandbox is the rehearsal repository's volume run: thirty pull requests queued twenty seconds
@@ -130,6 +136,9 @@ type Score struct {
 	// What the queue costs everyone else: how long the other builds wait for an agent, in
 	// minutes, beside the queue and with no queue. It is printed, and not on the scoreboard.
 	Beside, Alone agentWait
+	// Minutes the trunk is red for every hundred landings, from breaks that landed. It is
+	// printed, and not on the scoreboard.
+	Red float64
 	// CI's own failures, which only a live score counts: the whole builds of trees that some
 	// whole build passed, and those of them that did not pass.
 	Good, Flaked int
@@ -162,6 +171,9 @@ func (sc Score) print(shape Shape) {
 		fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
 			sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
 	}
+	if sc.Red > 0 {
+		fmt.Printf("  the trunk is red %.0f min for every hundred landings, from breaks that landed\n", sc.Red)
+	}
 }
 
 // each runs fn for 1..n on every core and returns the results in order, so a run's output
@@ -193,6 +205,7 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	var broken []string
 	var wrong, landed, whole, probes int
 	var beside, alone []float64
+	var red time.Duration
 	for i, s := range each(wide*seeds, func(i int) *Sim { s := NewSim(shape, cfg, int64(i)); s.Run(); return s }) {
 		wrong, landed = wrong+s.Wrong, landed+s.Landed
 		for _, b := range s.Broken {
@@ -205,7 +218,7 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 			beside, alone = append(beside, s.pool.Waited...), append(alone, s.alone.Waited...)
 		}
 		sc.Landed += s.Landed
-		whole, probes = whole+s.Whole, probes+s.Probes
+		whole, probes, red = whole+s.Whole, probes+s.Probes, red+s.Red
 		waits, ejects = append(waits, s.Waits...), append(ejects, s.Ejects...)
 	}
 	if sc.Landed > 0 {
@@ -214,6 +227,7 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 			cost += float64(probes) * float64(shape.Probe) / float64(shape.Build)
 		}
 		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(landed), cost/float64(sc.Landed)
+		sc.Red = 100 * red.Minutes() / float64(sc.Landed)
 	}
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
 	sc.Beside, sc.Alone = waited(beside), waited(alone)

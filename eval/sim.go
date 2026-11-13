@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"slices"
 	"sort"
 	"time"
 
@@ -40,8 +41,12 @@ type Shape struct {
 	Takes        []time.Duration // a case's builds: how long the nth takes, in place of Build
 
 	// The repository's policies around the queue, which the engine does not set.
-	// Repairs says a tool merges the trunk into a pull request ejected for failing
+	// Unseen is the chance a break shows only in jobs a candidate skips and the trunk runs after
+	// it moves, so the pull request lands and the trunk is red until its fix lands, queued Fix
+	// after the red. Repairs says a tool merges the trunk into a pull request ejected for failing
 	// beside another, and queues it again once its own checks pass on that merge.
+	Unseen  float64
+	Fix     time.Duration
 	Repairs bool
 
 	// The CI's pool: how many builds run at once, 0 for no limit. A build waits for an agent
@@ -72,10 +77,13 @@ type Queued struct {
 
 // Episode turns the trunk red from At. A plain one heals by itself after For, as a clock or
 // an outside service does; one that NeedsFix stays red until a fix, queued Fix later, lands.
+// One that Breaker landed is that pull request's: its fix answers its author as an ejection
+// would, and is no landing.
 type Episode struct {
 	At, For  time.Duration
 	NeedsFix bool
 	Fix      time.Duration
+	Breaker  int
 }
 
 type simPR struct {
@@ -91,6 +99,7 @@ type simPR struct {
 	gone        bool // ejected with cause, or removed by its author, and not coming back
 	back        time.Duration
 	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
+	unseen      bool          // its break shows only after it lands
 	repaired    bool          // a repair queued it again, and its clock runs from since
 	since       time.Duration
 	checksGreen time.Duration
@@ -132,8 +141,9 @@ type Sim struct {
 	Left     map[int]string // the cause each ejected pull request last left for
 	Whole    int
 	Probes   int
-	Waits    []float64 // ready to landed, in build times
-	Ejects   []float64 // ready to ejected as the cause, in build times
+	Red      time.Duration // the trunk red from a break that landed, until its fix landed
+	Waits    []float64     // ready to landed, in build times
+	Ejects   []float64     // ready to ejected as the cause, in build times
 	LastLand time.Duration
 }
 
@@ -215,7 +225,7 @@ func (s *Sim) arrive() *simPR {
 	sort.Ints(ahead)
 	switch {
 	case s.chance(s.shape.Break):
-		p.breaks = true
+		p.breaks, p.unseen = true, s.chance(s.shape.Unseen)
 	case len(ahead) > 0 && s.chance(s.shape.Clash):
 		p.clash = ahead[s.rng.Intn(len(ahead))]
 	case s.chance(s.shape.Conflict):
@@ -268,7 +278,7 @@ func (s *Sim) red(tree map[int]bool, at time.Duration) bool {
 // whole build, or the later of a pair that clash.
 func (s *Sim) guilty(tree map[int]bool) bool {
 	for n := range tree {
-		if p := s.prs[n]; p.breaks || (p.clash > 0 && tree[p.clash]) {
+		if p := s.prs[n]; (p.breaks && !p.unseen) || (p.clash > 0 && tree[p.clash]) {
 			return true
 		}
 	}
@@ -641,11 +651,34 @@ func (s *Sim) land(a queue.Action) {
 			continue
 		}
 		p.landed, p.queued = true, false
-		s.Landed++
-		s.Waits = append(s.Waits, float64(s.now-p.clock())/float64(s.shape.Build))
+		switch {
+		case p.unseen:
+			s.redden(p)
+		case p.fix > 0 && s.shape.Episodes[p.fix-1].Breaker > 0:
+			s.answer(s.shape.Episodes[p.fix-1])
+		default:
+			s.Landed++
+			s.Waits = append(s.Waits, float64(s.now-p.clock())/float64(s.shape.Build))
+		}
 	}
 	s.trunk, s.LastLand = a.SHA, s.now
 	delete(s.builds, a.SHA)
+}
+
+// redden turns the trunk red once the jobs the candidate skipped report on it, a build after
+// the landing, until a fix lands.
+func (s *Sim) redden(p *simPR) {
+	s.say("#%d landed a break its candidate did not run, and the trunk turns red", p.Number)
+	e := Episode{At: s.now + s.shape.Build, NeedsFix: true, Fix: s.shape.Fix, Breaker: p.Number}
+	s.shape.Episodes = append(slices.Clip(s.shape.Episodes), e)
+}
+
+// answer tells the author of a break that landed, as an ejection would, once its fix lands.
+func (s *Sim) answer(e Episode) {
+	p := s.prs[e.Breaker]
+	s.Red += s.now - e.At
+	s.Ejected["landed a break"]++
+	s.Ejects = append(s.Ejects, float64(s.now-p.clock())/float64(s.shape.Build))
 }
 
 // Run plays the shape to its end: until the arrivals have stopped and the queue is empty, or
