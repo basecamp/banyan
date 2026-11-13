@@ -470,6 +470,27 @@ func TestAForcePushToAQueuedPullRequestLandsItsNewHead(t *testing.T) {
 	}
 }
 
+func TestALandingWhoseTicksDiedBeforeSayingAnythingIsSaidByTheNext(t *testing.T) {
+	w := newWorld(t, `{}`)
+	p := w.open(1, "a", "1\n")
+	p.labels["merge-queue"] = w.now
+	w.rounds(2)
+	if !w.landed(1) {
+		t.Fatalf("#1, labelled by hand, did not land\n%s", w.log)
+	}
+	// The tick that built it died before its note, and the one that landed it before its status.
+	delete(w.statuses, p.heads[0])
+	w.round()
+	if s := w.last(p.heads[0], "merge-queue"); s.State != "success" || s.Description != "landed" {
+		t.Errorf("the status on #1's landed head says %q, %q", s.State, s.Description)
+	}
+	said := len(w.statuses[p.heads[0]])
+	w.round()
+	if len(w.statuses[p.heads[0]]) != said {
+		t.Errorf("a landing already said was said again")
+	}
+}
+
 func TestAQueueThatCannotPushSaysSoOnWhatWaits(t *testing.T) {
 	w := newWorld(t, `{}`)
 	p := w.queue(1, "a", "1\n")

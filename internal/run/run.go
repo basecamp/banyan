@@ -370,14 +370,15 @@ func (q *Queue) land(a queue.Action) error {
 	return nil
 }
 
-// settle ends the status of a pull request that landed while a tick died before saying so.
+// settle says a pull request landed where no tick has: the one that landed it died before
+// saying so, or it was merged with the label on by something else.
 func (q *Queue) settle() error {
 	landed, err := q.Hub.Landed(q.names())
 	if err != nil || q.DryRun {
 		return err
 	}
 	for _, p := range landed {
-		if p.Merged && p.Note != "" {
+		if p.Merged && p.Statuses[q.Status].State != queue.Success {
 			if err := q.Hub.SetStatus(p.Head, q.Status, queue.Success, "landed", ""); err != nil {
 				return err
 			}
