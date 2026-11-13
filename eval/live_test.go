@@ -35,14 +35,14 @@ func TestLiveScoresRecordedTicksByTheEvalsDefinitions(t *testing.T) {
 		// The trunk refused the push once, so the same tick planned the landing again.
 		{World: queue.World{Now: at(60), Trunk: "t0", PRs: []queue.PR{one, two}, Builds: []queue.Build{passed}},
 			Actions: []queue.Action{{Do: "land", SHA: "m2b", Members: chain}}},
-		{World: queue.World{Now: at(61), Trunk: "m2b"}},
+		{World: queue.World{Now: at(61), Trunk: "m2b"}, Config: dials(2, 2, false)},
 	}
 	dir := t.TempDir()
 	for i, rec := range recs {
 		data, _ := json.Marshal(rec)
 		os.WriteFile(filepath.Join(dir, fmt.Sprintf("%02d.json", i)), data, 0o644)
 	}
-	sc, err := live(dir)
+	sc, win, err := live(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,5 +51,14 @@ func TestLiveScoresRecordedTicksByTheEvalsDefinitions(t *testing.T) {
 		Good: 3, Flaked: 1}
 	if fmt.Sprintf("%.3v", sc) != fmt.Sprintf("%.3v", want) {
 		t.Errorf("scored\n %+v\nwant\n %+v", sc, want)
+	}
+
+	// The same hour played again on a CI that never fails: both were ready at noon, so one
+	// build of the two lands them.
+	if len(win.arrivals) != 2 || win.arrivals[1] != 0 || win.build != 10*time.Minute {
+		t.Errorf("the window is %+v, where two were ready at noon and a build took 10 minutes", win)
+	}
+	if again := win.simulated(Shape{Name: "quiet"}, Score{}); again.Landed != 2 || again.Builds != 0.5 || again.WaitP90 > 1.5 {
+		t.Errorf("simulated %+v, where both land on one build", again)
 	}
 }

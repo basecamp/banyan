@@ -390,15 +390,21 @@ func main() {
 	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes> [<flake rate> [<build minutes>]]; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
+	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	flag.Parse()
 	if *recordings != "" {
-		sc, err := live(*recordings)
+		sc, win, err := live(*recordings)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "eject90", "builds/pr", "per hour")
 		sc.print(Shape{})
+		for _, shape := range shapes {
+			if shape.Name == *like {
+				win.simulated(shape, sc).print(Shape{})
+			}
+		}
 		return
 	}
 	if *trace != "" {

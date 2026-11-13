@@ -24,7 +24,7 @@ Read `CHARTER.md` first. It holds the invariants and the targets. Do not change 
 - **A new failure becomes a case first.** When a search or a live queue finds a world that breaks an invariant, add it to the eval before fixing it, and watch it fail.
 - **Add a mutant with each new invariant,** so the eval is shown to see what it claims to see.
 - **Mind the size.** The engine's line count is an indicator. A mechanism that buys less than a twentieth on its indicator doesn't stay.
-- **The shapes are estimates** until `banyan report` measures the real rates. When it does, change the shape in its own commit and record fresh baselines.
+- **The shapes are estimates.** `go run ./eval -live <ticks> -like <shape>` scores a real queue from the ticks it recorded, then plays the same arrivals on the shape's CI with builds as long and as flaky as the real ones, and prints the two rows together. Where they are more than a fifth apart, find out why before trusting either. When a rate in a shape is wrong, change it in its own commit and record fresh baselines.
 
 ## What the numbers mean
 
