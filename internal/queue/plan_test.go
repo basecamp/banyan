@@ -43,11 +43,19 @@ func TestNobodyIsBlamedOnARoundReadBeforeTheOneBeforeItIsWhole(t *testing.T) {
 	}
 
 	// Once the trunk's build passes, the rounds are whole, and the third round's failure of #1
-	// alone starts them over: still nobody is blamed.
+	// alone starts them over: still nobody is blamed, and a fourth round begins, though each
+	// pull request's three builds are all there in the rounds that no longer hold.
 	w.Builds[4].Verdict = Success
+	fourth := 0
 	for _, a := range Plan(w, Config{Slots: 3, MaxBatch: 2, Cancels: true, Recheck: 10 * time.Minute}) {
 		if a.Do == "eject" {
 			t.Errorf("ejected #%d as %s on %v, though #1 alone failed after it had passed", a.PR, a.Cause, a.Evidence)
 		}
+		if a.Do == "push" && a.Build.Round == 4 {
+			fourth++
+		}
+	}
+	if fourth != 2 {
+		t.Errorf("the rounds started over with %d builds of a fourth round, where both pull requests' tests begin again", fourth)
 	}
 }

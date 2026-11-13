@@ -66,6 +66,7 @@ type red struct {
 	lo, hi  int
 	last    int // the newest round
 	read    int // the newest round read, with every round before it
+	over    int // the round at which the rounds last started over
 	pushed  time.Time
 	running bool // a round's build has no verdict yet
 	tip     bool // the tip failed in the last round that passed nothing
@@ -322,7 +323,7 @@ func (p *plan) weigh(r *red) {
 		case low <= r.lo, low == 0, !probe && !r.whole:
 			// The tip failed, or a prefix that had passed, or a whole build where probes
 			// had passed: nothing the rounds have said so far holds.
-			r.lo, r.hi, r.tip, r.whole, r.flake = -1, k, low == 0, r.whole || !probe, false
+			r.lo, r.hi, r.tip, r.whole, r.flake, r.over = -1, k, low == 0, r.whole || !probe, false, n
 		case low < r.hi || r.hi <= r.lo:
 			r.hi = low
 		}
@@ -335,10 +336,11 @@ func (p *plan) weigh(r *red) {
 // every build of the round before, so each began after the last, and a trunk or a CI that
 // was broken for a while and failed both would have failed the pass between them. A test
 // that is not whole counts only if it ends at the newest round, where it can still go on.
+// No test reaches back past the round at which the rounds started over.
 // With hope, a build still running counts as the verdict the test wants of it.
 func (r *red) test(s int, hope bool) (t []Build) {
-	for n := 1; n <= r.last && len(t) < 3; n++ {
-		for c := min(n, 3); c > 0; c-- {
+	for n := r.over + 1; n <= r.last && len(t) < 3; n++ {
+		for c := min(n-r.over, 3); c > 0; c-- {
 			t = nil
 			for i := 0; i < c; i++ {
 				j, want := s-i%2, Failure
