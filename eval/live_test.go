@@ -30,6 +30,9 @@ func TestLiveScoresRecordedTicksByTheEvalsDefinitions(t *testing.T) {
 		{World: queue.World{Now: at(50), Trunk: "t0", PRs: []queue.PR{one, two}}, Actions: []queue.Action{{Do: "push", Build: green}}},
 		{World: queue.World{Now: at(60), Trunk: "t0", PRs: []queue.PR{one, two}, Builds: []queue.Build{passed}},
 			Actions: []queue.Action{{Do: "land", SHA: "m2b", Members: chain}, {Do: "land", SHA: "never", Members: chain}}},
+		// The trunk refused the push once, so the same tick planned the landing again.
+		{World: queue.World{Now: at(60), Trunk: "t0", PRs: []queue.PR{one, two}, Builds: []queue.Build{passed}},
+			Actions: []queue.Action{{Do: "land", SHA: "m2b", Members: chain}}},
 		{World: queue.World{Now: at(61), Trunk: "m2b"}},
 	}
 	dir := t.TempDir()

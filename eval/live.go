@@ -94,7 +94,8 @@ func live(dir string) (Score, error) {
 				}
 			case a.Do == "land" && trunks[a.SHA]:
 				// The plan to land is not the landing: it counts once a later tick read the
-				// trunk there.
+				// trunk there, and once however often a refused push had it planned again.
+				trunks[a.SHA] = false
 				for _, m := range a.Members {
 					landed++
 					h := at[m.Number]
