@@ -43,6 +43,11 @@ func TestMutantsAreCaught(t *testing.T) {
 			if m.waits {
 				shape = tight()
 			}
+			if m.crashes {
+				// A push to a pull request clears what a dead tick left on its head, and so
+				// does taking its label off, so nobody does either here.
+				shape.Moves, shape.Removals = 0, 0
+			}
 			s := NewSim(shape, dials(6, 1, false), seed)
 			s.plan, s.verify = m.plan, m.verify
 			s.Run()
