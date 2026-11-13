@@ -1,0 +1,8 @@
+{
+  "story": "hey2, 2026-11-13. A build of #1692 and #1924 failed on a good tree, and the queue began its three rounds. The first round's build of #1692 alone passed at 01:50, two minutes before its build of both. In those two minutes the queue read the round as still running, kept #1692 a suspect though its own build had just passed, and began a second test of it: four more builds, each deleted once the build of both passed at 01:52. The same happened to #1795 at 02:28. Seven of that window's 39 builds were these. A build that passed says so at once, whatever the rest of its round has yet to say.",
+  "build": 34,
+  "prs": [{"number": 1692, "at": 0}, {"number": 1924, "at": 0}],
+  "builds": [{"takes": 33, "flakes": true}, {"takes": 38}, {"takes": 34}],
+  "ejected": [],
+  "whole": 9
+}

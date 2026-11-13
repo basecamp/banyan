@@ -269,7 +269,8 @@ func (p *plan) stackedOn(r *red, b Build) {
 }
 
 // weigh reads a red candidate's rounds in order, up to the first with a build still running,
-// and leaves what they say on it.
+// and leaves what they say on it. Of that round it reads only what passed: a build that
+// passed says so whatever the rest of its round will say, and one that failed does not.
 func (p *plan) weigh(r *red) {
 	k := len(r.chain)
 	r.lo, r.hi, r.whole, r.rounds = -1, k, !p.c.Probes, map[int][]Build{}
@@ -291,7 +292,6 @@ func (p *plan) weigh(r *red) {
 			switch j := len(b.Chain); {
 			case b.Verdict == Pending:
 				r.running = true
-				return
 			case b.Verdict == Error:
 				r.void = true
 			case b.Verdict == Success:
@@ -304,25 +304,31 @@ func (p *plan) weigh(r *red) {
 				low = j
 			}
 		}
-		switch {
-		case r.void:
-			continue
-		case g >= k:
-			r.flake, r.cleared = probe, !probe
-			continue
-		case g >= 0:
-			r.tip, r.lo = false, max(r.lo, g)
+		if r.running {
+			low = -1
 		}
 		switch {
-		case low < 0 && r.hi <= r.lo:
-			r.hi = k
-		case low < 0:
-		case low <= r.lo, low == 0, !probe && !r.whole:
-			// The tip failed, or a prefix that had passed, or a whole build where probes
-			// had passed: nothing the rounds have said so far holds.
-			r.lo, r.hi, r.tip, r.whole, r.flake = -1, k, low == 0, r.whole || !probe, false
-		case low < r.hi || r.hi <= r.lo:
-			r.hi = low
+		case r.void:
+		case g >= k:
+			r.flake, r.cleared = probe, !probe
+		default:
+			if g >= 0 {
+				r.tip, r.lo = false, max(r.lo, g)
+			}
+			switch {
+			case low < 0 && r.hi <= r.lo:
+				r.hi = k
+			case low < 0:
+			case low <= r.lo, low == 0, !probe && !r.whole:
+				// The tip failed, or a prefix that had passed, or a whole build where probes
+				// had passed: nothing the rounds have said so far holds.
+				r.lo, r.hi, r.tip, r.whole, r.flake = -1, k, low == 0, r.whole || !probe, false
+			case low < r.hi || r.hi <= r.lo:
+				r.hi = low
+			}
+		}
+		if r.running {
+			return
 		}
 	}
 }
