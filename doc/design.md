@@ -48,6 +48,8 @@ The red candidate's own failure is not one of the three. It began a build time o
 
 A build that is lost breaks the test, and the next round starts it again. So the three builds of a test always begin close together.
 
+A pull request leaves as soon as the third build of its test reports, though another build of that round, or of the round before, may still be running. Should that build fail a prefix that had passed, the rounds would have started over and nobody would have left. On a good tree that takes four random failures and a verdict that arrives late. Waiting for those builds was tried: it moved wrong ejections from 0.49 to 0.44 in 1,000 simulated landings at hey2's 18% flakes, which is inside their scatter, and made ejections 7% later, so the scoreboard rejected it. The simulator's flakes are independent, so a repository whose builds fail together would want it back.
+
 Only the pull requests the rounds have not ruled out stay off the chain. The rest go back on it at once. One whose merge there would be the red candidate's own tree waits with them, since a build of that tree is an attempt of the red candidate and not a candidate on the chain.
 
 A red candidate and its rounds stand while the trunk moves under them, since they prove what they prove about the commits they were built on. They go when a pull request in the trees they build leaves the queue, and when their base is no longer the tip and fails by itself. So several red candidates are narrowed at once, each beside a chain that keeps landing.
