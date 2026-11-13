@@ -192,7 +192,7 @@ type Pull struct {
 	queue.PR
 	Merged bool
 	Closed bool
-	// Statuses are those of its pinned head, or of its head where none is pinned.
+	// Statuses are those of its head.
 	Statuses map[string]Status
 }
 
@@ -208,9 +208,8 @@ type pullNode struct {
 	Labels      struct{ Nodes []struct{ Name string } }
 	Timeline    struct {
 		Nodes []struct {
-			CreatedAt    time.Time
-			Label        struct{ Name string }
-			BeforeCommit struct{ Oid string }
+			CreatedAt time.Time
+			Label     struct{ Name string }
 		}
 	} `json:"timelineItems"`
 	ReviewThreads struct {
@@ -229,11 +228,10 @@ type pullNode struct {
 
 const pullFields = `number isDraft merged closed baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 50) { nodes { name } }
-	timelineItems(last: 50, itemTypes: [LABELED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) { nodes {
-		... on LabeledEvent { createdAt label { name } }
-		... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } } }
+	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes {
+		... on LabeledEvent { createdAt label { name } } } }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
-	commits(last: 20) { nodes { commit { oid ` + rollupFields + ` } } }`
+	commits(last: 1) { nodes { commit { oid ` + rollupFields + ` } } }`
 
 func (n Names) pull(node pullNode) Pull {
 	p := Pull{Merged: node.Merged, Closed: node.Closed}
@@ -251,30 +249,16 @@ func (n Names) pull(node pullNode) Pull {
 			p.Queued = e.CreatedAt
 		}
 	}
-	// The pin is the newest commit whose queue status is still pending: a head pushed since
-	// has none, and an ejection ends the status it was pinned by.
-	var head map[string]Status
 	for _, c := range node.Commits.Nodes {
-		s := c.Commit.Rollup.statuses()
 		if c.Commit.Oid == p.Head {
-			head = s
-		}
-		if pin, ok := s[n.Status]; ok && pin.State == queue.Pending {
-			p.Pinned, p.Note, p.Statuses = c.Commit.Oid, pin.Description, s
+			p.Statuses = c.Commit.Rollup.statuses()
 		}
 	}
-	if p.Pinned == "" {
-		p.Statuses = head
-		// A force-push takes the pinned commit out of the pull request, and its pin from
-		// sight: the head it replaced, since it was queued, is where it was pinned.
-		for _, e := range node.Timeline.Nodes {
-			if e.BeforeCommit.Oid != "" && e.CreatedAt.After(p.Queued) {
-				p.Pinned = e.BeforeCommit.Oid
-				break
-			}
-		}
+	// An ejection ends the queue's status, so only a pending one says where the head stands.
+	if said := p.Statuses[n.Status]; said.State == queue.Pending {
+		p.Note = said.Description
 	}
-	p.Checks, p.Gate = Verdict(head, n.Admit)
+	p.Checks, p.Gate = Verdict(p.Statuses, n.Admit)
 	switch open := 0; {
 	case labels[n.Hold]:
 		p.Wait = "it is labelled " + n.Hold

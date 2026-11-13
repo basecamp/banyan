@@ -22,7 +22,7 @@ func newOrigin(t *testing.T) *origin {
 // pr opens pull request n, which writes content to file, and returns it queued.
 func (o *origin) pr(n int, file, content string) queue.PR {
 	head := o.PR(n, file, content)
-	return queue.PR{Number: n, Head: head, Pinned: head, Checks: queue.Success}
+	return queue.PR{Number: n, Head: head, Checks: queue.Success}
 }
 
 func (o *origin) fetch() queue.SHA {

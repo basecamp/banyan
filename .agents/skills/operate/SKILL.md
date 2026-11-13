@@ -24,7 +24,7 @@ A status that begins "the queue is stopped:" is the queue's own failure, not the
 - **Take out:** take the label off, or `banyan remove <pr> <who> <why>`, which says so on the pull request.
 - **Stop:** disable the tick's workflow and cancel the runs still waiting. A tick already running may land what it read as passed. Enable the workflow to resume: nothing is lost, since nothing was stored.
 
-Never push to a queued pull request to fix it in place. A push after the label takes it out.
+A push to a queued pull request keeps it queued: the builds that hold it are dropped, and the new head lands once its own checks pass. Take the label off first where that isn't wanted.
 
 ## What a tick did
 

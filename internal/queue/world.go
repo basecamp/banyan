@@ -39,8 +39,6 @@ type PR struct {
 	Head   SHA
 	// Branch is the head branch as GitHub's own merge commits name it, owner/branch.
 	Branch string
-	// Pinned is the head the queue's status was posted on, empty before the first tick.
-	Pinned SHA
 	Queued time.Time
 	First  bool
 	// Wait is why the pull request is not ready to join the chain, empty when it is: a hold
@@ -143,12 +141,12 @@ type Config struct {
 
 // Action is one thing a tick does. The executor applies them in order.
 type Action struct {
-	// Do is pin, push, land, delete, eject or note.
+	// Do is push, land, delete, eject or note.
 	Do    string `json:"do"`
 	Build Build  `json:"build,omitzero"`  // push
 	SHA   SHA    `json:"sha,omitempty"`   // land, delete
-	PR    int    `json:"pr,omitempty"`    // pin, eject, note
-	Cause string `json:"cause,omitempty"` // eject: culprit, conflict or moved
+	PR    int    `json:"pr,omitempty"`    // eject, note
+	Cause string `json:"cause,omitempty"` // eject: culprit or conflict
 	Text  string `json:"text,omitempty"`
 	// Evidence is the builds an ejection rests on, and Members the pull requests a landing lands.
 	Evidence []SHA    `json:"evidence,omitempty"`

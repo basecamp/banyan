@@ -261,7 +261,7 @@ func reason(why error) string {
 	return strings.TrimSpace(lines[len(lines)-1])
 }
 
-// stopped says on every pinned pull request why the queue could not go on, once: the next
+// stopped says on every queued pull request why the queue could not go on, once: the next
 // tick that can act writes its place over it.
 func (q *Queue) stopped(r *Read, why error) {
 	text := "the queue is stopped: " + reason(why)
@@ -269,8 +269,8 @@ func (q *Queue) stopped(r *Read, why error) {
 		text = text[:140]
 	}
 	for _, pr := range r.World.PRs {
-		if pr.Pinned != "" && pr.Note != text {
-			q.Hub.SetStatus(pr.Pinned, q.Status, queue.Pending, text, "")
+		if pr.Note != text {
+			q.Hub.SetStatus(pr.Head, q.Status, queue.Pending, text, "")
 		}
 	}
 }
@@ -278,10 +278,8 @@ func (q *Queue) stopped(r *Read, why error) {
 func (q *Queue) apply(r *Read, a queue.Action) error {
 	pr := r.Pulls[a.PR]
 	switch a.Do {
-	case "pin":
-		return q.Hub.SetStatus(pr.Head, q.Status, queue.Pending, "queued", "")
 	case "note":
-		return q.Hub.SetStatus(pr.Pinned, q.Status, queue.Pending, a.Text, "")
+		return q.Hub.SetStatus(pr.Head, q.Status, queue.Pending, a.Text, "")
 	case "push":
 		if err := q.Git.Push(a.Build.SHA); err != nil {
 			return err
@@ -300,10 +298,7 @@ func (q *Queue) apply(r *Read, a queue.Action) error {
 // eject says why on the pull request, ends its status and takes its label off, in that
 // order: the label is what keeps it in the world, so a tick that dies part way ejects again.
 func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
-	at := pr.Pinned
-	if at == "" {
-		at = pr.Head
-	}
+	at := pr.Head
 	body := fmt.Sprintf("The merge queue took this pull request out at `%.12s`: %s.", at, a.Text)
 	link := ""
 	switch a.Cause {
@@ -333,18 +328,12 @@ func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 		body += "\n\nFix it and queue it again. If the failure isn't this pull request's, queue it again as it is."
 	case "conflict":
 		body += fmt.Sprintf("\n\nMerge `%s` in and queue it again.", q.Trunk)
-	case "moved":
-		body += "\n\nQueue it again once the new head is ready."
 	}
 	marker := fmt.Sprintf("<!-- %s eject %s attributed=%s -->", q.Status, at, a.Cause)
 	if err := q.Hub.Comment(pr.Number, body, marker, pr.Queued); err != nil {
 		return err
 	}
-	state := queue.Failure
-	if a.Cause == "moved" {
-		state = queue.Error
-	}
-	if err := q.Hub.SetStatus(at, q.Status, state, "left the queue: "+a.Text, link); err != nil {
+	if err := q.Hub.SetStatus(at, q.Status, queue.Failure, "left the queue: "+a.Text, link); err != nil {
 		return err
 	}
 	return q.Hub.Unlabel(pr.Number, q.Label)
@@ -388,8 +377,8 @@ func (q *Queue) settle() error {
 		return err
 	}
 	for _, p := range landed {
-		if p.Merged && p.Pinned != "" {
-			if err := q.Hub.SetStatus(p.Pinned, q.Status, queue.Success, "landed", ""); err != nil {
+		if p.Merged && p.Note != "" {
+			if err := q.Hub.SetStatus(p.Head, q.Status, queue.Success, "landed", ""); err != nil {
 				return err
 			}
 		}
@@ -428,7 +417,7 @@ func (q *Queue) Add(number int, first bool) (string, error) {
 			return "", err
 		}
 	}
-	if p.Pinned != p.Head {
+	if p.Note == "" {
 		if err := q.Hub.SetStatus(p.Head, q.Status, queue.Pending, "queued", ""); err != nil {
 			return "", err
 		}
@@ -460,10 +449,7 @@ func (q *Queue) Remove(number int, who, why string) error {
 	if err := q.Hub.Unlabel(number, q.Label); err != nil {
 		return err
 	}
-	at := pr.Pinned
-	if at == "" {
-		at = pr.Head
-	}
+	at := pr.Head
 	marker := fmt.Sprintf("<!-- %s eject %s attributed=removed -->", q.Status, at)
 	body := fmt.Sprintf("%s took this pull request out of the merge queue at `%.12s`: %s", who, at, why)
 	if err := q.Hub.Comment(number, body, marker, pr.Queued); err != nil {

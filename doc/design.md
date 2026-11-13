@@ -60,9 +60,10 @@ Only `failure` is evidence. A build that was lost, cancelled or timed out is bui
 
 - **A culprit,** by the rule above.
 - **A conflict with the trunk itself.**
-- **A head that moved** after it was queued: a push, or a force-push since the label. The pin is found among the pull request's last twenty commits, so a push of more than twenty at once is not seen as one, and the new head is pinned in its place.
 
 Everything else waits in place: a conflict with a pull request ahead, the pull request's own checks running or red, a hold label, a red trunk, a red candidate being narrowed.
+
+A push to a queued pull request keeps it queued. The label says to land the pull request, and the checks named in `admit` say which head may land. The builds that merged the old head are dropped, the new head waits for its own checks, and it joins behind the builds already running. So where `admit` is empty, whatever is pushed to a labelled pull request lands once the queue's build passes.
 
 Every ejection is a comment that names the head judged, the cause and the builds it rests on, with the marker `<!-- banyan eject <head> attributed=<cause> -->`.
 

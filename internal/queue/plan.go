@@ -80,7 +80,7 @@ func (r *red) suspects() []Member { return r.chain[max(r.lo, 0):r.hi] }
 func (p *plan) act(a Action) { p.acts = append(p.acts, a) }
 
 // admit sorts the queue into those that may join the chain, those that wait in place, and
-// the two that leave: a head that moved since it was queued, and a conflict with the trunk.
+// the one that leaves: a conflict with the trunk.
 func (p *plan) admit() {
 	prs := slices.Clone(p.w.PRs)
 	sort.SliceStable(prs, func(i, j int) bool {
@@ -95,12 +95,6 @@ func (p *plan) admit() {
 	})
 	for _, pr := range prs {
 		switch {
-		case pr.Pinned == "":
-			p.act(Action{Do: "pin", PR: pr.Number})
-			p.waits[pr.Number] = "queued"
-		case pr.Pinned != pr.Head:
-			p.act(Action{Do: "eject", PR: pr.Number, Cause: "moved",
-				Text: fmt.Sprintf("its head moved from %.12s to %.12s after it was queued", pr.Pinned, pr.Head)})
 		case pr.Wait != "":
 			p.waits[pr.Number] = pr.Wait
 		case pr.Checks == Pending:
@@ -589,7 +583,7 @@ func (p *plan) notes() {
 		} else if text == "" {
 			text = "in the queue, waiting for a build"
 		}
-		if _, admitted := p.open[pr.Number]; (admitted || p.waits[pr.Number] != "") && pr.Pinned != "" && text != pr.Note {
+		if _, admitted := p.open[pr.Number]; (admitted || p.waits[pr.Number] != "") && text != pr.Note {
 			p.act(Action{Do: "note", PR: pr.Number, Text: text})
 		}
 	}
@@ -626,7 +620,7 @@ func Verify(w World, a Action) error {
 			return fmt.Errorf("%.12s is no passed candidate on the trunk", a.SHA)
 		}
 		for _, m := range rest {
-			if pr, in := prs[m.Number]; !in || pr.Head != m.Head || pr.Pinned != m.Head || pr.Wait != "" || pr.Checks != Success {
+			if pr, in := prs[m.Number]; !in || pr.Head != m.Head || pr.Wait != "" || pr.Checks != Success {
 				return fmt.Errorf("#%d is no longer queued at %.12s", m.Number, m.Head)
 			}
 		}

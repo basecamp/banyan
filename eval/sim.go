@@ -145,8 +145,7 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	return s
 }
 
-// queue labels the case's pull requests whose time has come. The queue has posted nothing on
-// them yet, so each is pinned by the tick that first reads it.
+// queue labels the case's pull requests whose time has come.
 func (s *Sim) queue() {
 	for _, q := range s.shape.Queue {
 		if q.At <= s.now-tick || q.At > s.now {
@@ -197,7 +196,7 @@ func (s *Sim) arrive() *simPR {
 	s.next++
 	p := &simPR{arrived: s.now, queued: true}
 	p.Number, p.Head = s.next, fmt.Sprintf("head%d", s.next)
-	p.Pinned, p.Queued, p.Checks = p.Head, s.epoch.Add(s.now), queue.Success
+	p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 	var ahead []int
 	for n, o := range s.prs {
 		if o.queued {
@@ -318,7 +317,7 @@ func (s *Sim) Step() {
 			p.Checks, p.ready = queue.Success, s.now
 		}
 		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
-			p.queued, p.back, p.Pinned, p.Note, p.ready = true, 0, p.Head, "", s.now
+			p.queued, p.back, p.Note, p.ready = true, 0, "", s.now
 			p.Queued = s.epoch.Add(s.now)
 		}
 	}
@@ -385,11 +384,13 @@ func (s *Sim) pick() *simPR {
 	return s.prs[in[s.rng.Intn(len(in))]]
 }
 
-// move pushes a new commit to a queued pull request, which its author queues again later.
+// move pushes a new commit to a queued pull request. It stays queued, and the new head's own
+// checks take as long as a first head's.
 func (s *Sim) move() {
 	if p := s.pick(); p != nil && p.fix == 0 {
 		p.Head = fmt.Sprintf("%s'", p.Head)
 		s.byHead[p.Head] = p.Number
+		p.Checks, p.checksGreen, p.Note = queue.Pending, s.now+10*time.Minute, ""
 	}
 }
 
@@ -455,13 +456,11 @@ func (s *Sim) apply(a queue.Action) {
 			ns = append(ns, m.Number)
 		}
 		s.say("push %.7s kind %d round %d of %.7s: %v", a.Build.SHA, a.Build.Kind, a.Build.Round, a.Build.Of, ns)
-	case "note", "pin":
+	case "note":
 	default:
 		s.say("%s %.7s #%d %s %s %.7s", a.Do, a.SHA, a.PR, a.Cause, a.Text, a.Evidence)
 	}
 	switch a.Do {
-	case "pin":
-		s.prs[a.PR].Pinned = s.prs[a.PR].Head
 	case "note":
 		s.prs[a.PR].Note = a.Text
 	case "delete":
@@ -533,8 +532,6 @@ func (s *Sim) eject(a queue.Action) {
 	s.Ejected[a.Cause]++
 	s.Left[a.PR] = a.Cause
 	switch a.Cause {
-	case "moved":
-		p.back = s.now + 10*time.Minute
 	case "conflict":
 		if !p.conflict && !(p.ahead > 0 && s.holds[s.trunk][p.ahead]) {
 			s.broke(3, "#%d was ejected for a conflict it does not have", a.PR)
@@ -598,8 +595,8 @@ func (s *Sim) land(a queue.Action) {
 	}
 	for _, m := range a.Members {
 		p := s.prs[m.Number]
-		if !p.queued || p.Head != m.Head || p.Pinned != m.Head {
-			s.broke(2, "#%d landed at %.12s, not the head it is queued at", m.Number, m.Head)
+		if !p.queued || p.Head != m.Head || p.Checks != queue.Success {
+			s.broke(2, "#%d landed at %.12s, which is not its head with its checks passed", m.Number, m.Head)
 		}
 		if p.landed {
 			continue

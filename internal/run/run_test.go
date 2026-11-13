@@ -46,9 +46,6 @@ type pull struct {
 	// holds past the page it returns.
 	threads []bool
 	unread  int
-	// forced is the head a force-push replaced, and when.
-	forced   string
-	forcedAt time.Time
 }
 
 type comment struct {
@@ -91,9 +88,6 @@ func (h *hub) node(p *pull) map[string]any {
 	for name, at := range p.labels {
 		labels = append(labels, map[string]any{"name": name})
 		events = append(events, map[string]any{"createdAt": at, "label": map[string]any{"name": name}})
-	}
-	if p.forced != "" {
-		events = append(events, map[string]any{"createdAt": p.forcedAt, "beforeCommit": map[string]any{"oid": p.forced}})
 	}
 	for _, sha := range p.heads {
 		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha)}})
@@ -430,49 +424,49 @@ func TestARedTrunkEjectsNobody(t *testing.T) {
 	}
 }
 
-func TestAConflictWithTheTrunkAndAMovedHeadLeave(t *testing.T) {
+func TestAConflictWithTheTrunkLeaves(t *testing.T) {
 	w := newWorld(t, `{}`)
 	one := w.queue(1, "same", "one\n")
 	w.o.Outside("same", "other\n")
-	two := w.queue(2, "b", "2\n")
-	w.round()
-	two.heads = append(two.heads, w.o.Amend(2, "b", "2 again\n"))
 	w.rounds(2)
 	if w.queued(1) || !w.said(1, "attributed=conflict") {
 		t.Errorf("#1 conflicts with the trunk: queued %v, comments %+v", w.queued(1), one.comments)
 	}
-	if w.queued(2) || w.landed(2) || !w.said(2, "<!-- merge-queue eject "+two.heads[0]+" attributed=moved -->") {
-		t.Errorf("#2's head moved: queued %v, landed %v, comments %+v\n%s", w.queued(2), w.landed(2), two.comments, w.log)
-	}
-	if s := w.last(two.heads[0], "merge-queue"); s.State != "error" {
-		t.Errorf("the status on #2's old head is %q", s.State)
-	}
-	if _, err := w.q.Add(2, false); err != nil {
-		t.Fatal(err)
-	}
-	w.rounds(3)
-	if !w.landed(2) || !w.o.Holds(w.o.Trunk(), "b") {
-		t.Errorf("#2, queued again at its new head, did not land\n%s", w.log)
-	}
 }
 
-func TestAForcePushAfterItWasQueuedTakesAPullRequestOut(t *testing.T) {
-	w := newWorld(t, `{}`)
-	p := w.queue(1, "a", "1\n")
-	was := p.heads[0]
-	w.now = w.now.Add(time.Second)
-	// The old head, and the queue's status on it, are no longer among its commits.
-	p.heads, p.forced, p.forcedAt = []string{w.o.Amend(1, "a", "1 again\n")}, was, w.now
-	w.rounds(3)
-	if w.queued(1) || w.landed(1) || !w.said(1, "<!-- merge-queue eject "+was+" attributed=moved -->") {
-		t.Errorf("queued %v, landed %v, comments %+v\n%s", w.queued(1), w.landed(1), p.comments, w.log)
-	}
+func TestAPushToAQueuedPullRequestLandsItsNewHeadOnceThatHeadIsAdmitted(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff"]}`)
+	p := w.open(1, "a", "1\n")
+	w.set(p.heads[0], "signoff", "success")
 	if _, err := w.q.Add(1, false); err != nil {
 		t.Fatal(err)
 	}
+	w.round() // built at its first head, and CI passed the build
+	before := w.o.Trunk()
+	p.heads = append(p.heads, w.o.Amend(1, "a", "1 again\n"))
 	w.rounds(3)
-	if !w.landed(1) {
-		t.Errorf("#1, queued again at its new head, did not land\n%s", w.log)
+	if !w.queued(1) || w.o.Trunk() != before || len(p.comments) != 0 {
+		t.Fatalf("a push to #1: queued %v, trunk moved %v, comments %+v\n%s", w.queued(1), w.o.Trunk() != before, p.comments, w.log)
+	}
+	if s := w.last(p.heads[1], "merge-queue"); s.State != "pending" || s.Description != "waits: signoff has not passed" {
+		t.Errorf("the status on #1's new head says %q, %q", s.State, s.Description)
+	}
+	w.set(p.heads[1], "signoff", "success")
+	w.rounds(3)
+	if s := w.last(p.heads[1], "merge-queue"); !w.landed(1) || s.State != "success" || !strings.HasPrefix(s.Description, "landed as ") {
+		t.Errorf("#1 did not land at its new head once that head was signed off\n%s", w.log)
+	}
+}
+
+func TestAForcePushToAQueuedPullRequestLandsItsNewHead(t *testing.T) {
+	w := newWorld(t, `{}`)
+	p := w.queue(1, "a", "1\n")
+	w.round()
+	// The old head, and the queue's status on it, are no longer among its commits.
+	p.heads = []string{w.o.Amend(1, "a", "1 again\n")}
+	w.rounds(3)
+	if !w.landed(1) || len(p.comments) != 0 {
+		t.Errorf("landed %v, comments %+v\n%s", w.landed(1), p.comments, w.log)
 	}
 }
 

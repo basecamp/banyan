@@ -19,7 +19,7 @@ Land every ready pull request as soon as CI can prove it. Never land an unproven
 Each is a check in `eval/`. One failure in any simulated world fails the eval.
 
 1. The trunk only fast-forwards to a SHA whose whole build passed.
-2. A pull request lands only at the head it was queued at.
+2. A pull request lands only at its head, as the build that lands it merged it, and only once that head passed its own checks.
 3. With no flakes, and a trunk that fails at most once during a test, no innocent pull request is ejected.
 4. Every queue drains, given a CI that eventually answers.
 5. A tick on an unchanged world does nothing.
