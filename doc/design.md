@@ -28,7 +28,7 @@ The landing is one atomic push: the trunk moves to the candidate, and the candid
 
 A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too. Until then it may yet land them all. Where rounds are probes, which answer in a fraction of a build, the chain waits for that answer. Where they are whole builds it does not wait: it is built beside the candidates still running.
 
-The red candidate is narrowed by rounds: builds of some of its prefixes. A round's build never lands. What the rounds have said so far is a span, from the highest prefix that passed to the lowest above it that failed. The culprit is in it. A build that passed is read as soon as it reports. One that failed is read once its whole round has reported, since a failure means nothing until the round shows what passed beside it.
+The red candidate is narrowed by rounds: builds of some of its prefixes. A round's build never lands. What the rounds have said so far is a span, from the highest prefix that passed to the lowest above it that failed. The culprit is in it. A round is read once every build in it has reported, and the rounds are read in order.
 
 - **The candidate's tree passes:** the red was a flake, and its pull requests go back on the chain. Where probes passed, a whole build of the tree decides. The build that passed is a round's and never lands, so a flake costs one build more than it has to. Letting it land would save that build on about three candidates in a hundred, which is under a twentieth on every indicator, so it is left as it is until a repository's own flake rate says otherwise.
 - **The tip fails:** the trunk is red. Nobody is blamed. The queue holds, and builds the tip and the candidate's tree again after `recheck`. If a pull request labelled as a fix has yet to be built, the chain goes on for it though the trunk is red. A pull request labelled as a fix ends the batch it is in, so its candidate holds nothing queued after it.
@@ -38,7 +38,7 @@ The red candidate is narrowed by rounds: builds of some of its prefixes. A round
 
 ### The fair test
 
-A pull request leaves on three builds in three rounds in a row: its prefix failed, the prefix below it passed, and its own failed again. Each round is pushed as soon as CI has begun every build of the round before, whatever that round will say. So the three run side by side, and each began after the last. A trunk or a CI that was broken for a while and failed both failures would have failed the pass between them too.
+A pull request leaves on three builds in three rounds in a row: its prefix failed, the prefix below it passed, and its own failed again. Each round is pushed as soon as CI has begun every build of the round before, whatever that round will say. So the three run side by side, and each began after the last. No more than three rounds are begun past the last one read, since a test is three: a round whose builds report minutes apart starts no test over on its half. A trunk or a CI that was broken for a while and failed both failures would have failed the pass between them too.
 
 Where the span holds several pull requests, each round is the next build of every one's test, so the test finds the culprit wherever it is. A pass of the candidate's own tree clears it, as above.
 
@@ -48,7 +48,7 @@ The red candidate's own failure is not one of the three. It began a build time o
 
 A build that is lost breaks the test, and the next round starts it again. So the three builds of a test always begin close together.
 
-Only the pull requests the rounds have not ruled out stay off the chain. The rest go back on it at once.
+Only the pull requests the rounds have not ruled out stay off the chain. The rest go back on it at once. One whose merge there would be the red candidate's own tree waits with them, since a build of that tree is an attempt of the red candidate and not a candidate on the chain.
 
 A red candidate and its rounds stand while the trunk moves under them, since they prove what they prove about the commits they were built on. They go when a pull request in the trees they build leaves the queue, and when their base is no longer the tip and fails by itself. So several red candidates are narrowed at once, each beside a chain that keeps landing.
 

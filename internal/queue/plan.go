@@ -65,7 +65,7 @@ type red struct {
 	// nothing has passed.
 	lo, hi  int
 	last    int // the newest round
-	read    int // the newest round read whole, with every round before it
+	read    int // the newest round read, with every round before it
 	pushed  time.Time
 	running bool // a round's build has no verdict yet
 	tip     bool // the tip failed in the last round that passed nothing
@@ -233,7 +233,7 @@ func (p *plan) read() {
 
 	for _, r := range p.reds {
 		for _, m := range r.suspects() {
-			p.waits[m.Number] = "a build that holds it failed, and the queue is finding the cause"
+			p.waits[m.Number] = suspected
 			if p.held {
 				p.waits[m.Number] = redTrunk
 			}
@@ -270,8 +270,7 @@ func (p *plan) stackedOn(r *red, b Build) {
 }
 
 // weigh reads a red candidate's rounds in order, up to the first with a build still running,
-// and leaves what they say on it. Of that round it reads only what passed: a build that
-// passed says so whatever the rest of its round will say, and one that failed does not.
+// and leaves what they say on it.
 func (p *plan) weigh(r *red) {
 	k := len(r.chain)
 	r.lo, r.hi, r.whole, r.rounds = -1, k, !p.c.Probes, map[int][]Build{}
@@ -293,6 +292,7 @@ func (p *plan) weigh(r *red) {
 			switch j := len(b.Chain); {
 			case b.Verdict == Pending:
 				r.running = true
+				return
 			case b.Verdict == Error:
 				r.void = true
 			case b.Verdict == Success:
@@ -300,38 +300,32 @@ func (p *plan) weigh(r *red) {
 			}
 			probe = b.Kind == Probe
 		}
+		r.read = n
 		for _, b := range r.rounds[n] {
 			if j := len(b.Chain); b.Verdict == Failure && j > g && (low < 0 || j < low) {
 				low = j
 			}
 		}
-		if r.running {
-			low = -1
-		}
 		switch {
 		case r.void:
+			continue
 		case g >= k:
 			r.flake, r.cleared = probe, !probe
-		default:
-			if g >= 0 {
-				r.tip, r.lo = false, max(r.lo, g)
-			}
-			switch {
-			case low < 0 && r.hi <= r.lo:
-				r.hi = k
-			case low < 0:
-			case low <= r.lo, low == 0, !probe && !r.whole:
-				// The tip failed, or a prefix that had passed, or a whole build where probes
-				// had passed: nothing the rounds have said so far holds.
-				r.lo, r.hi, r.tip, r.whole, r.flake = -1, k, low == 0, r.whole || !probe, false
-			case low < r.hi || r.hi <= r.lo:
-				r.hi = low
-			}
+			continue
+		case g >= 0:
+			r.tip, r.lo = false, max(r.lo, g)
 		}
-		if r.running {
-			return
+		switch {
+		case low < 0 && r.hi <= r.lo:
+			r.hi = k
+		case low < 0:
+		case low <= r.lo, low == 0, !probe && !r.whole:
+			// The tip failed, or a prefix that had passed, or a whole build where probes
+			// had passed: nothing the rounds have said so far holds.
+			r.lo, r.hi, r.tip, r.whole, r.flake = -1, k, low == 0, r.whole || !probe, false
+		case low < r.hi || r.hi <= r.lo:
+			r.hi = low
 		}
-		r.read = n
 	}
 }
 
@@ -404,12 +398,11 @@ func (p *plan) prefix(j int) SHA {
 }
 
 // judge ejects the pull request that a red candidate's rounds have put to a fair test, and
-// says whether it ejected any. The test's builds are all in rounds read whole, so no round
-// before them has yet to say that what they show does not hold.
+// says whether it ejected any.
 func (p *plan) judge() bool {
 	ejected := false
 	for _, r := range p.reds {
-		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 && t[2].Round <= r.read {
+		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 {
 			p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: []SHA{t[1].SHA, t[0].SHA, t[2].SHA},
 				Text: fmt.Sprintf("the build with it failed, the build without it then passed (%.12s), and the build with it failed again", t[1].SHA)})
 			ejected = true
@@ -488,12 +481,14 @@ func (p *plan) rounds() {
 		span := r.hi - low
 		// A span of one, and a span that one round of whole builds reaches all of, is put
 		// to the test at once: each round is the next build of every suspect's test, pushed
-		// as soon as CI has begun the round before, whatever that round will say.
+		// as soon as CI has begun the round before, whatever that round will say. A test is
+		// three rounds, so no more than three are begun past the last round read: until
+		// that one has reported whole, what its half says restarts no test.
 		test := span == 1 || (whole && span <= max(p.c.Slots, 2))
 		begun := !slices.ContainsFunc(r.rounds[r.last], func(b Build) bool { return !b.begun() })
 		var points []int
 		switch {
-		case r.passed, (r.tip || r.void) && p.w.Now.Sub(r.pushed) < p.c.Recheck, r.running && (r.flake || r.tip || !test || !begun):
+		case r.passed, (r.tip || r.void) && p.w.Now.Sub(r.pushed) < p.c.Recheck, r.running && (r.flake || r.tip || !test || !begun || r.last >= r.read+3):
 			continue
 		case r.flake:
 			// The probes passed on the red tree itself, so a whole build of it decides.
@@ -562,6 +557,10 @@ func (p *plan) fill() {
 				p.waits[pr.Number] = "it conflicts with a pull request ahead of it"
 				continue
 			}
+			if slices.ContainsFunc(p.reds, func(r *red) bool { return r.of == sha }) {
+				p.waits[pr.Number] = suspected
+				continue
+			}
 			p.chain = append(p.chain, Member{pr.Number, pr.Head, sha})
 			in[pr.Number], parent = true, sha
 			if added++; added == max(p.c.MaxBatch, 1) || pr.First {
@@ -575,6 +574,7 @@ func (p *plan) fill() {
 	}
 }
 
+const suspected = "a build that holds it failed, and the queue is finding the cause"
 const redTrunk = "the trunk itself is failing, and the queue holds until it passes"
 
 // notes writes each pull request's place in the queue on its head, when it changed.

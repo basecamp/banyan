@@ -1,0 +1,7 @@
+{
+  "story": "Found by the eval in a simulated hey2, 2026-11-13, at the flake rate hey2 measured. #61 and #62 failed together on a good tree. The first round passed #61 alone, so it went back on the chain, in a candidate of its own. Then the second and third rounds failed #61 alone, both flakes, so the rounds started over with #61 the suspect and #62 let go. The queue stacked #62 on #61's candidate. That merge is the red candidate's own commit, so it was pushed under a new try, read back as one more attempt of the red candidate, not seen on the chain, and pushed again: six times in one tick, and again on every tick. A pull request whose merge here would be a red candidate still under test waits for that test.",
+  "build": 34,
+  "prs": [{"number": 61, "at": 0}, {"number": 62, "at": 0}],
+  "builds": [{"flakes": true}, {"flakes": true}, {}, {"flakes": true}, {}, {"flakes": true}, {"flakes": true}],
+  "ejected": []
+}
