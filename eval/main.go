@@ -391,7 +391,15 @@ func main() {
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
+	again := flag.String("replay", "", "plan one recorded tick again from its recording alone, and print the actions")
 	flag.Parse()
+	if *again != "" {
+		if err := planAgain(*again); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *recordings != "" {
 		sc, win, err := live(*recordings)
 		if err != nil {

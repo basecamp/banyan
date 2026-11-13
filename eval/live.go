@@ -215,3 +215,21 @@ func (w window) simulated(shape Shape, was Score) Score {
 	sc.Landed /= seeds
 	return sc
 }
+
+// planAgain plans one recorded tick again from the recording alone, which holds everything the
+// tick read, and prints the actions.
+func planAgain(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var rec queue.Recording
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return err
+	}
+	for _, a := range rec.Replay() {
+		line, _ := json.Marshal(a)
+		fmt.Println(string(line))
+	}
+	return nil
+}

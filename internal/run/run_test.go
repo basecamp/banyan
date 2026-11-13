@@ -245,10 +245,13 @@ func newWorld(t *testing.T, config string) *world {
 func (w *world) queue(n int, file, content string) *pull {
 	p := w.open(n, file, content)
 	w.now = w.now.Add(time.Second)
-	if _, err := w.q.Add(n, false); err != nil {
-		w.t.Fatalf("adding #%d: %v", n, err)
-	}
+	w.label(n)
 	return p
+}
+
+// label queues a pull request as a person does, by labelling it.
+func (w *world) label(n int) {
+	w.pulls[n].labels["merge-queue"] = w.now
 }
 
 // ci judges every commit on the queue's branches that it has not judged.
@@ -438,9 +441,7 @@ func TestAPushToAQueuedPullRequestLandsItsNewHeadOnceThatHeadIsAdmitted(t *testi
 	w := newWorld(t, `{"admit": ["signoff"]}`)
 	p := w.open(1, "a", "1\n")
 	w.set(p.heads[0], "signoff", "success")
-	if _, err := w.q.Add(1, false); err != nil {
-		t.Fatal(err)
-	}
+	w.label(1)
 	w.round() // built at its first head, and CI passed the build
 	before := w.o.Trunk()
 	p.heads = append(p.heads, w.o.Amend(1, "a", "1 again\n"))
@@ -548,17 +549,15 @@ exit 1
 	}
 }
 
-func TestARemovalRefusesTheLandingUnderWay(t *testing.T) {
+func TestAPullRequestWhoseLabelGoesDoesNotLand(t *testing.T) {
 	w := newWorld(t, `{}`)
 	w.queue(1, "a", "1\n")
 	w.round() // pushed, and CI passed it
 	before := w.o.Trunk()
-	if err := w.q.Remove(1, "a person", "not yet"); err != nil {
-		t.Fatal(err)
-	}
+	delete(w.pulls[1].labels, "merge-queue")
 	w.rounds(2)
-	if w.landed(1) || w.o.Trunk() != before || !w.said(1, "attributed=removed") {
-		t.Errorf("#1 was removed and landed %v; comments %+v", w.landed(1), w.pulls[1].comments)
+	if w.landed(1) || w.o.Trunk() != before || len(w.o.Branches("merge-queue/")) != 0 {
+		t.Errorf("#1 lost its label and landed %v; the queue's branches are %v\n%s", w.landed(1), w.o.Branches("merge-queue/"), w.log)
 	}
 }
 
@@ -567,9 +566,7 @@ func TestAReviewWithdrawnAsTheLandingBeginsStopsIt(t *testing.T) {
 	p := w.open(1, "a", "1\n")
 	w.set(p.heads[0], "signoff", "success")
 	w.set(p.heads[0], "review", "success")
-	if _, err := w.q.Add(1, false); err != nil {
-		t.Fatal(err)
-	}
+	w.label(1)
 	w.round() // pushed, and CI passed it
 	before := w.o.Trunk()
 	if w.landed(1) {
@@ -602,15 +599,13 @@ func TestAPullRequestThatWaitsOnACheckNamesIt(t *testing.T) {
 	}
 	w.set(passed.heads[0], "review", "success")
 	w.set(failed.heads[0], "review", "failure")
-	for n := 1; n <= 2; n++ {
-		if _, err := w.q.Add(n, false); err != nil {
-			t.Fatalf("adding #%d: %v", n, err)
-		}
-	}
-	if _, err := w.q.Add(3, false); err == nil || !strings.HasPrefix(err.Error(), "refused #3: checks: review failed at ") {
-		t.Errorf("its review failed: %v", err)
+	for n := 1; n <= 3; n++ {
+		w.label(n)
 	}
 	w.rounds(5)
+	if s := w.last(failed.heads[0], "merge-queue"); s.Description != "waits: review failed" {
+		t.Errorf("#3's review failed and its status says %q", s.Description)
+	}
 	if s := w.last(unreviewed.heads[0], "merge-queue"); s.Description != "waits: review has not passed" {
 		t.Errorf("#2 waits on a review and its status says %q", s.Description)
 	}
@@ -619,56 +614,45 @@ func TestAPullRequestThatWaitsOnACheckNamesIt(t *testing.T) {
 	}
 }
 
-func TestAddRefusesInOneLineAndTwiceIsOnce(t *testing.T) {
+func TestAPullRequestThatMayNotJoinWaitsInPlaceAndSaysWhy(t *testing.T) {
 	w := newWorld(t, `{"admit": ["signoff"]}`)
-	draft := w.open(1, "a", "1\n")
+	draft, red, ok := w.open(1, "a", "1\n"), w.open(2, "b", "2\n"), w.open(3, "c", "3\n")
 	draft.draft = true
-	if _, err := w.q.Add(1, false); err == nil || err.Error() != "refused #1: ready: it is a draft" {
-		t.Errorf("a draft: %v", err)
-	}
-	red := w.open(2, "b", "2\n")
+	w.set(draft.heads[0], "signoff", "success")
 	w.set(red.heads[0], "signoff", "failure")
-	if _, err := w.q.Add(2, false); err == nil || !strings.HasPrefix(err.Error(), "refused #2: checks: ") {
-		t.Errorf("red checks: %v", err)
+	for n := 1; n <= 3; n++ {
+		w.label(n)
 	}
-	ok := w.open(3, "c", "3\n")
-	for i := 0; i < 2; i++ {
-		if said, err := w.q.Add(3, false); err != nil || said != "queued #3 at "+ok.heads[0] {
-			t.Errorf("adding #3: %q, %v", said, err)
-		}
-	}
-	// Its own checks have not passed, so it waits in place and says so.
 	w.rounds(2)
-	if e, _ := w.q.Entries(3); len(e) != 1 || e[0].State != "held" || !w.queued(3) {
-		t.Errorf("#3 waits on its checks: %+v", e)
+	for p, want := range map[*pull]string{draft: "waits: it is a draft", red: "waits: signoff failed", ok: "waits: signoff has not passed"} {
+		if s := w.last(p.heads[0], "merge-queue"); s.State != "pending" || s.Description != want || !w.queued(p.number) {
+			t.Errorf("#%d says %q, %q, and should wait in place saying %q", p.number, s.State, s.Description, want)
+		}
 	}
 	w.set(ok.heads[0], "signoff", "success")
 	w.rounds(3)
-	if e, _ := w.q.Entries(3); len(e) != 1 || e[0].State != "landed" {
-		t.Errorf("#3 after its checks passed: %+v\n%s", e, w.log)
+	if s := w.last(ok.heads[0], "merge-queue"); !w.landed(3) || w.landed(1) || w.landed(2) || s.State != "success" {
+		t.Errorf("landed: draft %v, red %v, passed %v; #3 says %q\n%s", w.landed(1), w.landed(2), w.landed(3), s.Description, w.log)
 	}
 }
 
 func TestAnUnresolvedThreadKeepsAPullRequestOutAndSoDoThreadsTheQueueCannotRead(t *testing.T) {
 	w := newWorld(t, `{"threads": true}`)
-	open := w.open(1, "a", "1\n")
+	open := w.queue(1, "a", "1\n")
 	open.threads = []bool{true, false}
-	if _, err := w.q.Add(1, false); err == nil || err.Error() != "refused #1: ready: 1 review threads are unresolved" {
-		t.Errorf("an unresolved thread: %v", err)
-	}
 	// GitHub hands over the first hundred threads, and any past them may be unresolved.
-	long := w.open(2, "b", "2\n")
+	long := w.queue(2, "b", "2\n")
 	long.threads, long.unread = []bool{true}, 1
-	if _, err := w.q.Add(2, false); err == nil || err.Error() != "refused #2: ready: it has more review threads than the queue reads" {
-		t.Errorf("threads past the page: %v", err)
+	w.rounds(3)
+	for p, want := range map[*pull]string{open: "waits: 1 review threads are unresolved", long: "waits: it has more review threads than the queue reads"} {
+		if s := w.last(p.heads[0], "merge-queue"); s.Description != want || w.landed(p.number) {
+			t.Errorf("#%d says %q and landed %v, and should wait saying %q", p.number, s.Description, w.landed(p.number), want)
+		}
 	}
 	open.threads[1] = true
-	if _, err := w.q.Add(1, false); err != nil {
-		t.Errorf("every thread resolved: %v", err)
-	}
 	w.rounds(3)
-	if !w.landed(1) {
-		t.Errorf("#1 never landed\n%s", w.log)
+	if !w.landed(1) || w.landed(2) {
+		t.Errorf("landed: resolved %v, unread %v\n%s", w.landed(1), w.landed(2), w.log)
 	}
 }
 

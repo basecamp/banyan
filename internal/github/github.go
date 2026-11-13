@@ -187,11 +187,10 @@ type Names struct {
 	Threads bool     // whether an unresolved review thread keeps it out
 }
 
-// Pull is a pull request the queue knows, open or not.
+// Pull is a pull request the queue knows, open or merged.
 type Pull struct {
 	queue.PR
 	Merged bool
-	Closed bool
 	// Statuses are those of its head.
 	Statuses map[string]Status
 }
@@ -200,7 +199,6 @@ type pullNode struct {
 	Number      int
 	IsDraft     bool
 	Merged      bool
-	Closed      bool
 	BaseRefName string
 	HeadRefOid  string
 	HeadRefName string
@@ -226,7 +224,7 @@ type pullNode struct {
 	}
 }
 
-const pullFields = `number isDraft merged closed baseRefName headRefOid headRefName headRepositoryOwner { login }
+const pullFields = `number isDraft merged baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 50) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes {
 		... on LabeledEvent { createdAt label { name } } } }
@@ -234,7 +232,7 @@ const pullFields = `number isDraft merged closed baseRefName headRefOid headRefN
 	commits(last: 1) { nodes { commit { oid ` + rollupFields + ` } } }`
 
 func (n Names) pull(node pullNode) Pull {
-	p := Pull{Merged: node.Merged, Closed: node.Closed}
+	p := Pull{Merged: node.Merged}
 	p.Number, p.Head = node.Number, node.HeadRefOid
 	if node.Owner.Login != "" && node.HeadRefName != "" {
 		p.Branch = node.Owner.Login + "/" + node.HeadRefName
@@ -315,23 +313,6 @@ func (c *Client) Queue(n Names) ([]Pull, error) {
 	}
 	sort.Slice(pulls, func(i, j int) bool { return pulls[i].Number < pulls[j].Number })
 	return pulls, nil
-}
-
-// Pull is one pull request, open or not.
-func (c *Client) Pull(n Names, number int) (Pull, error) {
-	var out struct {
-		Repository struct{ PullRequest *pullNode }
-	}
-	err := c.graphql(`query Pull($owner: String!, $name: String!, $number: Int!) {
-		repository(owner: $owner, name: $name) { pullRequest(number: $number) { `+pullFields+` } } }`,
-		map[string]any{"number": number}, &out)
-	if err != nil {
-		return Pull{}, err
-	}
-	if out.Repository.PullRequest == nil {
-		return Pull{}, fmt.Errorf("#%d is no pull request of %s", number, c.Repo)
-	}
-	return n.pull(*out.Repository.PullRequest), nil
 }
 
 // Landed is the pull requests merged lately that still carry the queue's label.
@@ -424,11 +405,6 @@ func (c *Client) Comment(number int, body, marker string, since time.Time) error
 		}
 	}
 	return c.rest("POST", fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body + "\n\n" + marker}, nil)
-}
-
-// Label puts a label on a pull request.
-func (c *Client) Label(number int, label string) error {
-	return c.rest("POST", fmt.Sprintf("/issues/%d/labels", number), map[string][]string{"labels": {label}}, nil)
 }
 
 // Unlabel takes a label off a pull request that may not carry it.

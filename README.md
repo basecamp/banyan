@@ -9,12 +9,10 @@ Banyan talks to git and GitHub and nothing else. Your CI builds the branches Ban
 ## Use
 
 ```
-banyan add <pr> [--first]        # queue a pull request, or say in one line why not
-banyan status [<pr>] [--json]    # the queue, or one pull request's place or outcome
-banyan remove <pr> <who> <why>   # take one out, saying who and why on it
-banyan tick [--dry-run]          # land what passed, build what is next
-banyan replay <recording>        # plan a recorded tick again
+banyan tick [--dry-run] [--record <dir>]   # land what passed, build what is next
 ```
+
+A pull request joins the queue when it's labelled `merge-queue` and leaves when the label comes off. Label it `merge-queue-first` as well and it goes ahead of the rest. The `merge-queue` status on its head says where it stands: its place, what it waits on, that it landed, or that it left and why.
 
 `banyan tick` is the queue. It stores nothing: it reads the trunk, the labelled pull requests and the branches it pushed, acts, and exits. Run it on a schedule and whenever a build begins or finishes, one at a time, from the trunk's own checkout.
 

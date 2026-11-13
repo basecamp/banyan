@@ -11,8 +11,8 @@ The queue is `banyan tick`, run by the repository's own workflow. It stores noth
 
 ## Where a pull request stands
 
-- **One pull request:** the `merge-queue` status on its head. It says its place, what it waits on by name, that it landed, or that it left and why. `banyan status <pr> --json` reads the same.
-- **The queue:** `banyan status`, in a clone of the repository.
+- **One pull request:** the `merge-queue` status on its head. It says its place, what it waits on by name, that it landed, or that it left and why.
+- **The queue:** the open pull requests that carry the label, each with that status. `banyan tick --dry-run`, in a clone of the repository, prints what the next tick would do and does none of it.
 - **Its builds:** the branches under `merge-queue/`, each with its CI's status on the commit.
 - **Why it left:** the comment on it names the head judged, the cause and the builds the verdict rests on. A culprit's comment links three builds: failed with it, passed without it, failed with it again.
 
@@ -20,8 +20,8 @@ A status that begins "the queue is stopped:" is the queue's own failure, not the
 
 ## Queue, take out, stop
 
-- **Queue:** label it, or `banyan add <pr>`, which says in one line why not where it can't.
-- **Take out:** take the label off, or `banyan remove <pr> <who> <why>`, which says so on the pull request.
+- **Queue:** label it. Where it can't join yet, its status says what it waits on.
+- **Take out:** take the label off. The next tick drops the builds that hold it, and a landing rereads the labels just before it moves the trunk.
 - **Stop:** disable the tick's workflow and cancel the runs still waiting. A tick already running may land what it read as passed. Enable the workflow to resume: nothing is lost, since nothing was stored.
 
 A push to a queued pull request keeps it queued: the builds that hold it are dropped, and the new head lands once its own checks pass. Take the label off first where that isn't wanted.
@@ -30,7 +30,7 @@ A push to a queued pull request keeps it queued: the builds that hold it are dro
 
 Each tick records what it read and what it planned, where the workflow passes `--record <dir>` and uploads the folder.
 
-- **Plan one again:** `banyan replay <recording>` prints the actions that world calls for. It is the same function the tick ran, so a surprise replays exactly.
+- **Plan one again:** `go run ./eval -replay <recording>` in Banyan's repository prints the actions that world calls for. It is the same function the tick ran, so a surprise replays exactly on the release that recorded it.
 - **Score a stretch of them:** `go run ./eval -live <dir>` in Banyan's repository, with every recording in one folder. The row has the simulator's columns, so it sits beside `eval/scoreboard.tsv`.
 
 A surprise from a real queue becomes a case in `eval/cases/` before its fix. The hillclimb skill says how.
