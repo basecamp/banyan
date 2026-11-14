@@ -6,8 +6,10 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -23,6 +25,7 @@ type Client struct {
 	Repo  string // owner/name
 	Token string
 	HTTP  *http.Client
+	Wait  func(time.Duration)
 	// Spent is what the client has asked of GitHub so far, by the quota each reply named
 	// (core, graphql): how many requests it made, and how much of the hour's quota the newest
 	// reply said is left.
@@ -45,22 +48,42 @@ type Status struct {
 	Running bool
 }
 
-func (c *Client) do(method, path string, in, out any) error {
-	var body io.Reader
+const maxWait = 5 * time.Second
+
+func (c *Client) do(again bool, method, path string, in, out any) error {
+	var payload []byte
 	if in != nil {
-		data, _ := json.Marshal(in)
-		body = bytes.NewReader(data)
+		payload, _ = json.Marshal(in)
 	}
-	req, _ := http.NewRequest(method, strings.TrimRight(c.API, "/")+path, body)
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/vnd.github+json")
 	client := c.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
+	wait := c.Wait
+	if wait == nil {
+		wait = time.Sleep
+	}
+	for attempt := 0; ; attempt++ {
+		after, retry, err := c.once(client, method, path, payload, out)
+		if err == nil || !again || !retry || attempt == 3 {
+			return err
+		}
+		base := min(500*time.Millisecond<<attempt, maxWait)
+		wait(min(max(base, after)+rand.N(base/2), maxWait))
+	}
+}
+
+func (c *Client) once(client *http.Client, method, path string, payload []byte, out any) (time.Duration, bool, error) {
+	var body io.Reader
+	if payload != nil {
+		body = bytes.NewReader(payload)
+	}
+	req, _ := http.NewRequest(method, strings.TrimRight(c.API, "/")+path, body)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", "application/vnd.github+json")
 	res, err := client.Do(req)
 	if err != nil {
-		return err
+		return 0, true, &Error{Text: fmt.Sprintf("%s %s: %v", method, path, err), Err: err, Unavailable: true}
 	}
 	defer res.Body.Close()
 	if quota := res.Header.Get("X-RateLimit-Resource"); quota != "" {
@@ -70,26 +93,45 @@ func (c *Client) do(method, path string, in, out any) error {
 		}
 		c.Spent[quota] = Quota{c.Spent[quota].Requests + 1, left}
 	}
-	data, _ := io.ReadAll(res.Body)
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return 0, true, &Error{Code: res.StatusCode, Text: fmt.Sprintf("%s %s: %v", method, path, err), Err: err, Unavailable: true}
+	}
 	if res.StatusCode >= 300 {
-		return &Error{Code: res.StatusCode, Text: fmt.Sprintf("%s %s: %s: %.300s", method, path, res.Status, data)}
+		var after time.Duration
+		if s, err := strconv.Atoi(strings.TrimSpace(res.Header.Get("Retry-After"))); err == nil && s > 0 {
+			after = time.Duration(s) * time.Second
+		}
+		secondary := res.StatusCode == 403 && (res.Header.Get("Retry-After") != "" || bytes.Contains(bytes.ToLower(data), []byte("secondary rate limit")))
+		retry := res.StatusCode == 429 || res.StatusCode == 502 || res.StatusCode == 503 || res.StatusCode == 504 || secondary
+		unavailable := res.StatusCode >= 500 || res.StatusCode == 429 || secondary || (res.StatusCode == 403 && res.Header.Get("X-RateLimit-Remaining") == "0")
+		return after, retry, &Error{Code: res.StatusCode, Text: fmt.Sprintf("%s %s: %s: %.300s", method, path, res.Status, data), Unavailable: unavailable}
 	}
 	if out != nil {
-		return json.Unmarshal(data, out)
+		return 0, false, json.Unmarshal(data, out)
 	}
-	return nil
+	return 0, false, nil
 }
 
-// Error is a refusal from GitHub.
+// Error is a refusal or transport failure talking to GitHub.
 type Error struct {
-	Code int
-	Text string
+	Code        int
+	Text        string
+	Err         error
+	Unavailable bool
 }
 
 func (e *Error) Error() string { return e.Text }
+func (e *Error) Unwrap() error { return e.Err }
 
-func (c *Client) rest(method, path string, in, out any) error {
-	return c.do(method, "/repos/"+c.Repo+path, in, out)
+// Unavailable says whether err was caused by GitHub failing or rate-limiting the queue.
+func Unavailable(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Unavailable
+}
+
+func (c *Client) rest(again bool, method, path string, in, out any) error {
+	return c.do(again, method, "/repos/"+c.Repo+path, in, out)
 }
 
 func (c *Client) graphql(query string, vars map[string]any, out any) error {
@@ -100,39 +142,54 @@ func (c *Client) graphql(query string, vars map[string]any, out any) error {
 	vars["owner"], vars["name"] = owner, name
 	var reply struct {
 		Data   json.RawMessage
-		Errors []struct{ Message string }
+		Errors []struct {
+			Type    string
+			Message string
+		}
 	}
-	if err := c.do("POST", "/graphql", map[string]any{"query": query, "variables": vars}, &reply); err != nil {
+	if err := c.do(true, "POST", "/graphql", map[string]any{"query": query, "variables": vars}, &reply); err != nil {
 		return err
 	}
 	if len(reply.Errors) > 0 {
-		return fmt.Errorf("graphql: %s", reply.Errors[0].Message)
+		t := reply.Errors[0].Type
+		return &Error{
+			Text:        "graphql: " + reply.Errors[0].Message,
+			Unavailable: t == "RATE_LIMITED" || t == "SERVICE_UNAVAILABLE" || t == "INTERNAL",
+		}
 	}
 	return json.Unmarshal(reply.Data, out)
+}
+
+type contextNode struct {
+	Typename    string `json:"__typename"`
+	Context     string
+	State       string
+	Description string
+	TargetURL   string `json:"targetUrl"`
+	CreatedAt   time.Time
+	Name        string
+	Status      string
+	Conclusion  string
+	DetailsURL  string `json:"detailsUrl"`
+	StartedAt   time.Time
 }
 
 // rollup is a commit's statuses and check runs, as GraphQL gives them.
 type rollup struct {
 	Contexts struct {
-		Nodes []struct {
-			Typename    string `json:"__typename"`
-			Context     string
-			State       string
-			Description string
-			TargetURL   string `json:"targetUrl"`
-			CreatedAt   time.Time
-			Name        string
-			Status      string
-			Conclusion  string
-			DetailsURL  string `json:"detailsUrl"`
-			StartedAt   time.Time
+		PageInfo struct {
+			HasNextPage bool
+			EndCursor   string
 		}
+		Nodes []contextNode
 	}
 }
 
-const rollupFields = `statusCheckRollup { contexts(first: 100) { nodes { __typename
+const contextFields = `pageInfo { hasNextPage endCursor } nodes { __typename
 	... on StatusContext { context state description targetUrl createdAt }
-	... on CheckRun { name status conclusion detailsUrl startedAt } } } }`
+	... on CheckRun { name status conclusion detailsUrl startedAt } }`
+
+const rollupFields = `statusCheckRollup { contexts(first: 100) { ` + contextFields + ` } }`
 
 // statuses is the newest report of each context: a commit status by its context, a check
 // run by its name.
@@ -213,21 +270,29 @@ type Pull struct {
 	Statuses map[string]Status
 }
 
+type labelEvent struct {
+	CreatedAt time.Time
+	Label     struct{ Name string }
+}
+
+type pullTimeline struct {
+	PageInfo struct {
+		HasPreviousPage bool
+		StartCursor     string
+	}
+	Nodes []labelEvent
+}
+
 type pullNode struct {
-	Number      int
-	IsDraft     bool
-	Merged      bool
-	BaseRefName string
-	HeadRefOid  string
-	HeadRefName string
-	Owner       struct{ Login string } `json:"headRepositoryOwner"`
-	Labels      struct{ Nodes []struct{ Name string } }
-	Timeline    struct {
-		Nodes []struct {
-			CreatedAt time.Time
-			Label     struct{ Name string }
-		}
-	} `json:"timelineItems"`
+	Number        int
+	IsDraft       bool
+	Merged        bool
+	BaseRefName   string
+	HeadRefOid    string
+	HeadRefName   string
+	Owner         struct{ Login string } `json:"headRepositoryOwner"`
+	Labels        struct{ Nodes []struct{ Name string } }
+	Timeline      pullTimeline `json:"timelineItems"`
 	ReviewThreads struct {
 		TotalCount int
 		Nodes      []struct{ IsResolved bool }
@@ -242,12 +307,24 @@ type pullNode struct {
 	}
 }
 
+const timelineFields = `pageInfo { hasPreviousPage startCursor } nodes {
+	... on LabeledEvent { createdAt label { name } } }`
+
 const pullFields = `number isDraft merged baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 50) { nodes { name } }
-	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { nodes {
-		... on LabeledEvent { createdAt label { name } } } }
+	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { ` + timelineFields + ` }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
 	commits(last: 1) { nodes { commit { oid ` + rollupFields + ` } } }`
+
+func queuedAt(events []labelEvent, label string) time.Time {
+	var at time.Time
+	for _, e := range events {
+		if e.Label.Name == label && e.CreatedAt.After(at) {
+			at = e.CreatedAt
+		}
+	}
+	return at
+}
 
 func (n Names) pull(node pullNode) Pull {
 	p := Pull{Merged: node.Merged}
@@ -260,11 +337,7 @@ func (n Names) pull(node pullNode) Pull {
 		labels[l.Name] = true
 	}
 	p.First = labels[n.First]
-	for _, e := range node.Timeline.Nodes {
-		if e.Label.Name == n.Label && e.CreatedAt.After(p.Queued) {
-			p.Queued = e.CreatedAt
-		}
-	}
+	p.Queued = queuedAt(node.Timeline.Nodes, n.Label)
 	for _, c := range node.Commits.Nodes {
 		if c.Commit.Oid == p.Head {
 			p.Statuses = c.Commit.Rollup.statuses()
@@ -298,21 +371,61 @@ func (n Names) pull(node pullNode) Pull {
 	return p
 }
 
-// Queue is the open pull requests labelled for the queue.
-func (c *Client) Queue(n Names) ([]Pull, error) {
-	var out struct {
-		Repository struct {
-			PullRequests struct {
-				PageInfo struct {
-					HasNextPage bool
-					EndCursor   string
+func (c *Client) pulls(n Names, nodes []pullNode) ([]Pull, error) {
+	var pages []rollupPage
+	for i := range nodes {
+		for queuedAt(nodes[i].Timeline.Nodes, n.Label).IsZero() && nodes[i].Timeline.PageInfo.HasPreviousPage && nodes[i].Timeline.PageInfo.StartCursor != "" {
+			prev := nodes[i].Timeline.PageInfo.StartCursor
+			var out struct {
+				Repository struct {
+					PullRequest struct {
+						Timeline pullTimeline `json:"timelineItems"`
+					}
 				}
-				Nodes []pullNode
+			}
+			err := c.graphql(`query Timeline($owner: String!, $name: String!, $number: Int!, $before: String!) {
+				repository(owner: $owner, name: $name) {
+					pullRequest(number: $number) {
+						timelineItems(last: 100, before: $before, itemTypes: [LABELED_EVENT]) { `+timelineFields+` } } } }`,
+				map[string]any{"number": nodes[i].Number, "before": prev}, &out)
+			if err != nil {
+				return nil, err
+			}
+			if nodes[i].Timeline = out.Repository.PullRequest.Timeline; nodes[i].Timeline.PageInfo.StartCursor == prev {
+				break
+			}
+		}
+		for _, cm := range nodes[i].Commits.Nodes {
+			if cm.Commit.Oid == nodes[i].HeadRefOid && cm.Commit.Rollup != nil && cm.Commit.Rollup.Contexts.PageInfo.HasNextPage {
+				pages = append(pages, rollupPage{cm.Commit.Oid, cm.Commit.Rollup})
 			}
 		}
 	}
+	if err := c.moreContexts(pages); err != nil {
+		return nil, err
+	}
 	var pulls []Pull
+	for _, node := range nodes {
+		pulls = append(pulls, n.pull(node))
+	}
+	return pulls, nil
+}
+
+// Queue is the open pull requests labelled for the queue.
+func (c *Client) Queue(n Names) ([]Pull, error) {
+	var nodes []pullNode
 	for after := any(nil); ; {
+		var out struct {
+			Repository struct {
+				PullRequests struct {
+					PageInfo struct {
+						HasNextPage bool
+						EndCursor   string
+					}
+					Nodes []pullNode
+				}
+			}
+		}
 		err := c.graphql(`query Queue($owner: String!, $name: String!, $label: String!, $after: String) {
 			repository(owner: $owner, name: $name) {
 				pullRequests(states: OPEN, labels: [$label], first: 25, after: $after) {
@@ -321,13 +434,15 @@ func (c *Client) Queue(n Names) ([]Pull, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, node := range out.Repository.PullRequests.Nodes {
-			pulls = append(pulls, n.pull(node))
-		}
+		nodes = append(nodes, out.Repository.PullRequests.Nodes...)
 		if !out.Repository.PullRequests.PageInfo.HasNextPage {
 			break
 		}
 		after = out.Repository.PullRequests.PageInfo.EndCursor
+	}
+	pulls, err := c.pulls(n, nodes)
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(pulls, func(i, j int) bool { return pulls[i].Number < pulls[j].Number })
 	return pulls, nil
@@ -338,15 +453,50 @@ func (c *Client) Landed(n Names) ([]Pull, error) {
 	var out struct {
 		Repository struct{ PullRequests struct{ Nodes []pullNode } }
 	}
-	err := c.graphql(`query Landed($owner: String!, $name: String!, $label: String!) {
+	if err := c.graphql(`query Landed($owner: String!, $name: String!, $label: String!) {
 		repository(owner: $owner, name: $name) {
 			pullRequests(states: MERGED, labels: [$label], first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
-				nodes { `+pullFields+` } } } }`, map[string]any{"label": n.Label}, &out)
-	var pulls []Pull
-	for _, node := range out.Repository.PullRequests.Nodes {
-		pulls = append(pulls, n.pull(node))
+				nodes { `+pullFields+` } } } }`, map[string]any{"label": n.Label}, &out); err != nil {
+		return nil, err
 	}
-	return pulls, err
+	return c.pulls(n, out.Repository.PullRequests.Nodes)
+}
+
+type rollupPage struct {
+	oid string
+	r   *rollup
+}
+
+func (c *Client) moreContexts(pages []rollupPage) error {
+	for len(pages) > 0 {
+		batch := pages[:min(len(pages), 40)]
+		pages = pages[len(batch):]
+		q := "query Contexts($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {"
+		for i, p := range batch {
+			q += fmt.Sprintf(" c%d: object(oid: %q) { ... on Commit { statusCheckRollup { contexts(first: 100, after: %q) { %s } } } }",
+				i, p.oid, p.r.Contexts.PageInfo.EndCursor, contextFields)
+		}
+		var reply struct {
+			Repository map[string]*struct {
+				Rollup *rollup `json:"statusCheckRollup"`
+			}
+		}
+		if err := c.graphql(q+" } }", nil, &reply); err != nil {
+			return err
+		}
+		for i, p := range batch {
+			node := reply.Repository[fmt.Sprintf("c%d", i)]
+			if node == nil || node.Rollup == nil {
+				continue
+			}
+			p.r.Contexts.Nodes = append(p.r.Contexts.Nodes, node.Rollup.Contexts.Nodes...)
+			p.r.Contexts.PageInfo = node.Rollup.Contexts.PageInfo
+			if p.r.Contexts.PageInfo.HasNextPage {
+				pages = append(pages, p)
+			}
+		}
+	}
+	return nil
 }
 
 // Commits is the statuses of each commit named, by SHA and context.
@@ -367,12 +517,21 @@ func (c *Client) Commits(shas []queue.SHA) (map[queue.SHA]map[string]Status, err
 		if err := c.graphql(q+" } }", nil, &reply); err != nil {
 			return nil, err
 		}
+		var pages []rollupPage
+		nodes := make([]*rollup, len(page))
 		for i, sha := range page {
-			if node := reply.Repository[fmt.Sprintf("c%d", i)]; node != nil {
-				out[sha] = node.Rollup.statuses()
-			} else {
-				out[sha] = map[string]Status{}
+			if node := reply.Repository[fmt.Sprintf("c%d", i)]; node != nil && node.Rollup != nil {
+				nodes[i] = node.Rollup
+				if node.Rollup.Contexts.PageInfo.HasNextPage {
+					pages = append(pages, rollupPage{sha, node.Rollup})
+				}
 			}
+		}
+		if err := c.moreContexts(pages); err != nil {
+			return nil, err
+		}
+		for i, sha := range page {
+			out[sha] = nodes[i].statuses()
 		}
 	}
 	return out, nil
@@ -381,17 +540,20 @@ func (c *Client) Commits(shas []queue.SHA) (map[queue.SHA]map[string]Status, err
 // Pushed says whether a commit carries the queue's own status, which every commit the queue
 // pushed for CI does. A commit GitHub does not hold was never pushed.
 func (c *Client) Pushed(sha queue.SHA, context string) (bool, error) {
-	var statuses []struct{ Context string }
-	err := c.rest("GET", "/commits/"+sha+"/statuses?per_page=100", nil, &statuses)
-	if e, ok := err.(*Error); ok && (e.Code == 404 || e.Code == 422) {
-		return false, nil
-	}
-	for _, s := range statuses {
-		if s.Context == context {
-			return true, nil
+	var out struct {
+		Repository struct {
+			Object struct {
+				Status struct {
+					Context struct{ Context string }
+				}
+			}
 		}
 	}
-	return false, err
+	err := c.graphql(`query Pushed($owner: String!, $name: String!, $oid: GitObjectID!, $context: String!) {
+		repository(owner: $owner, name: $name) {
+			object(oid: $oid) { ... on Commit { status { context(name: $context) { context } } } } } }`,
+		map[string]any{"oid": sha, "context": context}, &out)
+	return err == nil && out.Repository.Object.Status.Context.Context != "", err
 }
 
 // SetStatus reports the queue's own context on a commit.
@@ -404,7 +566,7 @@ func (c *Client) SetStatus(sha queue.SHA, context string, state queue.Verdict, d
 	if url != "" {
 		body["target_url"] = url
 	}
-	return c.rest("POST", "/statuses/"+sha, body, nil)
+	return c.rest(true, "POST", "/statuses/"+sha, body, nil)
 }
 
 // Comment says something on a pull request, once: where a comment made since the given time
@@ -414,7 +576,11 @@ func (c *Client) Comment(number int, body, marker string, since time.Time) error
 		Body      string
 		CreatedAt time.Time `json:"created_at"`
 	}
-	if err := c.rest("GET", fmt.Sprintf("/issues/%d/comments?per_page=100&since=%s", number, since.UTC().Format(time.RFC3339)), nil, &comments); err != nil {
+	path := fmt.Sprintf("/issues/%d/comments?per_page=100", number)
+	if !since.IsZero() {
+		path += "&since=" + since.UTC().Format(time.RFC3339)
+	}
+	if err := c.rest(true, "GET", path, nil, &comments); err != nil {
 		return err
 	}
 	for _, old := range comments {
@@ -422,13 +588,15 @@ func (c *Client) Comment(number int, body, marker string, since time.Time) error
 			return nil
 		}
 	}
-	return c.rest("POST", fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body + "\n\n" + marker}, nil)
+	// Posting a comment twice makes two; a later tick checks for marker first.
+	return c.rest(false, "POST", fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body + "\n\n" + marker}, nil)
 }
 
 // Unlabel takes a label off a pull request that may not carry it.
 func (c *Client) Unlabel(number int, label string) error {
-	err := c.rest("DELETE", fmt.Sprintf("/issues/%d/labels/%s", number, label), nil, nil)
-	if e, ok := err.(*Error); ok && e.Code == 404 {
+	err := c.rest(true, "DELETE", fmt.Sprintf("/issues/%d/labels/%s", number, label), nil, nil)
+	var e *Error
+	if errors.As(err, &e) && e.Code == 404 {
 		return nil
 	}
 	return err

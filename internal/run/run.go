@@ -101,8 +101,10 @@ type Queue struct {
 	Log    io.Writer
 	Record string
 	DryRun bool
-	// refused is the landing the remote refused earlier in this tick.
+	// refused is the landing the remote refused earlier in this tick, and ejected the pull
+	// requests it already took out.
 	refused queue.SHA
+	ejected map[int]bool
 }
 
 // New is the queue of the clone at dir.
@@ -134,7 +136,9 @@ func (q *Queue) Read() (*Read, error) {
 	}
 	var numbers []int
 	for _, p := range pulls {
-		numbers = append(numbers, p.Number)
+		if !q.ejected[p.Number] {
+			numbers = append(numbers, p.Number)
+		}
 	}
 	trunk, heads, err := q.Git.Fetch(numbers)
 	if err != nil {
@@ -142,14 +146,19 @@ func (q *Queue) Read() (*Read, error) {
 	}
 	r := &Read{World: queue.World{Now: q.Now(), Trunk: trunk, Repo: q.Git}, Pulls: map[int]github.Pull{}}
 	for _, p := range pulls {
-		if q.Git.Holds(trunk, heads[p.Number]) {
-			continue // it has landed, and GitHub has yet to say so
+		if q.ejected[p.Number] || q.Git.Holds(trunk, heads[p.Number]) {
+			continue // it has left the queue or landed, and GitHub has yet to say so
 		}
 		if heads[p.Number] != p.Head {
 			p.Wait = "its newest push is still arriving"
 		}
 		r.Pulls[p.Number] = p
-		r.World.PRs = append(r.World.PRs, p.PR)
+		pr := p.PR
+		if pr.Queued.IsZero() {
+			// A pull request whose queue time cannot be read must never sort first.
+			pr.Queued = r.World.Now
+		}
+		r.World.PRs = append(r.World.PRs, pr)
 	}
 	builds, err := q.Git.Builds(trunk)
 	if err != nil {
@@ -208,6 +217,9 @@ func (q *Queue) Tick() (err error) {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("the tick stopped: %v", p)
 		}
+		if err != nil {
+			fmt.Fprintf(q.Log, "{\"error\":%q}\n", err.Error())
+		}
 		if len(q.Hub.Spent) > 0 {
 			line, _ := json.Marshal(map[string]any{"github": q.Hub.Spent})
 			fmt.Fprintln(q.Log, string(line))
@@ -216,7 +228,7 @@ func (q *Queue) Tick() (err error) {
 	if err := q.settle(); err != nil {
 		return err
 	}
-	q.refused = ""
+	q.refused, q.ejected = "", map[int]bool{}
 	for pass := 0; pass < 6; pass++ {
 		r, err := q.Read()
 		if err != nil {
@@ -268,13 +280,18 @@ func reason(why error) string {
 // stopped says on every queued pull request why the queue could not go on, once: the next
 // tick that can act writes its place over it.
 func (q *Queue) stopped(r *Read, why error) {
+	if github.Unavailable(why) {
+		return
+	}
 	text := "the queue is stopped: " + reason(why)
 	if len(text) > 140 {
 		text = text[:140]
 	}
 	for _, pr := range r.World.PRs {
 		if pr.Note != text {
-			q.Hub.SetStatus(pr.Head, q.Status, queue.Pending, text, "")
+			if err := q.Hub.SetStatus(pr.Head, q.Status, queue.Pending, text, ""); github.Unavailable(err) {
+				return
+			}
 		}
 	}
 }
@@ -335,7 +352,13 @@ func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 	if err := q.Hub.SetStatus(at, q.Status, queue.Failure, "left the queue: "+a.Text, link); err != nil {
 		return err
 	}
-	return q.Hub.Unlabel(pr.Number, q.Label)
+	if err := q.Hub.Unlabel(pr.Number, q.Label); err != nil {
+		return err
+	}
+	if q.ejected != nil {
+		q.ejected[pr.Number] = true
+	}
+	return nil
 }
 
 // land reads the world once more and moves the trunk only if the landing still holds there.

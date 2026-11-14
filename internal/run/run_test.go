@@ -34,13 +34,17 @@ type hub struct {
 	listing  func(n int)
 	listings int
 	// left, where set, is what remains of each hourly quota, which every reply then names.
-	left map[string]int
+	left         map[string]int
+	contextPages int
+	intercept    func(http.ResponseWriter, *http.Request) bool
+	lagUnlabel   bool
 }
 
 type pull struct {
 	number   int
 	heads    []string
 	labels   map[string]time.Time
+	events   []labelEvent
 	draft    bool
 	base     string
 	comments []comment
@@ -49,6 +53,11 @@ type pull struct {
 	// holds past the page it returns.
 	threads []bool
 	unread  int
+}
+
+type labelEvent struct {
+	name string
+	at   time.Time
 }
 
 type comment struct {
@@ -83,43 +92,83 @@ func (h *hub) last(sha, context string) status {
 }
 
 func (h *hub) node(p *pull) map[string]any {
-	var labels, events, commits []any
+	var labels, commits []any
 	threads := []any{}
 	for _, resolved := range p.threads {
 		threads = append(threads, map[string]any{"isResolved": resolved})
 	}
-	for name, at := range p.labels {
+	for name := range p.labels {
 		labels = append(labels, map[string]any{"name": name})
-		events = append(events, map[string]any{"createdAt": at, "label": map[string]any{"name": name}})
 	}
 	for _, sha := range p.heads {
-		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha)}})
+		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha, "", 100)}})
 	}
 	return map[string]any{"number": p.number, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base,
 		"headRefName": fmt.Sprintf("pr%d", p.number), "headRepositoryOwner": map[string]any{"login": "o"},
-		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": map[string]any{"nodes": events},
+		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": h.timeline(p, 50, ""),
 		"reviewThreads": map[string]any{"totalCount": len(p.threads) + p.unread, "nodes": threads}, "commits": map[string]any{"nodes": commits}}
 }
 
-func (h *hub) rollup(sha string) any {
+func (h *hub) timeline(p *pull, last int, before string) map[string]any {
+	events := slices.Clone(p.events)
+	if len(events) == 0 {
+		for name, at := range p.labels {
+			events = append(events, labelEvent{name, at})
+		}
+		sort.Slice(events, func(i, j int) bool {
+			if !events[i].at.Equal(events[j].at) {
+				return events[i].at.Before(events[j].at)
+			}
+			return events[i].name < events[j].name
+		})
+	}
+	end := len(events)
+	if before != "" {
+		end, _ = strconv.Atoi(before)
+	}
+	start := max(end-last, 0)
+	var nodes []any
+	for _, e := range events[start:end] {
+		nodes = append(nodes, map[string]any{"createdAt": e.at, "label": map[string]any{"name": e.name}})
+	}
+	return map[string]any{
+		"pageInfo": map[string]any{"hasPreviousPage": start > 0, "startCursor": strconv.Itoa(start)},
+		"nodes":    nodes,
+	}
+}
+
+func (h *hub) rollup(sha, after string, first int) any {
+	var order []string
 	newest := map[string]status{}
 	for _, s := range h.statuses[sha] {
+		if _, seen := newest[s.Context]; !seen {
+			order = append(order, s.Context)
+		}
 		newest[s.Context] = s
 	}
-	if len(newest) == 0 {
+	if len(order) == 0 {
 		return nil
 	}
+	start, _ := strconv.Atoi(after)
+	end := min(start+first, len(order))
 	var nodes []any
-	for _, s := range newest {
+	for _, ctx := range order[start:end] {
+		s := newest[ctx]
 		nodes = append(nodes, map[string]any{"__typename": "StatusContext", "context": s.Context, "state": strings.ToUpper(s.State),
 			"description": s.Description, "targetUrl": s.URL, "createdAt": s.At})
 	}
-	return map[string]any{"contexts": map[string]any{"nodes": nodes}}
+	return map[string]any{"contexts": map[string]any{
+		"pageInfo": map[string]any{"hasNextPage": end < len(order), "endCursor": strconv.Itoa(end)},
+		"nodes":    nodes,
+	}}
 }
 
-var commitAlias = regexp.MustCompile(`(c\d+): object\(oid: "([0-9a-f]+)"\)`)
+var commitAlias = regexp.MustCompile(`(c\d+): object\(oid: "([0-9a-f]+)"\)[^{]*\{\s*\.\.\. on Commit \{\s*statusCheckRollup \{\s*contexts\(first: (\d+)(?:, after: "([^"]*)")?\)`)
 
 func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.intercept != nil && h.intercept(w, r) {
+		return
+	}
 	body, _ := io.ReadAll(r.Body)
 	if quota := map[bool]string{true: "graphql", false: "core"}[r.URL.Path == "/graphql"]; h.left != nil {
 		h.left[quota]--
@@ -155,14 +204,33 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			repo["pullRequests"] = listed(false)
 		case strings.Contains(q.Query, "query Landed"):
 			repo["pullRequests"] = listed(true)
+		case strings.Contains(q.Query, "query Timeline"):
+			if p := h.pulls[int(q.Variables["number"].(float64))]; p != nil {
+				before, _ := q.Variables["before"].(string)
+				repo["pullRequest"] = map[string]any{"timelineItems": h.timeline(p, 100, before)}
+			}
+		case strings.Contains(q.Query, "query Pushed"):
+			sha, _ := q.Variables["oid"].(string)
+			ctx, _ := q.Variables["context"].(string)
+			if _, err := gittest.Try(h.o.Bare, "git", "cat-file", "-e", sha); err == nil {
+				if s := h.last(sha, ctx); s.Context != "" {
+					repo["object"] = map[string]any{"status": map[string]any{"context": map[string]any{"context": s.Context}}}
+				} else {
+					repo["object"] = map[string]any{}
+				}
+			}
 		case strings.Contains(q.Query, "query Pull"):
 			if p := h.pulls[int(q.Variables["number"].(float64))]; p != nil {
 				repo["pullRequest"] = h.node(p)
 			}
+		case strings.Contains(q.Query, "query Contexts"):
+			h.contextPages++
+			fallthrough
 		default:
 			for _, m := range commitAlias.FindAllStringSubmatch(q.Query, -1) {
 				if _, err := gittest.Try(h.o.Bare, "git", "cat-file", "-e", m[2]); err == nil {
-					repo[m[1]] = map[string]any{"statusCheckRollup": h.rollup(m[2])}
+					first, _ := strconv.Atoi(m[3])
+					repo[m[1]] = map[string]any{"statusCheckRollup": h.rollup(m[2], m[4], first)}
 				}
 			}
 		}
@@ -172,12 +240,6 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(body, &s)
 		h.statuses[parts[1]] = append(h.statuses[parts[1]], status{s.Context, s.State, s.Description, s.Target_url, h.now})
 		reply(map[string]any{})
-	case parts[0] == "commits" && len(parts) == 3:
-		out := []any{}
-		for _, s := range h.statuses[parts[1]] {
-			out = append(out, map[string]any{"context": s.Context})
-		}
-		reply(out)
 	case parts[0] == "issues":
 		n, _ := strconv.Atoi(parts[1])
 		p := h.pulls[n]
@@ -196,11 +258,14 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for _, name := range l.Labels {
 				if _, has := p.labels[name]; !has {
 					p.labels[name] = h.now
+					p.events = append(p.events, labelEvent{name, h.now})
 				}
 			}
 			reply([]any{})
 		case r.Method == "DELETE":
-			delete(p.labels, parts[3])
+			if !h.lagUnlabel {
+				delete(p.labels, parts[3])
+			}
 			reply([]any{})
 		}
 	default:
@@ -228,7 +293,8 @@ type world struct {
 	// slow says CI has yet to answer for the commit.
 	slow func(sha string) bool
 	// built is every commit CI judged, in order.
-	built []string
+	built  []string
+	waited []time.Duration
 }
 
 func newWorld(t *testing.T, config string) *world {
@@ -246,6 +312,7 @@ func newWorld(t *testing.T, config string) *world {
 	w := &world{hub: h, log: &bytes.Buffer{}, red: func(string) bool { return false }}
 	w.q = New(c, o.Clone, srv.URL, "token")
 	w.q.Now, w.q.Log = func() time.Time { return h.now }, w.log
+	w.q.Hub.Wait = func(d time.Duration) { w.waited = append(w.waited, d) }
 	return w
 }
 
@@ -260,6 +327,7 @@ func (w *world) queue(n int, file, content string) *pull {
 // label queues a pull request as a person does, by labelling it.
 func (w *world) label(n int) {
 	w.pulls[n].labels["merge-queue"] = w.now
+	w.pulls[n].events = append(w.pulls[n].events, labelEvent{"merge-queue", w.now})
 }
 
 // ci judges every commit on the queue's branches that it has not judged.
@@ -804,5 +872,299 @@ func TestATickSaysWhatItSpentOfGitHubsQuotas(t *testing.T) {
 	core, graphql := said.GitHub["core"], said.GitHub["graphql"]
 	if core.Requests == 0 || core.Left != 5000-core.Requests || graphql.Requests == 0 || graphql.Left != 5000-graphql.Requests {
 		t.Errorf("the tick's last line counts %+v of core and %+v of graphql, from quotas of 5000 each\n%s", core, graphql, w.log)
+	}
+}
+
+func TestACommitWithMoreThanAHundredContextsStillLands(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff"]}`)
+	p := w.open(1, "a", "1\n")
+	for i := 0; i < 135; i++ {
+		w.set(p.heads[0], fmt.Sprintf("check-%d", i), "success")
+	}
+	w.set(p.heads[0], "signoff", "success")
+	w.now = w.now.Add(time.Second)
+	w.label(1)
+	w.now = w.now.Add(2 * time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatalf("tick: %v\n%s", err, w.log)
+	}
+	branches := w.o.Branches("merge-queue/")
+	if len(branches) != 1 {
+		t.Fatalf("#1 was not admitted with signoff on page 2; branches: %v\n%s", branches, w.log)
+	}
+	var sha string
+	for _, s := range branches {
+		sha = s
+	}
+	for i := 0; i < 135; i++ {
+		w.set(sha, fmt.Sprintf("job-%d", i), "success")
+	}
+	w.ci()
+	w.rounds(2)
+	if !w.landed(1) {
+		t.Fatalf("#1 did not land when its build had > 100 contexts\n%s", w.log)
+	}
+
+	w2 := newWorld(t, `{"admit": ["signoff"]}`)
+	two := w2.open(2, "b", "2\n")
+	w2.set(two.heads[0], "signoff", "success")
+	w2.now = w2.now.Add(time.Second)
+	w2.label(2)
+	w2.rounds(3)
+	if !w2.landed(2) {
+		t.Fatalf("#2 did not land\n%s", w2.log)
+	}
+	if w2.contextPages != 0 {
+		t.Errorf("made %d extra context page requests for commits that fit in one page", w2.contextPages)
+	}
+}
+
+func TestAPullRequestRelabelledFiftyTimesDoesNotJumpTheQueue(t *testing.T) {
+	w := newWorld(t, `{"slots": 1}`)
+	two := w.queue(2, "b", "2\n")
+	for i := 0; i < 55; i++ {
+		two.events = append(two.events, labelEvent{fmt.Sprintf("noise-%d", i), w.now})
+	}
+	w.queue(3, "c", "3\n")
+	w.now = w.now.Add(time.Second)
+	one := w.open(1, "a", "1\n")
+	one.labels["merge-queue"] = w.now
+	for i := 0; i < 55; i++ {
+		one.events = append(one.events, labelEvent{fmt.Sprintf("noise-%d", i), w.now})
+	}
+
+	w.rounds(2)
+	if !w.landed(2) || w.landed(3) || w.landed(1) {
+		t.Fatalf("after 2 rounds: #2=%v #3=%v #1=%v\n%s", w.landed(2), w.landed(3), w.landed(1), w.log)
+	}
+	w.round()
+	if !w.landed(3) || w.landed(1) {
+		t.Fatalf("after 3 rounds: #3=%v #1=%v\n%s", w.landed(3), w.landed(1), w.log)
+	}
+	w.round()
+	if !w.landed(1) {
+		t.Fatalf("after 4 rounds: #1=%v\n%s", w.landed(1), w.log)
+	}
+}
+
+func TestACommitWithMoreThanAHundredStatusEventsIsNotBuiltTwice(t *testing.T) {
+	w := newWorld(t, `{}`)
+	w.queue(1, "a", "1\n")
+	w.round()
+	if len(w.built) != 1 {
+		t.Fatalf("expected 1 build after first round, got %d\n%s", len(w.built), w.log)
+	}
+	first := w.built[0]
+	for i := 0; i < 105; i++ {
+		w.set(first, fmt.Sprintf("step-%d", i), "success")
+	}
+	delete(w.pulls[1].labels, "merge-queue")
+	w.round()
+
+	w.now = w.now.Add(time.Second)
+	w.label(1)
+	w.rounds(2)
+	if !w.landed(1) {
+		t.Fatalf("#1 did not land after re-queue\n%s", w.log)
+	}
+	if pushes := strings.Count(w.log.String(), fmt.Sprintf(`"do":"push","build":{"SHA":%q`, first)); pushes != 1 {
+		t.Errorf("%s was pushed %d times, want 1\n%s", first, pushes, w.log)
+	}
+	if len(w.built) != 2 || w.built[1] == first {
+		t.Errorf("built %v, expected a fresh second commit after %s", w.built, first)
+	}
+}
+
+func TestATickRetriesTransientRefusalsAndNeverSendsACommentTwice(t *testing.T) {
+	w := newWorld(t, `{}`)
+	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }
+
+	step := 0
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case r.URL.Path == "/graphql" && step == 0:
+			step++
+			rw.WriteHeader(502)
+			return true
+		case r.URL.Path == "/graphql" && step == 1:
+			step++
+			rw.WriteHeader(503)
+			return true
+		case r.URL.Path == "/graphql" && step == 2:
+			step++
+			rw.WriteHeader(504)
+			return true
+		case strings.HasPrefix(r.URL.Path, "/repos/o/r/statuses/") && step == 3:
+			step++
+			if hj, ok := rw.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					conn.Close()
+				}
+			}
+			return true
+		case step == 4:
+			step++
+			rw.Header().Set("Retry-After", "3")
+			rw.WriteHeader(429)
+			return true
+		case step == 5:
+			step++
+			rw.Header().Set("Retry-After", "120")
+			rw.WriteHeader(403)
+			return true
+		}
+		return false
+	}
+
+	w.queue(1, "a", "1\n")
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Fatalf("#1 did not land after transient refusals\n%s", w.log)
+	}
+	if len(w.waited) != 6 {
+		t.Fatalf("waited %v (%d times), want 6", w.waited, len(w.waited))
+	}
+	if d := w.waited[4]; d < 3*time.Second || d > 5*time.Second {
+		t.Errorf("Retry-After: 3 waited %v, want [3s, 5s]", d)
+	}
+	if d := w.waited[5]; d != 5*time.Second {
+		t.Errorf("Retry-After: 120 waited %v, want 5s cap", d)
+	}
+
+	commentPosts, getComment503, unlabel503 := 0, false, false
+	two := w.queue(2, "broken", "2\n")
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/repos/o/r/issues/2/comments":
+			commentPosts++
+			if commentPosts == 1 {
+				body, _ := io.ReadAll(r.Body)
+				var c comment
+				json.Unmarshal(body, &c)
+				c.CreatedAt = w.now
+				two.comments = append(two.comments, c)
+				rw.WriteHeader(502)
+				return true
+			}
+		case r.Method == "GET" && r.URL.Path == "/repos/o/r/issues/2/comments" && commentPosts > 0 && !getComment503:
+			getComment503 = true
+			rw.WriteHeader(503)
+			return true
+		case r.Method == "DELETE" && r.URL.Path == "/repos/o/r/issues/2/labels/merge-queue" && !unlabel503:
+			unlabel503 = true
+			rw.WriteHeader(503)
+			return true
+		}
+		return false
+	}
+
+	failed := 0
+	for i := 0; i < 10 && w.queued(2); i++ {
+		w.now = w.now.Add(2 * time.Minute)
+		if err := w.q.Tick(); err != nil {
+			failed++
+		}
+		w.ci()
+	}
+	if failed != 1 || commentPosts != 1 || len(two.comments) != 1 || w.queued(2) || !getComment503 || !unlabel503 {
+		t.Errorf("failed=%d commentPosts=%d comments=%d queued=%v getComment503=%v unlabel503=%v\n%s",
+			failed, commentPosts, len(two.comments), w.queued(2), getComment503, unlabel503, w.log)
+	}
+}
+
+func TestAGitHubOutageOrRateLimitDoesNotWriteStoppedStatuses(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff"]}`)
+	one, two, three := w.queue(1, "a", "1\n"), w.queue(2, "b", "2\n"), w.queue(3, "c", "3\n")
+
+	statusPosts := 0
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/o/r/statuses/") {
+			statusPosts++
+			rw.WriteHeader(503)
+			return true
+		}
+		return false
+	}
+
+	w.now = w.now.Add(2 * time.Minute)
+	if err := w.q.Tick(); err == nil {
+		t.Fatalf("expected error on 503 outage\n%s", w.log)
+	}
+	if statusPosts != 4 || !strings.Contains(w.log.String(), `"error":`) {
+		t.Errorf("on 503 outage: statusPosts=%d (want 4), log:\n%s", statusPosts, w.log)
+	}
+	for _, p := range []*pull{one, two, three} {
+		if s := w.last(p.heads[0], "merge-queue"); strings.HasPrefix(s.Description, "the queue is stopped:") {
+			t.Errorf("#%d was written %q during 503 outage", p.number, s.Description)
+		}
+	}
+
+	statusPosts = 0
+	w.log.Reset()
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/repos/o/r/statuses/") {
+			statusPosts++
+			rw.Header().Set("Retry-After", "60")
+			rw.WriteHeader(403)
+			return true
+		}
+		return false
+	}
+
+	w.now = w.now.Add(2 * time.Minute)
+	if err := w.q.Tick(); err == nil {
+		t.Fatalf("expected error on 403 secondary rate limit\n%s", w.log)
+	}
+	if statusPosts != 4 || !strings.Contains(w.log.String(), `"error":`) {
+		t.Errorf("on 403 secondary limit: statusPosts=%d (want 4), log:\n%s", statusPosts, w.log)
+	}
+	for _, p := range []*pull{one, two, three} {
+		if s := w.last(p.heads[0], "merge-queue"); strings.HasPrefix(s.Description, "the queue is stopped:") {
+			t.Errorf("#%d was written %q during 403 limit", p.number, s.Description)
+		}
+	}
+
+	w.intercept = nil
+	for _, p := range []*pull{one, two, three} {
+		w.set(p.heads[0], "signoff", "success")
+	}
+	w.rounds(4)
+	for _, p := range []*pull{one, two, three} {
+		if !w.landed(p.number) {
+			t.Errorf("#%d did not land after outage cleared\n%s", p.number, w.log)
+		}
+	}
+}
+
+func TestATickDoesNotEjectAPullRequestTwiceWhileGraphQLLags(t *testing.T) {
+	w := newWorld(t, `{"slots": 2}`)
+	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }
+	one := w.queue(1, "broken", "1\n")
+	w.rounds(4)
+	if !w.queued(1) {
+		t.Fatalf("#1 left before the ejection tick\n%s", w.log)
+	}
+
+	w.queue(2, "b", "2\n")
+	w.lagUnlabel = true
+	w.log.Reset()
+	w.now = w.now.Add(2 * time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatalf("tick: %v\n%s", err, w.log)
+	}
+	w.lagUnlabel = false
+	delete(one.labels, "merge-queue")
+
+	if ejects := strings.Count(w.log.String(), `"do":"eject"`); ejects != 1 {
+		t.Errorf("ejected %d times in one tick, want 1\n%s", ejects, w.log)
+	}
+	if len(one.comments) != 1 {
+		t.Errorf("#1 got %d comments, want 1", len(one.comments))
+	}
+	w.ci()
+	w.rounds(2)
+	if !w.landed(2) {
+		t.Errorf("#2 did not land after #1 was ejected\n%s", w.log)
 	}
 }
