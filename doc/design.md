@@ -16,7 +16,7 @@ Commits are deterministic. A merge is built from its parents, the head it merges
 
 The chain is the admitted pull requests merged one onto the next on the tip. Prefix j is the tip plus the first j of them; prefix 0 is the tip alone.
 
-A candidate is a whole build of a prefix. A new candidate stacks on the last whenever a slot is free, adding up to `max_batch` pull requests. It is merged onto the newest build of the prefix below that may still pass, so a pull request queued behind a build that was begun again is built on the commit that can land. With `max_batch: 1` every prefix is built; with a large one only every Nth is.
+A candidate is a whole build of a prefix. A new candidate stacks on the last whenever a slot is free, adding up to `max_batch` pull requests. It is merged onto the newest build of the prefix below that may still pass, so a pull request queued behind a build that was begun again is built on the commit that can land. With `max_batch: 1` every prefix is built; with a large one only every Nth is. With `gather`, a candidate that would add fewer pull requests than that waits while another candidate is still building, for more to arrive or for that build to report. One that holds a pull request labelled to go first never waits, and with nothing building a candidate takes whatever is ready.
 
 ## Landing
 
@@ -102,7 +102,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 
 ## Dials
 
-`slots` is how many candidates are under test at once. A round's builds are beside them and are not counted. `max_batch` is how many pull requests a candidate adds. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
+`slots` is how many candidates are under test at once. A round's builds are beside them and are not counted. `max_batch` is how many pull requests a candidate adds, and `gather` how few it may add while another is building: fewer builds for each landing, for a wait of at most one build. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
 
 ## Not in the engine
 

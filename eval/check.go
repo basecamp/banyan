@@ -1509,6 +1509,8 @@ func cancels(slots, batch int) queue.Config {
 func defaultWorlds() []checkWorld {
 	cfg1, cfg2, cfg2c := dials(2, 1, false), dials(2, 2, false), cancels(2, 2)
 	cfg32, cfg3p := dials(3, 2, false), dials(2, 3, true)
+	gathers := dials(2, 2, false)
+	gathers.Gather = 2
 
 	bCI := bounds{Flakes: 1, Lost: 1, Timeouts: 1, Episodes: 1, MaxStates: 6000}
 	bCrash := bounds{Flakes: 1, Crashes: 1, Stale: 1, MaxStates: 5000}
@@ -1541,6 +1543,8 @@ func defaultWorlds() []checkWorld {
 			checkWorld{"2 PRs moves+outside (" + p.name + ", 2 of 2)", cfg2, p.prs, false, false, bMove},
 			checkWorld{"2 PRs CI (" + p.name + ", 2 of 1)", cfg1, p.prs, false, false, bCI},
 			checkWorld{"2 PRs probes CI (" + p.name + ")", cfg3p, p.prs, false, false, bCI},
+			checkWorld{"2 PRs gather CI (" + p.name + ")", gathers, p.prs, false, false, bCI},
+			checkWorld{"2 PRs gather moves+outside (" + p.name + ")", gathers, p.prs, false, false, bMove},
 		)
 	}
 	worlds = append(worlds,

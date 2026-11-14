@@ -35,6 +35,7 @@ type Config struct {
 	Started  string   `json:"started"`  // a word CI's pending status carries once the build runs; a check run says so itself
 	Slots    int      `json:"slots"`
 	MaxBatch int      `json:"max_batch"`
+	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
 	Timeout  string   `json:"timeout"`
 	Recheck  string   `json:"recheck"`
 	Author   struct {
@@ -87,7 +88,7 @@ func (c Config) names() github.Names {
 func (c Config) dials() queue.Config {
 	timeout, _ := time.ParseDuration(c.Timeout)
 	recheck, _ := time.ParseDuration(c.Recheck)
-	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck}
+	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Gather: c.Gather, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck}
 }
 
 // Queue is one repository's queue, ready to tick.

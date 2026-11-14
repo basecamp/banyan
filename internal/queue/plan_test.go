@@ -239,6 +239,39 @@ func TestARoundPushedPastABuildCIHadNotBegunSkipsANumberThatNoTestSpans(t *testi
 	}
 }
 
+// A candidate is building. One more would add #2 and #3 alone, so with gather at three it
+// waits for a third, and is built once #4 is ready too. With nothing building it takes what
+// is ready, and a pull request labelled to go first is never held back.
+func TestACandidateWaitsToGatherWhileAnotherBuilds(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	cfg := Config{Slots: 3, MaxBatch: 8, Gather: 3, Recheck: 10 * time.Minute}
+	building := Build{SHA: "m1", Base: "trunk", Chain: []Member{member(1, "m1")}, Verdict: Pending, Pushed: now, Started: now}
+	added := func(builds []Build, first int, numbers ...int) (sizes []int) {
+		w := World{Now: now.Add(time.Minute), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, numbers...), Builds: builds}
+		for i := range w.PRs {
+			w.PRs[i].First = w.PRs[i].Number == first
+		}
+		for _, a := range Plan(w, cfg) {
+			if a.Do == "push" {
+				sizes = append(sizes, len(a.Build.Chain))
+			}
+		}
+		return sizes
+	}
+	if sizes := added([]Build{building}, 0, 1, 2, 3); len(sizes) > 0 {
+		t.Errorf("pushed candidates of %v, where two pull requests wait for a third while #1 builds", sizes)
+	}
+	if sizes := added([]Build{building}, 0, 1, 2, 3, 4); fmt.Sprint(sizes) != "[4]" {
+		t.Errorf("pushed candidates of %v, where three have gathered and are built on #1", sizes)
+	}
+	if sizes := added(nil, 0, 2); fmt.Sprint(sizes) != "[1]" {
+		t.Errorf("pushed candidates of %v, where nothing is building and #2 is built alone", sizes)
+	}
+	if sizes := added([]Build{building}, 2, 1, 2); fmt.Sprint(sizes) != "[2]" {
+		t.Errorf("pushed candidates of %v, where #2 goes first and is built at once", sizes)
+	}
+}
+
 // Probes pass on #1's red tree, a whole build of it is late and then fails, and probes pushed
 // meanwhile pass on it again in a later round. Once a whole build has failed where probes
 // passed, their passing says nothing: the rounds go on to #1's test as whole builds, and it

@@ -130,6 +130,9 @@ type Config struct {
 	Slots int
 	// MaxBatch is how many pull requests one candidate adds to the chain.
 	MaxBatch int
+	// Gather is how many pull requests a candidate must add to be built while another is
+	// still building. With none building, a candidate takes whatever is ready.
+	Gather int
 	// Probes says the repository's CI answers a probe commit by running only what failed.
 	Probes bool
 	// Cancels says the repository's CI stops a build whose branch is deleted. Where it does

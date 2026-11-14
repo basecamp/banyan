@@ -589,7 +589,9 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 
 // fill stacks new candidates on the chain while slots are free. It waits while the trunk is
 // red, unless a pull request labelled as its fix has yet to be built, and while probes are
-// deciding whether a red candidate is real.
+// deciding whether a red candidate is real. While a candidate is still building, one that
+// would add fewer pull requests than gather waits for more, or for that build, unless it
+// holds one labelled to go first.
 func (p *plan) fill() {
 	in := map[int]bool{}
 	for _, m := range p.chain {
@@ -600,7 +602,7 @@ func (p *plan) fill() {
 		return
 	}
 	for p.pending < p.c.Slots {
-		parent, added := p.prefix(len(p.chain)), 0
+		parent, added, held, first := p.prefix(len(p.chain)), 0, len(p.chain), false
 		for _, pr := range p.order {
 			if in[pr.Number] || p.waits[pr.Number] != "" {
 				continue
@@ -615,12 +617,13 @@ func (p *plan) fill() {
 				continue
 			}
 			p.chain = append(p.chain, Member{pr.Number, pr.Head, sha})
-			in[pr.Number], parent = true, sha
+			in[pr.Number], parent, first = true, sha, first || pr.First
 			if added++; added == max(p.c.MaxBatch, 1) || (pr.First && p.held) {
 				break
 			}
 		}
-		if added == 0 {
+		if added == 0 || (added < p.c.Gather && p.pending > 0 && !first) {
+			p.chain = p.chain[:held]
 			return
 		}
 		p.push(p.candidate(len(p.chain)))
