@@ -1182,8 +1182,8 @@ func TestATickDoesNotEjectAPullRequestTwiceWhileGraphQLLags(t *testing.T) {
 	}
 }
 
-func TestABuildOfSeveralContextsHasBegunOnceOneAnswers(t *testing.T) {
-	w := newWorld(t, `{"slots": 3, "build": ["changes (buildkite)", "gate (buildkite)"]}`)
+func TestABuildHasBegunOnceTheContextNamedForItAnswers(t *testing.T) {
+	w := newWorld(t, `{"slots": 3, "build": ["gate (buildkite)"], "begins": "changes (buildkite)"}`)
 	w.queue(1, "broken", "1\n")
 	w.now = w.now.Add(time.Minute)
 	if err := w.q.Tick(); err != nil {
@@ -1237,8 +1237,8 @@ func TestABuildOfSeveralContextsHasBegunOnceOneAnswers(t *testing.T) {
 		t.Errorf("#1 was not ejected after side-by-side rounds answered: queued=%v comments=%+v", w.queued(1), w.pulls[1].comments)
 	}
 
-	// A build judged by one context is unchanged.
-	single := newWorld(t, `{"slots": 3, "build": ["gate (buildkite)"]}`)
+	// With no such context named, another context's answer says nothing of when the build began.
+	single := newWorld(t, `{"slots": 3, "build": ["changes (buildkite)", "gate (buildkite)"]}`)
 	single.queue(1, "broken", "1\n")
 	single.now = single.now.Add(time.Minute)
 	if err := single.q.Tick(); err != nil {
@@ -1255,7 +1255,7 @@ func TestABuildOfSeveralContextsHasBegunOnceOneAnswers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(sr.World.Builds) != 1 || !sr.World.Builds[0].Started.IsZero() {
-		t.Errorf("one-context build started at %v without running, want zero", sr.World.Builds[0].Started)
+		t.Errorf("a build with no context named for its start began at %v on another context's answer", sr.World.Builds[0].Started)
 	}
 	single.check(oneCand, "gate (buildkite)", "success", single.now.Add(5*time.Minute))
 	sr, err = single.q.Read()
@@ -1263,7 +1263,7 @@ func TestABuildOfSeveralContextsHasBegunOnceOneAnswers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !sr.World.Builds[0].Started.IsZero() {
-		t.Errorf("completed one-context build set Started to %v, want zero", sr.World.Builds[0].Started)
+		t.Errorf("a build that passed with no context named for its start began at %v", sr.World.Builds[0].Started)
 	}
 }
 

@@ -35,6 +35,7 @@ type Config struct {
 	Threads  bool     `json:"threads"`  // an unresolved review thread keeps a pull request out
 	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
 	Started  string   `json:"started"`  // a word CI's pending status carries once the build runs; a check run says so itself
+	Begins   string   `json:"begins"`   // a context that answers once CI has queued the build's jobs, where nothing says the build runs
 	Slots    int      `json:"slots"`
 	MaxBatch int      `json:"max_batch"`
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
@@ -191,11 +192,12 @@ func (q *Queue) Read() (*Read, error) {
 		b.Pushed = st[q.Status].At
 		for _, c := range contexts {
 			s := st[c]
-			running := s.State == queue.Pending && (s.Running || q.Started != "" && strings.Contains(s.Description, q.Started))
-			done := len(contexts) > 1 && b.Verdict == queue.Pending && (s.State == queue.Success || s.State == queue.Failure)
-			if (running || done) && !s.At.IsZero() && (b.Started.IsZero() || s.At.Before(b.Started)) {
-				b.Started = s.At
+			if s.State == queue.Pending && (s.Running || q.Started != "" && strings.Contains(s.Description, q.Started)) {
+				b.Started = earlier(b.Started, s.At)
 			}
+		}
+		if s, ok := st[q.Begins]; ok && (s.Running || s.State == queue.Success || s.State == queue.Failure) {
+			b.Started = earlier(b.Started, s.At)
 		}
 		if _, marked := st[q.Status]; !marked {
 			// A tick died between its push and its mark. The wait starts now.
@@ -209,6 +211,14 @@ func (q *Queue) Read() (*Read, error) {
 		r.World.Builds = append(r.World.Builds, b)
 	}
 	return r, nil
+}
+
+// earlier is the earlier of two times a build is said to have begun, zero being no time.
+func earlier(a, b time.Time) time.Time {
+	if a.IsZero() || (!b.IsZero() && b.Before(a)) {
+		return b
+	}
+	return a
 }
 
 func describe(b queue.Build) string {
