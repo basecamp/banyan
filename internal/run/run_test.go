@@ -1474,6 +1474,8 @@ func TestAProbeCarriesTheJobsThatFailedInTheRedBuild(t *testing.T) {
 	}
 	w.check(cand, "linux (ci)", "failure", w.now)
 	w.check(cand, "apple (ci)", "success", w.now)
+	w.check(cand, "win\x00dows (ci)", "failure", w.now)
+	w.set(cand, "merge-queue", "failure")
 	w.set(cand, "merge-queue/build", "failure")
 	w.now = w.now.Add(time.Minute)
 	if err := w.q.Tick(); err != nil {
@@ -1486,8 +1488,8 @@ func TestAProbeCarriesTheJobsThatFailedInTheRedBuild(t *testing.T) {
 			continue
 		}
 		probes++
-		if !strings.Contains(said, "\nBanyan-Probe-Failed: linux (ci)") || strings.Contains(said, "apple (ci)") || strings.Contains(said, "Banyan-Probe-Failed: merge-queue") {
-			t.Errorf("a probe says:\n%s\nwhere it names linux (ci), the one job that failed, and neither the job that passed nor the build's own verdict", said)
+		if !strings.Contains(said, "\nBanyan-Probe-Failed: linux (ci)") || strings.Count(said, "Banyan-Probe-Failed") != 1 {
+			t.Errorf("a probe says:\n%s\nwhere it names linux (ci) alone: not the job that passed, the queue's own status, the build's verdict, or a name no commit message can carry", said)
 		}
 	}
 	if probes == 0 {

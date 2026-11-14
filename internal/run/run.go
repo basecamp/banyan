@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/basecamp/banyan/internal/git"
 	"github.com/basecamp/banyan/internal/github"
@@ -182,7 +183,7 @@ func (q *Queue) Read() (*Read, error) {
 		}
 		b.Verdict, _ = github.Verdict(st, contexts)
 		for name, s := range st {
-			if s.State == queue.Failure && name != q.Status && !slices.Contains(contexts, name) && !strings.ContainsAny(name, "\r\n") {
+			if s.State == queue.Failure && name != q.Status && !slices.Contains(contexts, name) && !strings.ContainsFunc(name, unicode.IsControl) {
 				b.Failed = append(b.Failed, name)
 			}
 		}
