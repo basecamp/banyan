@@ -72,7 +72,9 @@ A conflict with the trunk used to leave too. On hey2's first day, 8 pull request
 
 A push to a queued pull request keeps it queued. The label says to land the pull request, and the checks named in `admit` say which head may land. The builds that merged the old head are dropped, the new head waits for its own checks, and it joins behind the builds already running. So where `admit` is empty, whatever is pushed to a labelled pull request lands once the queue's build passes.
 
-Every ejection is a comment that names the head judged, the cause and the builds it rests on, with the marker `<!-- banyan eject <head> attributed=<cause> -->`.
+Every ejection is a comment that names the head judged, the cause and the builds it rests on, with the marker `<!-- <status> eject <head> attributed=<cause> -->`. It begins "`<name>` took this pull request out of the queue (cause: `<cause>`), judging its head `<head>`:", which other tools may read. An ejection takes off the queue's label and the label that put the pull request first.
+
+A merge commit's message ends with the line `Merges #<number>`, and the queue reads a build's chain back from those lines.
 
 ## No commit is built twice
 

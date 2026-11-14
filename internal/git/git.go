@@ -41,6 +41,8 @@ type commit struct {
 	tree     string
 	date     string
 	subject  string
+	merges   int  // the pull request it merges, by its last line
+	trailer  bool // an older release wrote the number as a Banyan-Merges trailer instead
 	trailers map[string]string
 }
 
@@ -113,10 +115,20 @@ func (r *Repo) read(sha string) (commit, error) {
 	if len(lines) > 3 {
 		c.subject = lines[3]
 	}
+	if len(lines) > 4 {
+		if rest, ok := strings.CutPrefix(lines[len(lines)-1], "Merges #"); ok {
+			if n, err := strconv.Atoi(rest); err == nil && n > 0 && strconv.Itoa(n) == rest {
+				c.merges = n
+			}
+		}
+	}
 	for _, l := range lines[3:] {
 		if k, v, ok := strings.Cut(l, ": "); ok && strings.HasPrefix(k, "Banyan-") {
 			c.trailers[k] = v
 		}
+	}
+	if n, err := strconv.Atoi(c.trailers["Banyan-Merges"]); err == nil && c.merges == 0 {
+		c.merges, c.trailer = n, true
 	}
 	if r.commits == nil {
 		r.commits = map[string]commit{}
@@ -165,11 +177,11 @@ func subject(pr queue.PR) string {
 }
 
 func message(subject string, number int, note string) string {
-	s := fmt.Sprintf("%s\n\nBanyan-Merges: %d", subject, number)
+	s := subject + "\n"
 	if note != "" {
 		s += "\n" + note
 	}
-	return s
+	return fmt.Sprintf("%s\nMerges #%d", s, number)
 }
 
 // Merge is git's merge of the pull request's head onto parent, read with the attributes
@@ -246,14 +258,17 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 		b.Kind, at = queue.Probe, top.parents[0]
 	case top.trailers["Banyan-Check"] != "":
 		b.Kind, at = queue.Check, top.parents[0]
-	case top.trailers["Banyan-Try"] != "":
+	case top.trailers["Banyan-Try"] != "" && top.merges > 0 && len(top.parents) == 2:
 		// A later try of a merge: the chain knows it by the merge that carries no try.
-		n, _ := strconv.Atoi(top.trailers["Banyan-Merges"])
-		plain, err := r.commitTree(top.tree, top.parents, message(top.subject, n, ""))
+		said := message(top.subject, top.merges, "")
+		if top.trailer {
+			said = fmt.Sprintf("%s\n\nBanyan-Merges: %d", top.subject, top.merges)
+		}
+		plain, err := r.commitTree(top.tree, top.parents, said)
 		if err != nil {
 			return b, err
 		}
-		b.Chain = []queue.Member{{Number: n, Head: top.parents[1], Merge: plain}}
+		b.Chain = []queue.Member{{Number: top.merges, Head: top.parents[1], Merge: plain}}
 		at = top.parents[0]
 	}
 	// The base is the first commit under the build that the trunk holds: the tip, or where the
@@ -263,11 +278,10 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 		if err != nil {
 			return b, err
 		}
-		n, _ := strconv.Atoi(c.trailers["Banyan-Merges"])
-		if n == 0 || len(c.parents) != 2 {
+		if c.merges == 0 || len(c.parents) != 2 {
 			break
 		}
-		b.Chain = append([]queue.Member{{Number: n, Head: c.parents[1], Merge: at}}, b.Chain...)
+		b.Chain = append([]queue.Member{{Number: c.merges, Head: c.parents[1], Merge: at}}, b.Chain...)
 		at = c.parents[0]
 	}
 	b.Base = at

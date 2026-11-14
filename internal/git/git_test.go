@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/basecamp/banyan/internal/gittest"
@@ -250,4 +251,71 @@ func TestAMergeThatGitCannotAttemptIsNoConflict(t *testing.T) {
 		}
 	}()
 	o.Repo.Merge(trunk, queue.PR{Number: 9, Head: "0123456789012345678901234567890123456789"}, "")
+}
+
+func TestAMergeEndsWithWhatItMergesAndMarksCarryNone(t *testing.T) {
+	o := newOrigin(t)
+	a := o.pr(12, "a", "a\n")
+	a.Branch = "o/pr12"
+	trunk := o.fetch()
+
+	plain, _ := o.Repo.Merge(trunk, a, "")
+	if got, want := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", plain), "Merge pull request #12 from o/pr12\n\nMerges #12"; got != want {
+		t.Errorf("plain merge message:\n%s\nwant:\n%s", got, want)
+	}
+
+	retry, _ := o.Repo.Merge(trunk, a, "Banyan-Try: 2\nBanyan-Round: 1\nBanyan-Of: "+plain)
+	wantRetry := "Merge pull request #12 from o/pr12\n\nBanyan-Try: 2\nBanyan-Round: 1\nBanyan-Of: " + plain + "\nMerges #12"
+	if got := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", retry); got != wantRetry {
+		t.Errorf("retry merge message:\n%s\nwant:\n%s", got, wantRetry)
+	}
+
+	mark := o.Repo.Mark(plain, "Banyan-Try: 1\nBanyan-Round: 1\nBanyan-Of: "+plain+"\nBanyan-Check: whole")
+	if got := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", mark); strings.Contains(got, "Merges #") || strings.Contains(got, "Banyan-Merges") {
+		t.Errorf("mark message carries a merge line:\n%s", got)
+	}
+
+	c, err := o.Repo.read(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := o.Repo.commitTree(c.tree, []string{trunk, a.Head}, "Merge pull request #12 from o/pr12\n\nBanyan-Merges: 12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyTry, err := o.Repo.commitTree(c.tree, []string{trunk, a.Head}, "Merge pull request #12 from o/pr12\n\nBanyan-Merges: 12\nBanyan-Try: 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sha := range []queue.SHA{plain, retry, mark, legacy, legacyTry} {
+		if err := o.Repo.Push(sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.fetch()
+	builds, err := o.Repo.Builds(trunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[queue.SHA]queue.Build{}
+	for _, b := range builds {
+		got[b.SHA] = b
+	}
+	chain := []queue.Member{{Number: 12, Head: a.Head, Merge: plain}}
+	for _, w := range []queue.Build{
+		{SHA: plain, Kind: queue.Candidate, Base: trunk, Chain: chain},
+		{SHA: retry, Kind: queue.Candidate, Base: trunk, Chain: chain, Round: 1, Of: plain},
+		{SHA: mark, Kind: queue.Check, Base: trunk, Chain: chain, Round: 1, Of: plain},
+	} {
+		if g := got[w.SHA]; fmt.Sprint(g) != fmt.Sprint(w) {
+			t.Errorf("read back\n %+v\nwant\n %+v", g, w)
+		}
+	}
+	older := []queue.Member{{Number: 12, Head: a.Head, Merge: legacy}}
+	for _, old := range []queue.SHA{legacy, legacyTry} {
+		if g, w := got[old], (queue.Build{SHA: old, Kind: queue.Candidate, Base: trunk, Chain: older}); fmt.Sprint(g) != fmt.Sprint(w) {
+			t.Errorf("a merge an older release wrote reads back as\n %+v\nwant\n %+v", g, w)
+		}
+	}
 }

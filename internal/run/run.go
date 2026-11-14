@@ -19,6 +19,7 @@ import (
 
 // Config is a repository's queue, as its config file says it. Every field has a default.
 type Config struct {
+	Name     string   `json:"name"`     // The merge queue: how the queue names itself in comments
 	Repo     string   `json:"repo"`     // owner/name
 	Remote   string   `json:"remote"`   // origin
 	Trunk    string   `json:"trunk"`    // main
@@ -58,6 +59,7 @@ func Load(path string) (Config, error) {
 			*s = d
 		}
 	}
+	def(&c.Name, "The merge queue")
 	def(&c.Remote, "origin")
 	def(&c.Trunk, "main")
 	def(&c.Label, "merge-queue")
@@ -181,7 +183,10 @@ func (q *Queue) Read() (*Read, error) {
 		b.Verdict, _ = github.Verdict(st, contexts)
 		b.Pushed = st[q.Status].At
 		for _, c := range contexts {
-			if s := st[c]; s.State == queue.Pending && (s.Running || q.Started != "" && strings.Contains(s.Description, q.Started)) {
+			s := st[c]
+			running := s.State == queue.Pending && (s.Running || q.Started != "" && strings.Contains(s.Description, q.Started))
+			done := len(contexts) > 1 && b.Verdict == queue.Pending && (s.State == queue.Success || s.State == queue.Failure)
+			if (running || done) && !s.At.IsZero() && (b.Started.IsZero() || s.At.Before(b.Started)) {
 				b.Started = s.At
 			}
 		}
@@ -317,11 +322,15 @@ func (q *Queue) apply(r *Read, a queue.Action) error {
 	return fmt.Errorf("the plan asked for %q, which nothing does", a.Do)
 }
 
-// eject says why on the pull request, ends its status and takes its label off, in that
-// order: the label is what keeps it in the world, so a tick that dies part way ejects again.
+// eject says why on the pull request, ends its status and takes its labels off, in that
+// order: the queue label is what keeps it in the world, so a tick that dies part way ejects again.
 func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 	at := pr.Head
-	body := fmt.Sprintf("The merge queue took this pull request out at `%.12s`: %s.", at, a.Text)
+	name := q.Name
+	if name == "" {
+		name = "The merge queue"
+	}
+	body := fmt.Sprintf("%s took this pull request out of the queue (cause: %s), judging its head %s: %s.", name, a.Cause, at, a.Text)
 	link := ""
 	for i, sha := range a.Evidence {
 		what := "failed with it"
@@ -352,6 +361,11 @@ func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 	}
 	if err := q.Hub.SetStatus(at, q.Status, queue.Failure, "left the queue: "+a.Text, link); err != nil {
 		return err
+	}
+	if pr.First && q.First != q.Label {
+		if err := q.Hub.Unlabel(pr.Number, q.First); err != nil {
+			return err
+		}
 	}
 	if err := q.Hub.Unlabel(pr.Number, q.Label); err != nil {
 		return err

@@ -68,6 +68,7 @@ type comment struct {
 type status struct {
 	Context, State, Description, URL string
 	At                               time.Time
+	Check                            bool
 }
 
 func (h *hub) open(n int, file, content string) *pull {
@@ -77,7 +78,11 @@ func (h *hub) open(n int, file, content string) *pull {
 }
 
 func (h *hub) set(sha, context, state string) {
-	h.statuses[sha] = append(h.statuses[sha], status{context, state, "", "https://ci.example/" + sha[:12], h.now})
+	h.statuses[sha] = append(h.statuses[sha], status{Context: context, State: state, URL: "https://ci.example/" + sha[:12], At: h.now})
+}
+
+func (h *hub) check(sha, name, state string, at time.Time) {
+	h.statuses[sha] = append(h.statuses[sha], status{Context: name, State: state, URL: "https://ci.example/" + sha[:12], At: at, Check: true})
 }
 
 // last is the newest status of a context on a commit.
@@ -154,6 +159,14 @@ func (h *hub) rollup(sha, after string, first int) any {
 	var nodes []any
 	for _, ctx := range order[start:end] {
 		s := newest[ctx]
+		if s.Check {
+			node := map[string]any{"__typename": "CheckRun", "name": s.Context, "status": strings.ToUpper(s.State), "detailsUrl": s.URL, "startedAt": s.At}
+			if s.State != "queued" && s.State != "in_progress" {
+				node["status"], node["conclusion"] = "COMPLETED", strings.ToUpper(s.State)
+			}
+			nodes = append(nodes, node)
+			continue
+		}
 		nodes = append(nodes, map[string]any{"__typename": "StatusContext", "context": s.Context, "state": strings.ToUpper(s.State),
 			"description": s.Description, "targetUrl": s.URL, "createdAt": s.At})
 	}
@@ -238,7 +251,7 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case parts[0] == "statuses" && r.Method == "POST":
 		var s struct{ Context, State, Description, Target_url string }
 		json.Unmarshal(body, &s)
-		h.statuses[parts[1]] = append(h.statuses[parts[1]], status{s.Context, s.State, s.Description, s.Target_url, h.now})
+		h.statuses[parts[1]] = append(h.statuses[parts[1]], status{Context: s.Context, State: s.State, Description: s.Description, URL: s.Target_url, At: h.now})
 		reply(map[string]any{})
 	case parts[0] == "issues":
 		n, _ := strconv.Atoi(parts[1])
@@ -351,7 +364,7 @@ func (w *world) ci() {
 		// A build CI has begun and not answered says so, as Buildkite does.
 		if w.slow != nil && w.slow(sha) {
 			if last == "" {
-				w.statuses[sha] = append(w.statuses[sha], status{context, "pending", "Build started", "https://ci.example/" + sha[:12], w.now})
+				w.statuses[sha] = append(w.statuses[sha], status{Context: context, State: "pending", Description: "Build started", URL: "https://ci.example/" + sha[:12], At: w.now})
 			}
 			continue
 		}
@@ -1166,5 +1179,252 @@ func TestATickDoesNotEjectAPullRequestTwiceWhileGraphQLLags(t *testing.T) {
 	w.rounds(2)
 	if !w.landed(2) {
 		t.Errorf("#2 did not land after #1 was ejected\n%s", w.log)
+	}
+}
+
+func TestABuildOfSeveralContextsHasBegunOnceOneAnswers(t *testing.T) {
+	w := newWorld(t, `{"slots": 3, "build": ["changes (buildkite)", "gate (buildkite)"]}`)
+	w.queue(1, "broken", "1\n")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	began := w.now.Add(20 * time.Second)
+	w.check(cand, "changes (buildkite)", "success", began)
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.World.Builds) != 1 || r.World.Builds[0].Verdict != queue.Pending || !r.World.Builds[0].Started.Equal(began) {
+		t.Fatalf("with changes passed and gate absent, build is %+v, want pending started at %v", r.World.Builds, began)
+	}
+
+	// Once the candidate fails, each round's changes passing after 20s lets the next round
+	// start before any gate exists, so all three blame builds run side by side.
+	w.check(cand, "gate (buildkite)", "failure", w.now.Add(10*time.Minute))
+	var checks []string
+	for round := 1; round <= 3; round++ {
+		w.now = w.now.Add(time.Minute)
+		if err := w.q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		for _, sha := range w.o.Branches("merge-queue/") {
+			if sha != cand && !slices.Contains(checks, sha) {
+				checks = append(checks, sha)
+				w.check(sha, "changes (buildkite)", "success", w.now.Add(20*time.Second))
+			}
+		}
+	}
+	if len(checks) != 3 {
+		t.Fatalf("rounds running side by side before gate exists: %d (%v), want 3", len(checks), checks)
+	}
+	for _, sha := range checks {
+		verdict := "success"
+		if w.o.Holds(sha, "broken") {
+			verdict = "failure"
+		}
+		w.check(sha, "gate (buildkite)", verdict, w.now.Add(10*time.Minute))
+	}
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if w.queued(1) || !w.said(1, "attributed=culprit") {
+		t.Errorf("#1 was not ejected after side-by-side rounds answered: queued=%v comments=%+v", w.queued(1), w.pulls[1].comments)
+	}
+
+	// A build judged by one context is unchanged.
+	single := newWorld(t, `{"slots": 3, "build": ["gate (buildkite)"]}`)
+	single.queue(1, "broken", "1\n")
+	single.now = single.now.Add(time.Minute)
+	if err := single.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var oneCand string
+	for _, sha := range single.o.Branches("merge-queue/") {
+		oneCand = sha
+	}
+	single.check(oneCand, "changes (buildkite)", "success", single.now.Add(20*time.Second))
+	single.check(oneCand, "gate (buildkite)", "queued", time.Time{})
+	sr, err := single.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.World.Builds) != 1 || !sr.World.Builds[0].Started.IsZero() {
+		t.Errorf("one-context build started at %v without running, want zero", sr.World.Builds[0].Started)
+	}
+	single.check(oneCand, "gate (buildkite)", "success", single.now.Add(5*time.Minute))
+	sr, err = single.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sr.World.Builds[0].Started.IsZero() {
+		t.Errorf("completed one-context build set Started to %v, want zero", sr.World.Builds[0].Started)
+	}
+}
+
+func TestLeavingTheQueueTakesBothLabelsOff(t *testing.T) {
+	w := newWorld(t, `{"label": "land", "first": "land-first"}`)
+	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }
+
+	one := w.open(1, "broken", "1\n")
+	w.now = w.now.Add(time.Second)
+	one.labels["land"] = w.now
+	one.labels["land-first"] = w.now
+	one.events = append(one.events, labelEvent{"land", w.now}, labelEvent{"land-first", w.now})
+
+	two := w.open(2, "ok", "2\n")
+	w.now = w.now.Add(time.Second)
+	two.labels["land"] = w.now
+	two.events = append(two.events, labelEvent{"land", w.now})
+
+	var unlabelled []string
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/labels/") {
+			unlabelled = append(unlabelled, r.URL.Path)
+		}
+		return false
+	}
+
+	w.rounds(8)
+	if !w.landed(2) {
+		t.Errorf("#2 did not land\n%s", w.log)
+	}
+	if _, has := one.labels["land"]; has {
+		t.Errorf("#1 still carries land: %v", one.labels)
+	}
+	if _, has := one.labels["land-first"]; has {
+		t.Errorf("#1 still carries land-first: %v", one.labels)
+	}
+	want := []string{"/repos/o/r/issues/1/labels/land-first", "/repos/o/r/issues/1/labels/land"}
+	if !slices.Equal(unlabelled, want) {
+		t.Errorf("unlabel calls = %v, want %v", unlabelled, want)
+	}
+}
+
+func TestAnEjectionBeginsWithTheSentenceEveryReaderExpects(t *testing.T) {
+	w := newWorld(t, `{"name": "Banyan"}`)
+	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }
+	one := w.queue(1, "broken", "1\n")
+	w.rounds(6)
+	if len(one.comments) != 1 {
+		t.Fatalf("#1 has %d comments, want 1\n%s", len(one.comments), w.log)
+	}
+	body := one.comments[0].Body
+	head := one.heads[0]
+
+	wantPrefix := "Banyan took this pull request out of the queue (cause: culprit), judging its head " + head + ": the build with it failed, the build without it then passed ("
+	if !strings.HasPrefix(body, wantPrefix) {
+		t.Errorf("comment does not begin with v2 sentence:\n%s\nwant prefix:\n%s", body, wantPrefix)
+	}
+	for _, keep := range []string{
+		"\n- passed without it: https://ci.example/",
+		"\n- failed with it: https://ci.example/",
+		"\n\nFix it and queue it again. If the failure isn't this pull request's, queue it again as it is.\n\n<!-- merge-queue eject " + head + " attributed=culprit -->",
+	} {
+		if !strings.Contains(body, keep) {
+			t.Errorf("comment lost %q:\n%s", keep, body)
+		}
+	}
+
+	// Each reader's expression from the second repository, held against the comment.
+	// jq string literals double-escape backslashes (\\( -> \() and Oniguruma writes (?<name>...) where RE2 writes (?P<name>...).
+	readers := []struct {
+		tool      string
+		re        *regexp.Regexp
+		lowercase bool // tools/landing-metrics runs (.body | ascii_downcase) first
+		cause     int  // submatch index of cause, or 0
+		head      int  // submatch index of head, or 0
+		why       int  // submatch index of why, or 0
+	}{
+		{
+			tool:  "tools/factory/follow.py:132",
+			re:    regexp.MustCompile(`(?:^|\n)Banyan took this pull request out of the queue \(cause: (?P<cause>[a-z]+)\), judging its head (?P<head>[0-9a-f]+): (?P<why>[^\n]*)`),
+			cause: 1, head: 2, why: 3,
+		},
+		{
+			// jq: startswith("Banyan took this pull request out of the queue (cause: ")
+			tool: "tools/banyan-handoff:109",
+			re:   regexp.MustCompile(`^Banyan took this pull request out of the queue \(cause: `),
+		},
+		{
+			// jq: "^Banyan took this pull request out of the queue \\(cause: (?<cause>[a-z]+)\\), judging its head (?<head>[0-9a-f]+): (?<why>[^\n]*)"
+			tool:  "tools/banyan-handoff:110",
+			re:    regexp.MustCompile(`^Banyan took this pull request out of the queue \(cause: (?P<cause>[a-z]+)\), judging its head (?P<head>[0-9a-f]+): (?P<why>[^\n]*)`),
+			cause: 1, head: 2, why: 3,
+		},
+		{
+			tool:  "tools/telemetry/readout.py:69",
+			re:    regexp.MustCompile(`\(cause: ([a-z-]+)\)`),
+			cause: 1,
+		},
+		{
+			tool:  "tools/telemetry/arcs.py:507",
+			re:    regexp.MustCompile(`\(cause: ([A-Za-z0-9_-]+)\)`),
+			cause: 1,
+		},
+		{
+			// jq on (.body | ascii_downcase): test("cause")
+			tool:      "tools/landing-metrics:527 (test)",
+			re:        regexp.MustCompile(`cause`),
+			lowercase: true,
+		},
+		{
+			// jq on (.body | ascii_downcase): capture("cause\\W+(?<c>[a-z-]+)")
+			tool:      "tools/landing-metrics:527 (capture)",
+			re:        regexp.MustCompile(`cause\W+(?P<c>[a-z-]+)`),
+			lowercase: true,
+			cause:     1,
+		},
+		{
+			// jq on (.body | ascii_downcase): [match("\\b[0-9a-f]{40}\\b"; "g").string] | first
+			tool:      "tools/landing-metrics:528 (head)",
+			re:        regexp.MustCompile(`(\b[0-9a-f]{40}\b)`),
+			lowercase: true,
+			head:      1,
+		},
+		{
+			tool:  "tools/catwalk-app/reports/banyan_live.py:22",
+			re:    regexp.MustCompile(`\(cause: ([^)]+)\), judging its head [0-9a-f]+: ([^\n]*)`),
+			cause: 1, why: 2,
+		},
+		{
+			// jq: "(^|\n)Banyan took this pull request out of the queue \\(cause: (?<cause>[a-z]+)\\), judging its head (?<head>[0-9a-f]+)"
+			tool:  "tools/banyan-repair:243",
+			re:    regexp.MustCompile(`(^|\n)Banyan took this pull request out of the queue \(cause: (?P<cause>[a-z]+)\), judging its head (?P<head>[0-9a-f]+)`),
+			cause: 2, head: 3,
+		},
+	}
+	for _, tc := range readers {
+		in := body
+		if tc.lowercase {
+			in = strings.ToLower(in)
+		}
+		m := tc.re.FindStringSubmatch(in)
+		if m == nil {
+			t.Errorf("%s did not match:\n%s", tc.tool, body)
+			continue
+		}
+		if tc.cause > 0 && m[tc.cause] != "culprit" {
+			t.Errorf("%s read cause %q, want culprit", tc.tool, m[tc.cause])
+		}
+		if tc.head > 0 && m[tc.head] != head {
+			t.Errorf("%s read head %q, want %s", tc.tool, m[tc.head], head)
+		}
+		if tc.why > 0 && (!strings.HasPrefix(m[tc.why], "the build with it failed, the build without it then passed (") || !strings.HasSuffix(m[tc.why], "), and the build with it failed again.")) {
+			t.Errorf("%s read why %q", tc.tool, m[tc.why])
+		}
+	}
+
+	def := newWorld(t, `{}`)
+	def.red = func(sha string) bool { return def.o.Holds(sha, "broken") }
+	two := def.queue(2, "broken", "2\n")
+	def.rounds(6)
+	if len(two.comments) != 1 || !strings.HasPrefix(two.comments[0].Body, "The merge queue took this pull request out of the queue (cause: culprit), judging its head "+two.heads[0]+": ") {
+		t.Errorf("default name comment:\n%+v", two.comments)
 	}
 }
