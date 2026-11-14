@@ -1,0 +1,6 @@
+{
+  "story": "hey-native-apps, 2026-11-03, stall #10147. 24 pull requests were queued, and the 2nd and 3rd in line each broke the build by itself, in the same candidate. The old queue went 114 minutes without a landing and people stepped in. Finding the first culprit says nothing about the second, so the queue has to look again once the first is out.",
+  "build": 42,
+  "prs": [{"number": 10123, "at": 0}, {"number": 9800, "at": 0, "breaks": true}, {"number": 10084, "at": 0, "breaks": true}, {"number": 10125, "at": 0}, {"number": 10128, "at": 0}, {"number": 10132, "at": 0}, {"number": 10131, "at": 0}, {"number": 10122, "at": 0}, {"number": 10094, "at": 0}, {"number": 10087, "at": 0}, {"number": 10134, "at": 0}, {"number": 10120, "at": 0}, {"number": 10092, "at": 0}, {"number": 7844, "at": 0}, {"number": 10137, "at": 0}, {"number": 10138, "at": 0}, {"number": 10060, "at": 0}, {"number": 10126, "at": 0}, {"number": 10080, "at": 0}, {"number": 10140, "at": 0}, {"number": 10090, "at": 0}, {"number": 10142, "at": 0}, {"number": 10091, "at": 0}, {"number": 10139, "at": 0}],
+  "ejected": [9800, 10084]
+}
