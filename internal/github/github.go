@@ -311,7 +311,7 @@ const timelineFields = `pageInfo { hasPreviousPage startCursor } nodes {
 	... on LabeledEvent { createdAt label { name } } }`
 
 const pullFields = `number isDraft merged baseRefName headRefOid headRefName headRepositoryOwner { login }
-	labels(first: 50) { nodes { name } }
+	labels(first: 100) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { ` + timelineFields + ` }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
 	commits(last: 1) { nodes { commit { oid ` + rollupFields + ` } } }`

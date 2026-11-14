@@ -68,6 +68,7 @@ type red struct {
 	last    int // the newest round
 	read    int // the newest round read, with every round before it
 	over    int // the round at which the rounds last started over
+	apart   int // the newest round CI had not begun whole when the next was pushed
 	pushed  time.Time
 	running bool // a round's build has no verdict yet
 	tip     bool // the tip failed in the last round that passed nothing
@@ -154,16 +155,10 @@ func (p *plan) read() {
 		return b.Verdict == Pending && p.c.Timeout > 0 && p.w.Now.Sub(b.Pushed) > p.c.Timeout
 	}
 	for _, b := range p.w.Builds {
-		switch {
-		case b.Round == 0:
-		case late(b) && b.Started.IsZero():
-			// A round's build that CI has not begun inside the timeout may yet begin, after
-			// the rounds pushed since, so it goes, and what it would have said is built again.
-			p.drop(b)
-		default:
-			if late(b) {
-				b.Verdict = Error
-			}
+		if late(b) {
+			b.Verdict = Error
+		}
+		if b.Round > 0 {
 			if byOf[b.Of] == nil {
 				byOf[b.Of] = &red{of: b.Of}
 				reds = append(reds, byOf[b.Of])
@@ -317,6 +312,17 @@ func (p *plan) weigh(r *red) {
 		r.rounds[b.Round] = append(r.rounds[b.Round], b)
 		r.last = max(r.last, b.Round)
 	}
+	for n := 1; n < r.last; n++ {
+		next := p.w.Now
+		for _, b := range r.rounds[n+1] {
+			if b.Pushed.Before(next) {
+				next = b.Pushed
+			}
+		}
+		if slices.ContainsFunc(r.rounds[n], func(b Build) bool { return !b.began(next, p.c.Timeout) }) {
+			r.apart = n
+		}
+	}
 	for n := 1; n <= r.last; n++ {
 		// The highest prefix that passed in this round, and the lowest above it that failed.
 		g, low, probe := -1, -1, false
@@ -366,11 +372,14 @@ func (p *plan) weigh(r *red) {
 // every build of the round before, so each began after the last, and a trunk or a CI that
 // was broken for a while and failed both would have failed the pass between them. A test
 // that is not whole counts only if it ends at the newest round, where it can still go on.
-// No test reaches back past the round at which the rounds started over.
+// No test reaches back past the round at which the rounds started over, nor past one that
+// CI had not begun whole when the next was pushed, which a build that outlived the timeout
+// leaves behind.
 // With hope, a build still running counts as the verdict the test wants of it.
 func (r *red) test(s int, hope bool) (t []Build) {
-	for n := r.over + 1; n <= r.last && len(t) < 3; n++ {
-		for c := min(n-r.over, 3); c > 0; c-- {
+	from := max(r.over, r.apart)
+	for n := from + 1; n <= r.last && len(t) < 3; n++ {
+		for c := min(n-from, 3); c > 0; c-- {
 			t = nil
 			for i := 0; i < c; i++ {
 				j, want := s-i%2, Failure

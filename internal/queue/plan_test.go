@@ -186,29 +186,34 @@ func TestABuildFromBelowALandingIsNoPartOfARedCandidatesRounds(t *testing.T) {
 	}
 }
 
-// #1 and #2 failed together, and the first round has waited past the timeout. CI never began
-// its build of both, so that one goes and is built again: left in place it would read as
-// begun, later rounds would start, and a failure CI began after their pass would stand as the
-// failure before it. CI did begin its build of #1 alone, which stays and reads as lost until
-// it reports: it began before any round after it, and deleting a build that is running would
-// lose every verdict of a CI slower than the timeout.
-func TestARoundsBuildThatNeverBeganInsideTheTimeoutGoes(t *testing.T) {
+// #1 and #2 failed together. CI had not begun the first round's build of both when it timed
+// out, so the second and third rounds were pushed without it, and it began and failed only
+// after the second round's pass. Read by its round, that failure stands before the pass, and
+// #2's test is whole. It is no test: a CI broken for a while after the pass would fail both
+// builds of both. Nobody is blamed, and the rounds go on. Had CI begun the build before the
+// second round was pushed, the same verdicts would blame #2.
+func TestNoTestSpansARoundThatHadNotBegunWhenTheNextWasPushed(t *testing.T) {
 	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	at := func(minutes int) time.Time { return now.Add(time.Duration(minutes) * time.Minute) }
 	both := []Member{member(1, "m1"), member(2, "m2")}
-	w := World{Now: now.Add(2 * time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
-		Builds: []Build{
-			{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now, Started: now},
-			{SHA: "both1", Kind: Check, Base: "trunk", Chain: both, Round: 1, Of: "m2", Pushed: now},
-			{SHA: "one1", Kind: Check, Base: "trunk", Chain: both[:1], Round: 1, Of: "m2", Pushed: now, Started: now},
-		}}
-	var deleted []SHA
-	for _, a := range Plan(w, Config{Slots: 2, MaxBatch: 2, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}) {
-		if a.Do == "delete" {
-			deleted = append(deleted, a.SHA)
-		}
+	check := func(sha SHA, chain []Member, round int, verdict Verdict, pushed, started int) Build {
+		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: round, Of: "m2", Verdict: verdict, Pushed: at(pushed), Started: at(started)}
 	}
-	if fmt.Sprint(deleted) != "[both1]" {
-		t.Errorf("deleted %v, where only the build CI never began goes", deleted)
+	world := func(bothBegan int) World {
+		return World{Now: at(300), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
+			Builds: []Build{
+				{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now, Started: now},
+				check("both1", both, 1, Failure, 0, bothBegan), check("one1", both[:1], 1, Failure, 0, 1),
+				check("one2", both[:1], 2, Success, 91, 92), check("trunk2", nil, 2, Success, 91, 92),
+				check("both3", both, 3, Failure, 93, 140), check("one3", both[:1], 3, Success, 93, 94),
+			}}
+	}
+	cfg := Config{Slots: 2, MaxBatch: 2, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}
+	if numbers, evidence := ejections(Plan(world(130), cfg)); len(numbers) > 0 {
+		t.Errorf("ejected %v on %v, where the first failure began after the pass", numbers, evidence)
+	}
+	if numbers, _ := ejections(Plan(world(1), cfg)); fmt.Sprint(numbers) != "[2]" {
+		t.Errorf("ejected %v, where #2's builds began in the order of their rounds and it leaves", numbers)
 	}
 }
 

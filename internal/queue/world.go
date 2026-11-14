@@ -73,7 +73,7 @@ type Build struct {
 	Verdict Verdict
 	Pushed  time.Time
 	// Started is when CI began running the build: zero until it has, and always zero where
-	// the repository's CI does not say. The planner reads only whether it is set.
+	// the repository's CI does not say.
 	Started time.Time
 }
 
@@ -87,6 +87,16 @@ func (b Build) Tests() SHA {
 
 // begun says CI has begun running the build: it says so, or it has reported on it.
 func (b Build) begun() bool { return !b.Started.IsZero() || b.Verdict != Pending }
+
+// began says CI had begun the build by then. Where CI does not say when it begins a build,
+// the next round waited for the build to report or to time out, so it had begun by then if
+// then is inside its timeout.
+func (b Build) began(by time.Time, timeout time.Duration) bool {
+	if b.Started.IsZero() {
+		return timeout <= 0 || !by.After(b.Pushed.Add(timeout))
+	}
+	return !b.Started.After(by)
+}
 
 // above is the part of the build's chain above the trunk, and whether the trunk is on it.
 func (b Build) above(trunk SHA) ([]Member, bool) {
