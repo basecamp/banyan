@@ -239,3 +239,33 @@ func TestAChangeInsideTheNoiseIsNotWorse(t *testing.T) {
 		t.Errorf("a change of 0.30 past noise of 0.245 gave %v", w)
 	}
 }
+
+// The simulator reads a build as git does. #2 is stacked on the first attempt at merging #1.
+// While that attempt is what landed, #2's build stands on the trunk with #2 alone in its
+// chain. Had a second attempt landed instead, the first would be no part of the trunk, and
+// the build would read as standing on the old trunk with both in its chain: the same tree,
+// and a commit the trunk cannot move to.
+func TestTheSimulatorReadsABuildAgainstTheTrunkAsGitDoes(t *testing.T) {
+	chain := func(s *Sim, land int) (queue.SHA, []int) {
+		one, two := s.arrive(), s.arrive()
+		one.conflict, one.ahead, two.conflict, two.ahead = false, 0, false, 0
+		first, _ := s.Merge("trunk0", one.PR, "first attempt")
+		second, _ := s.Merge("trunk0", one.PR, "second attempt")
+		both, _ := s.Merge(first, two.PR, "")
+		s.advance([]queue.SHA{first, second}[land])
+		b := s.read(queue.Build{SHA: both, Chain: []queue.Member{{Number: one.Number, Head: one.Head, Merge: first}, {Number: two.Number, Head: two.Head, Merge: both}}})
+		var numbers []int
+		for _, m := range b.Chain {
+			numbers = append(numbers, m.Number)
+		}
+		return b.Base, numbers
+	}
+	s := NewSim(shapes[0], dials(5, 2, false), 1)
+	if base, numbers := chain(s, 0); base != s.trunk || len(numbers) != 1 {
+		t.Errorf("stacked on what landed, the build reads on %.7s holding %v, where it stands on the trunk %.7s holding #2 alone", base, numbers, s.trunk)
+	}
+	s = NewSim(shapes[0], dials(5, 2, false), 1)
+	if base, numbers := chain(s, 1); base != "trunk0" || len(numbers) != 2 {
+		t.Errorf("stacked beside what landed, the build reads on %.7s holding %v, where it stands on the old trunk holding both", base, numbers)
+	}
+}

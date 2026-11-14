@@ -123,6 +123,9 @@ type Sim struct {
 	byHead  map[queue.SHA]int
 	builds  map[queue.SHA]*simBuild
 	holds   map[queue.SHA]map[int]bool // the pull requests in each commit's tree
+	under   map[queue.SHA]queue.SHA    // each commit's parent
+	merges  map[queue.SHA]queue.Member // the pull request each merge commit merges
+	trunks  map[queue.SHA]bool         // the commits the trunk holds
 	seen    map[queue.SHA]bool
 	started int
 	next    int
@@ -151,7 +154,7 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	cfg.Cancels = shape.Cancels
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
-		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
+		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, under: map[queue.SHA]queue.SHA{}, merges: map[queue.SHA]queue.Member{}, trunks: map[queue.SHA]bool{"trunk0": true}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
 	if shape.Agents > 0 {
 		s.pool, s.alone = newPool(shape, seed), newPool(shape, seed)
 	}
@@ -188,9 +191,39 @@ func (s *Sim) commit(parent queue.SHA, head queue.SHA, note string, adds int) qu
 		if adds > 0 {
 			in[adds] = true
 		}
-		s.holds[sha] = in
+		s.holds[sha], s.under[sha] = in, parent
+		if adds > 0 {
+			s.merges[sha] = queue.Member{Number: adds, Head: head, Merge: sha}
+		}
 	}
 	return sha
+}
+
+// advance puts the trunk at sha, which holds every commit under it.
+func (s *Sim) advance(sha queue.SHA) {
+	s.trunk = sha
+	for at := sha; !s.trunks[at]; at = s.under[at] {
+		s.trunks[at] = true
+	}
+}
+
+// read gives a build its base and chain as git reads them: the base is the first commit
+// under the build that the trunk holds, and the chain is the merges above it. A candidate's
+// own merge keeps the name its chain gave it, which is the same whatever attempt built it.
+func (s *Sim) read(b queue.Build) queue.Build {
+	at := b.SHA
+	if b.Kind != queue.Candidate {
+		at = s.under[at]
+	}
+	var chain []queue.Member
+	for ; !s.trunks[at] && s.merges[at].Number > 0; at = s.under[at] {
+		chain = append([]queue.Member{s.merges[at]}, chain...)
+	}
+	if n := len(chain); n > 0 && b.Kind == queue.Candidate {
+		chain[n-1].Merge = b.Chain[len(b.Chain)-1].Merge
+	}
+	b.Base, b.Chain = at, chain
+	return b
 }
 
 func (s *Sim) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, bool) {
@@ -386,7 +419,7 @@ func (s *Sim) Step() {
 		}
 	}
 	if s.hourly(s.shape.Outside) {
-		s.trunk = s.commit(s.trunk, "", fmt.Sprintf("outside %d", s.now), 0)
+		s.advance(s.commit(s.trunk, "", fmt.Sprintf("outside %d", s.now), 0))
 	}
 	for _, sha := range s.shas() {
 		if b := s.builds[sha]; b.Verdict == queue.Pending && !b.lost && s.now >= b.end {
@@ -476,7 +509,7 @@ func (s *Sim) World() queue.World {
 	}
 	for _, sha := range s.shas() {
 		sb := s.builds[sha]
-		b := sb.Build
+		b := s.read(sb.Build)
 		if sb.end != never && sb.start <= s.now && !s.shape.Silent {
 			b.Started = s.epoch.Add(sb.start)
 		}
@@ -636,7 +669,8 @@ func (s *Sim) land(a queue.Action) {
 		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))
 		s.Labelled = append(s.Labelled, float64(s.now-p.arrived)/float64(s.shape.Build))
 	}
-	s.trunk, s.LastLand = a.SHA, s.now
+	s.advance(a.SHA)
+	s.LastLand = s.now
 	delete(s.builds, a.SHA)
 }
 
