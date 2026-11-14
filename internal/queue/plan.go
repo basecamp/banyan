@@ -81,8 +81,7 @@ func (r *red) suspects() []Member { return r.chain[max(r.lo, 0):r.hi] }
 
 func (p *plan) act(a Action) { p.acts = append(p.acts, a) }
 
-// admit sorts the queue into those that may join the chain, those that wait in place, and
-// the one that leaves: a conflict with the trunk.
+// admit sorts the queue into those that may join the chain and those that wait in place.
 func (p *plan) admit() {
 	prs := slices.Clone(p.w.PRs)
 	sort.SliceStable(prs, func(i, j int) bool {
@@ -105,7 +104,7 @@ func (p *plan) admit() {
 			p.waits[pr.Number] = cmp.Or(pr.Gate, "a check of its own") + " failed"
 		default:
 			if _, ok := p.w.Repo.Merge(p.w.Trunk, pr, ""); !ok {
-				p.act(Action{Do: "eject", PR: pr.Number, Cause: "conflict", Text: "it conflicts with the trunk"})
+				p.waits[pr.Number] = "it conflicts with the trunk"
 				continue
 			}
 			p.open[pr.Number] = pr

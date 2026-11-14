@@ -59,10 +59,11 @@ type Shape struct {
 
 // Queued is a pull request a case queues by hand, with its hidden facts.
 type Queued struct {
-	Number int
-	At     time.Duration
-	Breaks bool
-	Clash  int
+	Number   int
+	At       time.Duration
+	Breaks   bool
+	Clash    int
+	Conflict bool
 }
 
 // Episode turns the trunk red from At. A plain one heals by itself after For, as a clock or
@@ -85,7 +86,7 @@ type simPR struct {
 	landed      bool
 	gone        bool // ejected with cause, or removed by its author, and not coming back
 	back        time.Duration
-	mended      time.Duration // when the head that mends its conflict passed its own checks
+	mend        time.Duration // when its author pushes the head that mends its conflict with the trunk
 	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
 	checksGreen time.Duration
 }
@@ -154,7 +155,7 @@ func (s *Sim) queue() {
 		if q.At <= s.now-tick || q.At > s.now {
 			continue
 		}
-		p := &simPR{arrived: s.now, ready: s.now, queued: true, breaks: q.Breaks, clash: q.Clash}
+		p := &simPR{arrived: s.now, ready: s.now, queued: true, breaks: q.Breaks, clash: q.Clash, conflict: q.Conflict}
 		p.Number, p.Head = q.Number, fmt.Sprintf("head%d", q.Number)
 		p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 		s.prs[p.Number], s.byHead[p.Head] = p, p.Number
@@ -322,10 +323,10 @@ func (s *Sim) Step() {
 		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
 			p.queued, p.back, p.Note, p.ready = true, 0, "", s.now
 			p.Queued = s.epoch.Add(s.now)
-			if p.mended > 0 {
-				p.ready, p.mended = p.mended, 0
-			}
 		}
+	}
+	for _, n := range s.numbers() {
+		s.mend(s.prs[n])
 	}
 	if s.hourly(s.shape.Moves) {
 		s.move()
@@ -395,6 +396,22 @@ func (s *Sim) pick() *simPR {
 func (s *Sim) move() {
 	if p := s.pick(); p != nil && p.fix == 0 {
 		p.Head = fmt.Sprintf("%s'", p.Head)
+		s.byHead[p.Head] = p.Number
+		p.Checks, p.checksGreen, p.Note = queue.Pending, s.now+10*time.Minute, ""
+	}
+}
+
+// mend is a pull request's author merging the trunk in once it conflicts with it: the new head
+// is pushed 50 minutes after the conflict began, and its own checks take as long as any.
+func (s *Sim) mend(p *simPR) {
+	switch conflicts := p.queued && (p.conflict || (p.ahead > 0 && s.holds[s.trunk][p.ahead])); {
+	case !conflicts:
+		p.mend = 0
+	case p.mend == 0:
+		p.mend = s.now + 50*time.Minute
+	case s.now >= p.mend:
+		p.conflict, p.ahead, p.mend = false, 0, 0
+		p.Head = fmt.Sprintf("%s+", p.Head)
 		s.byHead[p.Head] = p.Number
 		p.Checks, p.checksGreen, p.Note = queue.Pending, s.now+10*time.Minute, ""
 	}
@@ -544,16 +561,8 @@ func (s *Sim) eject(a queue.Action) {
 	s.Ejected[a.Cause]++
 	s.Left[a.PR] = a.Cause
 	switch a.Cause {
-	case "conflict":
-		if !p.conflict && !(p.ahead > 0 && s.holds[s.trunk][p.ahead]) {
-			s.broke(3, "#%d was ejected for a conflict it does not have", a.PR)
-		}
-		// Its author merges the trunk in, and the new head passes its own checks an hour
-		// after it left. The label goes back on 40 minutes after that, and its clock has
-		// run since the head was ready: the queue took the label off, so the wait is its.
-		p.conflict, p.ahead, p.mended, p.back = false, 0, s.now+time.Hour, s.now+100*time.Minute
-		p.Head = fmt.Sprintf("%s+", p.Head)
-		s.byHead[p.Head] = p.Number
+	default:
+		s.broke(3, "#%d was ejected as %q, which is no cause to leave", a.PR, a.Cause)
 	case "culprit":
 		if !s.fair(a) {
 			s.broke(8, "#%d was blamed with no fair test in %.7s", a.PR, a.Evidence)

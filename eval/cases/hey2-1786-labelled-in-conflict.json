@@ -1,0 +1,6 @@
+{
+  "story": "hey2, 2026-11-13. #1786 was labelled while it conflicted with main, and the queue took it out within the minute. Its author merged main in, and the new head passed its own checks 65 minutes later. Nobody labelled it again, and 21 hours later it had not landed. Four that left the same way that day were labelled again 10 to 91 minutes after they were ready. A pull request that conflicts with the trunk waits in place, and lands once it is mended.",
+  "build": 34,
+  "prs": [{"number": 1786, "at": 0, "conflicts": true}, {"number": 1954, "at": 0}],
+  "ejected": []
+}

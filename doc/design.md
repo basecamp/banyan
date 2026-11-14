@@ -60,10 +60,11 @@ Only `failure` is evidence. A build that was lost, cancelled or timed out is bui
 
 ## Who leaves the queue
 
-- **A culprit,** by the rule above.
-- **A conflict with the trunk itself.**
+Only a culprit, by the rule above.
 
-Everything else waits in place: a conflict with a pull request ahead, the pull request's own checks running or red, a hold label, a red trunk, a red candidate being narrowed.
+Everything else waits in place: a conflict with the trunk or with a pull request ahead, the pull request's own checks running or red, a hold label, a red trunk, a red candidate being narrowed. The `merge-queue` status on its head says which.
+
+A conflict with the trunk used to leave too. On hey2's first day, 8 pull requests left that way while 57 landed. Six were mended, and of those four were labelled again 10 to 91 minutes after their new head was ready, and two never were. Waiting in place, a mended head joins the moment its own checks pass.
 
 A push to a queued pull request keeps it queued. The label says to land the pull request, and the checks named in `admit` say which head may land. The builds that merged the old head are dropped, the new head waits for its own checks, and it joins behind the builds already running. So where `admit` is empty, whatever is pushed to a labelled pull request lands once the queue's build passes.
 
@@ -100,7 +101,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 ## Not in the engine
 
 - **A repository's own gates:** review, evidence, a person's word. They run before a pull request is queued.
-- **Repair of a trunk conflict.** A separate tool can read the eject comment and merge the trunk in. A pull request kept on a person's word is never pushed to.
+- **Repair of a trunk conflict.** A separate tool can read the status of a pull request that waits on one and merge the trunk in. A pull request kept on a person's word is never pushed to.
 - **A watch.** A stall alarm reads the `merge-queue` statuses.
 - **Commands to queue, take out or list.** The label is how a pull request joins and leaves, and the status on its head is where it stands. `gh` does both.
 - **A stop switch.** A person stops the queue by stopping its tick.

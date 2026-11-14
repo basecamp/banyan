@@ -146,7 +146,7 @@ type Action struct {
 	Build Build  `json:"build,omitzero"`  // push
 	SHA   SHA    `json:"sha,omitempty"`   // land, delete
 	PR    int    `json:"pr,omitempty"`    // eject, note
-	Cause string `json:"cause,omitempty"` // eject: culprit or conflict
+	Cause string `json:"cause,omitempty"` // eject: culprit, and in recordings from before v0.4, conflict
 	Text  string `json:"text,omitempty"`
 	// Evidence is the builds an ejection rests on, and Members the pull requests a landing lands.
 	Evidence []SHA    `json:"evidence,omitempty"`

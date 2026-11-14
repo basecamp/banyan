@@ -301,34 +301,29 @@ func (q *Queue) eject(r *Read, pr github.Pull, a queue.Action) error {
 	at := pr.Head
 	body := fmt.Sprintf("The merge queue took this pull request out at `%.12s`: %s.", at, a.Text)
 	link := ""
-	switch a.Cause {
-	case "culprit":
-		for i, sha := range a.Evidence {
-			what := "failed with it"
-			if i == 0 {
-				what = "passed without it"
-			}
-			// The build that judged it: with several, the one that failed it.
-			url, want := "", queue.Failure
-			if i == 0 {
-				want = queue.Success
-			}
-			for _, c := range append(slices.Clone(q.Build), q.Probe) {
-				if s := r.Statuses[sha][c]; s.URL != "" && (url == "" || s.State == want) {
-					url = s.URL
-				}
-			}
-			if url == "" {
-				url = fmt.Sprintf("`%.12s`", sha)
-			} else if i > 0 {
-				link = url
-			}
-			body += fmt.Sprintf("\n- %s: %s", what, url)
+	for i, sha := range a.Evidence {
+		what := "failed with it"
+		if i == 0 {
+			what = "passed without it"
 		}
-		body += "\n\nFix it and queue it again. If the failure isn't this pull request's, queue it again as it is."
-	case "conflict":
-		body += fmt.Sprintf("\n\nMerge `%s` in and queue it again.", q.Trunk)
+		// The build that judged it: with several, the one that failed it.
+		url, want := "", queue.Failure
+		if i == 0 {
+			want = queue.Success
+		}
+		for _, c := range append(slices.Clone(q.Build), q.Probe) {
+			if s := r.Statuses[sha][c]; s.URL != "" && (url == "" || s.State == want) {
+				url = s.URL
+			}
+		}
+		if url == "" {
+			url = fmt.Sprintf("`%.12s`", sha)
+		} else if i > 0 {
+			link = url
+		}
+		body += fmt.Sprintf("\n- %s: %s", what, url)
 	}
+	body += "\n\nFix it and queue it again. If the failure isn't this pull request's, queue it again as it is."
 	marker := fmt.Sprintf("<!-- %s eject %s attributed=%s -->", q.Status, at, a.Cause)
 	if err := q.Hub.Comment(pr.Number, body, marker, pr.Queued); err != nil {
 		return err

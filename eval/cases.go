@@ -26,10 +26,11 @@ type Case struct {
 	// runs to its end.
 	Agents int `json:"agents"`
 	PRs    []struct {
-		Number  int  `json:"number"`
-		At      int  `json:"at"`
-		Breaks  bool `json:"breaks"`  // it passes its own checks and fails the whole build
-		Clashes int  `json:"clashes"` // it fails the whole build only together with this one
+		Number    int  `json:"number"`
+		At        int  `json:"at"`
+		Breaks    bool `json:"breaks"`    // it passes its own checks and fails the whole build
+		Clashes   int  `json:"clashes"`   // it fails the whole build only together with this one
+		Conflicts bool `json:"conflicts"` // it conflicts with the trunk until its author merges the trunk in
 	} `json:"prs"`
 	// Builds is what happens to the first builds the queue begins, in the order it begins them.
 	Builds []struct {
@@ -72,7 +73,7 @@ func (c Case) shape() Shape {
 	minutes := func(n int) time.Duration { return time.Duration(n) * time.Minute }
 	s := Shape{Name: c.Name, Build: minutes(c.Build), Probe: minutes(c.Build) / 3, Agents: c.Agents}
 	for _, pr := range c.PRs {
-		s.Queue = append(s.Queue, Queued{Number: pr.Number, At: minutes(pr.At), Breaks: pr.Breaks, Clash: pr.Clashes})
+		s.Queue = append(s.Queue, Queued{Number: pr.Number, At: minutes(pr.At), Breaks: pr.Breaks, Clash: pr.Clashes, Conflict: pr.Conflicts})
 		s.Hours = max(s.Hours, minutes(pr.At).Hours())
 	}
 	for _, b := range c.Builds {
