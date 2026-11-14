@@ -85,6 +85,7 @@ type simPR struct {
 	landed      bool
 	gone        bool // ejected with cause, or removed by its author, and not coming back
 	back        time.Duration
+	mended      time.Duration // when the head that mends its conflict passed its own checks
 	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
 	checksGreen time.Duration
 }
@@ -321,6 +322,9 @@ func (s *Sim) Step() {
 		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
 			p.queued, p.back, p.Note, p.ready = true, 0, "", s.now
 			p.Queued = s.epoch.Add(s.now)
+			if p.mended > 0 {
+				p.ready, p.mended = p.mended, 0
+			}
 		}
 	}
 	if s.hourly(s.shape.Moves) {
@@ -544,8 +548,10 @@ func (s *Sim) eject(a queue.Action) {
 		if !p.conflict && !(p.ahead > 0 && s.holds[s.trunk][p.ahead]) {
 			s.broke(3, "#%d was ejected for a conflict it does not have", a.PR)
 		}
-		// Its author merges the trunk in and queues it again.
-		p.conflict, p.ahead, p.back = false, 0, s.now+30*time.Minute
+		// Its author merges the trunk in, and the new head passes its own checks an hour
+		// after it left. The label goes back on 40 minutes after that, and its clock has
+		// run since the head was ready: the queue took the label off, so the wait is its.
+		p.conflict, p.ahead, p.mended, p.back = false, 0, s.now+time.Hour, s.now+100*time.Minute
 		p.Head = fmt.Sprintf("%s+", p.Head)
 		s.byHead[p.Head] = p.Number
 	case "culprit":
