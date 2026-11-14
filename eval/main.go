@@ -547,7 +547,7 @@ func main() {
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	again := flag.String("replay", "", "plan one recorded tick again from its recording alone, and print the actions")
 	var check checkFlag
-	past := flag.String("history", "", `play a recorded window to the planner and print it beside what the record's own queue did: -history <trace.json> ["<slots> <batch>" ...]`)
+	past := flag.String("history", "", `play a recorded window to the planner and print it beside what the record's own queue did: -history <trace.json> ["<slots> <batch> [<gather> [<minutes a probe takes>]]" ...]`)
 	flake := flag.Float64("flake", 0.07, "with -history: the share of whole builds of a good tree that fail")
 	whole := flag.Duration("whole", 0, "with -history: how long a build of every job takes, the slowest tenth of the recorded builds where not given")
 	unrepaired := flag.Bool("unrepaired", false, "with -history: nothing mends a conflict but the author")
@@ -560,21 +560,21 @@ func main() {
 		return
 	}
 	if *past != "" {
-		cfgs := []queue.Config{challenger["hey-native-apps"]}
+		cfgs, probes := []queue.Config{challenger["hey-native-apps"]}, time.Duration(0)
 		for i, arg := range flag.Args() {
-			var slots, batch, gather int
-			if n, err := fmt.Sscan(arg, &slots, &batch, &gather); n < 2 {
+			var slots, batch, gather, probe int
+			if n, err := fmt.Sscan(arg, &slots, &batch, &gather, &probe); n < 2 {
 				fmt.Println(arg+":", err)
 				os.Exit(1)
 			}
 			if i == 0 {
 				cfgs = nil
 			}
-			cfg := dials(slots, batch, false)
-			cfg.Gather = gather
+			cfg := dials(slots, batch, probe > 0)
+			cfg.Gather, probes = gather, time.Duration(probe)*time.Minute
 			cfgs = append(cfgs, cfg)
 		}
-		if err := replayHistory(*past, cfgs, 10, Shape{Flake: *flake, Whole: *whole, Rerun: *rerun, Rescued: *rescued}, !*unrepaired); err != nil {
+		if err := replayHistory(*past, cfgs, 10, Shape{Flake: *flake, ProbeFlake: *flake * (1 - *rescued), Probe: probes, Whole: *whole, Rerun: *rerun, Rescued: *rescued}, !*unrepaired); err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}

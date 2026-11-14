@@ -35,12 +35,13 @@ type script struct {
 	behind   map[int]time.Duration // how much later than recorded its author acts, having been ejected later
 	labelled map[int]time.Duration // when it was first labelled, as recorded
 	mended   map[int]time.Duration
-	waited   map[int]bool // it waited on a conflict, or was ejected
-	spared   int          // conflicts that came to a pull request already landed
+	waited   map[int]bool          // it waited on a conflict, or was ejected
+	blamed   map[int]time.Duration // when it was first ejected for breaking the build
+	spared   int                   // conflicts that came to a pull request already landed
 }
 
 func newScript(acts []Act) *script {
-	h := &script{acts: map[int][]Act{}, behind: map[int]time.Duration{}, labelled: map[int]time.Duration{}, mended: map[int]time.Duration{}, waited: map[int]bool{}}
+	h := &script{acts: map[int][]Act{}, behind: map[int]time.Duration{}, labelled: map[int]time.Duration{}, blamed: map[int]time.Duration{}, mended: map[int]time.Duration{}, waited: map[int]bool{}}
 	for _, a := range acts {
 		if _, ok := h.acts[a.Number]; !ok {
 			h.numbers = append(h.numbers, a.Number)
@@ -120,6 +121,9 @@ func (s *Sim) act(a Act) bool {
 	case "ejected":
 		if p.queued && p.breaks {
 			return false
+		}
+		if _, ok := h.blamed[a.Number]; !ok && s.Left[a.Number] == "culprit" {
+			h.blamed[a.Number] = s.now
 		}
 		p.breaks, h.behind[a.Number] = false, max(0, s.now-a.At)
 	}
@@ -332,7 +336,7 @@ func (t trace) times() (passed []time.Duration, fails float64) {
 type outcome struct {
 	name                   string
 	runs                   int
-	label, clean           []float64
+	label, clean, blame    []float64 // blame: minutes from the first label of a pull request that broke the build to its ejection
 	landed, ejected, wrong int
 	builds                 int
 	minutes                float64
@@ -356,6 +360,12 @@ func (t trace) recorded() outcome {
 		}
 		for _, c := range pr.Conflicts {
 			asked = asked || c.Kind == "repair-ask"
+		}
+		for _, e := range pr.Ejections {
+			if pr.Breaks && e.Cause == "culprit" && e.Attributed != "checks" && first >= 0 {
+				o.blame = append(o.blame, (e.At-first)/60)
+				break
+			}
 		}
 		switch {
 		case pr.Merged == nil || *pr.Merged > window:
@@ -388,6 +398,9 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 	}
 	window := t.Window.To.Sub(t.Window.From)
 	o := outcome{name: fmt.Sprintf("%d x %d / %d", cfg.Slots, cfg.MaxBatch, cfg.Gather), runs: seeds}
+	if cfg.Probes {
+		o.name += " p"
+	}
 	for _, s := range each(seeds, func(i int) *Sim {
 		s := NewSim(shape, cfg, int64(i))
 		for s.now < window && len(s.Broken) == 0 {
@@ -397,6 +410,9 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 	}) {
 		o.broken = append(o.broken, s.Broken...)
 		longest := 0.0
+		for n, at := range s.history.blamed {
+			o.blame = append(o.blame, (at - s.history.labelled[n]).Minutes())
+		}
 		o.builds, o.minutes, o.wrong, o.spared = o.builds+s.Whole, o.minutes+s.Minutes, o.wrong+s.Wrong, o.spared+s.history.spared
 		for _, n := range s.Ejected {
 			o.ejected += n
@@ -422,9 +438,9 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 
 func (o outcome) print() {
 	n, landed := float64(o.runs), float64(max(o.landed, 1))
-	fmt.Printf("%-10s %7.0f %8.1f %8.1f %8.1f %8.1f %7.3f %9.1f %7.1f %9.2f %10.1f %6.1f %8.1f %8.0f %7.1f\n", o.name, float64(o.landed)/n,
+	fmt.Printf("%-10s %7.0f %8.1f %8.1f %8.1f %8.1f %7.3f %9.1f %7.1f %9.2f %10.1f %6.1f %8.1f %8.0f %7.1f %7.0f\n", o.name, float64(o.landed)/n,
 		percentile(o.label, 50), percentile(o.label, 90), percentile(o.clean, 50), percentile(o.clean, 90), float64(len(o.clean))/landed,
-		100*float64(o.ejected)/landed, float64(o.wrong)/n, float64(o.builds)/landed, o.minutes/landed, float64(o.left)/n, percentile(o.label, 99), o.longest/n, float64(o.spared)/n)
+		100*float64(o.ejected)/landed, float64(o.wrong)/n, float64(o.builds)/landed, o.minutes/landed, float64(o.left)/n, percentile(o.label, 99), o.longest/n, float64(o.spared)/n, percentile(o.blame, 50))
 	for _, b := range o.broken {
 		fmt.Println("  broken:", b)
 	}
@@ -437,7 +453,7 @@ func replayHistory(path string, dials []queue.Config, seeds int, shape Shape, re
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-10s %7s %8s %8s %8s %8s %7s %9s %7s %9s %10s %6s %8s %8s %7s\n", "queue", "landed", "label50", "label90", "clean50", "clean90", "clean", "eject/100", "wrong", "builds/pr", "build min", "left", "label99", "longest", "spared")
+	fmt.Printf("%-10s %7s %8s %8s %8s %8s %7s %9s %7s %9s %10s %6s %8s %8s %7s %7s\n", "queue", "landed", "label50", "label90", "clean50", "clean90", "clean", "eject/100", "wrong", "builds/pr", "build min", "left", "label99", "longest", "spared", "blame")
 	t.recorded().print()
 	for _, cfg := range dials {
 		t.replayed(cfg, seeds, shape, repair).print()
