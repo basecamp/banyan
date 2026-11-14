@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -186,34 +187,55 @@ func TestABuildFromBelowALandingIsNoPartOfARedCandidatesRounds(t *testing.T) {
 	}
 }
 
-// #1 and #2 failed together. CI had not begun the first round's build of both when it timed
-// out, so the second and third rounds were pushed without it, and it began and failed only
-// after the second round's pass. Read by its round, that failure stands before the pass, and
-// #2's test is whole. It is no test: a CI broken for a while after the pass would fail both
-// builds of both. Nobody is blamed, and the rounds go on. Had CI begun the build before the
-// second round was pushed, the same verdicts would blame #2.
-func TestNoTestSpansARoundThatHadNotBegunWhenTheNextWasPushed(t *testing.T) {
+// #1 and #2 failed together, and the first round's build of both outlived the timeout before
+// CI began it. It may yet begin and fail after the rounds pushed since, and read by its round
+// that failure would stand before their pass. So the round pushed past it skips a number, and
+// the late failure is in no test: a CI broken for a while after the pass would fail both
+// builds of both. Where CI had begun the build, the next round is the next number. Where the
+// rounds are in a row, #2 leaves, however long the tick took to push each: on a CI that does
+// not say when it begins a build, each round waited for the last to report.
+func TestARoundPushedPastABuildCIHadNotBegunSkipsANumberThatNoTestSpans(t *testing.T) {
 	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
 	at := func(minutes int) time.Time { return now.Add(time.Duration(minutes) * time.Minute) }
 	both := []Member{member(1, "m1"), member(2, "m2")}
-	check := func(sha SHA, chain []Member, round int, verdict Verdict, pushed, started int) Build {
-		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: round, Of: "m2", Verdict: verdict, Pushed: at(pushed), Started: at(started)}
-	}
-	world := func(bothBegan int) World {
-		return World{Now: at(300), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
-			Builds: []Build{
-				{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now, Started: now},
-				check("both1", both, 1, Failure, 0, bothBegan), check("one1", both[:1], 1, Failure, 0, 1),
-				check("one2", both[:1], 2, Success, 91, 92), check("trunk2", nil, 2, Success, 91, 92),
-				check("both3", both, 3, Failure, 93, 140), check("one3", both[:1], 3, Success, 93, 94),
-			}}
+	check := func(sha SHA, chain []Member, round int, verdict Verdict, pushed int) Build {
+		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: round, Of: "m2", Verdict: verdict, Pushed: at(pushed)}
 	}
 	cfg := Config{Slots: 2, MaxBatch: 2, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}
-	if numbers, evidence := ejections(Plan(world(130), cfg)); len(numbers) > 0 {
-		t.Errorf("ejected %v on %v, where the first failure began after the pass", numbers, evidence)
+	pushed := func(started time.Time) (rounds []int) {
+		slow := check("both1", both, 1, Pending, 0)
+		slow.Started = started
+		w := World{Now: at(91), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
+			Builds: []Build{{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now}, slow, check("one1", both[:1], 1, Success, 0)}}
+		for _, a := range Plan(w, cfg) {
+			if a.Do == "push" && a.Build.Of == "m2" {
+				rounds = append(rounds, a.Build.Round)
+			}
+		}
+		return rounds
 	}
-	if numbers, _ := ejections(Plan(world(1), cfg)); fmt.Sprint(numbers) != "[2]" {
-		t.Errorf("ejected %v, where #2's builds began in the order of their rounds and it leaves", numbers)
+	if rounds := pushed(time.Time{}); len(rounds) == 0 || slices.Max(rounds) != 3 || slices.Min(rounds) != 3 {
+		t.Errorf("pushed rounds %v past a build CI had not begun, where the round skips to 3", rounds)
+	}
+	if rounds := pushed(at(1)); len(rounds) == 0 || slices.Max(rounds) != 2 || slices.Min(rounds) != 2 {
+		t.Errorf("pushed rounds %v past a build CI had begun, where the next round is 2", rounds)
+	}
+
+	tested := func(pass int) []int {
+		w := World{Now: at(300), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
+			Builds: []Build{
+				{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now},
+				check("both1", both, 1, Failure, 0), check("one1", both[:1], 1, Success, 0),
+				check("one", both[:1], pass, Success, 91), check("both", both, pass+1, Failure, 182),
+			}}
+		numbers, _ := ejections(Plan(w, cfg))
+		return numbers
+	}
+	if numbers := tested(3); len(numbers) > 0 {
+		t.Errorf("ejected %v across a skipped round, where the first failure may have begun after the pass", numbers)
+	}
+	if numbers := tested(2); fmt.Sprint(numbers) != "[2]" {
+		t.Errorf("ejected %v, where #2's test is three rounds in a row and it leaves", numbers)
 	}
 }
 

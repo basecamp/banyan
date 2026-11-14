@@ -58,7 +58,7 @@ A red candidate and its rounds stand while the trunk moves under them, since the
 
 A round's builds are whole builds by default. Where a repository's CI offers probes, a round uses them instead: a probe is an empty commit on a prefix that asks CI to run only what failed in the red build.
 
-Only `failure` is evidence. A build that was lost, cancelled or timed out is built again. A round that lost a build still counts the builds that reported. A build that outlives the timeout reads as lost until it reports, and the next round is pushed without it. If CI had not begun it by then, its round and the next no longer began one after the other, so no test reaches from one into the other: a test holds only while each of its builds began after the last. The timeout is set longer than a build takes with its wait for an agent.
+Only `failure` is evidence. A build that was lost, cancelled or timed out is built again. A round that lost a build still counts the builds that reported. A build that outlives the timeout reads as lost until it reports, and the next round is pushed without it. If CI had not begun it by then, it may begin after that round does, so the round skips a number. A test is three rounds in a row, so none reaches across the gap, and the late build's verdict is in no test with the rounds pushed past it. The timeout is set longer than a build takes with its wait for an agent.
 
 Two red candidates can finish their tests in one tick. A test that passed with a pull request under it that leaves in that tick says nothing of the queue once that one is gone, so nobody is blamed on it. Where two such tests each stand on the other's pull request, the first leaves.
 
