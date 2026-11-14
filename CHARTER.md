@@ -25,7 +25,7 @@ Each is a check in `eval/`. One failure in any simulated world fails the eval.
 5. A tick on an unchanged world does nothing.
 6. A crash after any side effect leaves a world the next tick finishes correctly.
 7. No SHA is built twice.
-8. A pull request is blamed only after a fair test. The build failed with it, passed without it, and failed with it again, with the passing build started between the two failures. A trunk or a CI that is broken for a while fails the build without it too, so it blames nobody.
+8. A pull request is blamed only after a fair test. The build failed with it, passed without it, and failed with it again, with the passing build started between the two failures. A trunk or a CI that is broken for a while fails the build without it too, so it blames nobody. That holds only where the build without it runs every job the failed build ran, which the repository's CI owes the queue (`doc/design.md`, What a repository offers).
 
 CI that breaks, recovers and breaks again inside one test can still blame an innocent pull request, and so can two random failures in a row. Those are wrong ejections, and the first indicator caps them.
 

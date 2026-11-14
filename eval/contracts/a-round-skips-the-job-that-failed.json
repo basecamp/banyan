@@ -1,0 +1,13 @@
+{
+  "story": "hey-native-apps runs a build's jobs by what its change reaches. A job only #3's change reaches is failed by its runners for three hours. The candidate that holds #3 fails it. The build without #3 skips that job and passes, and the build with #3 fails it again: a fair test by its builds, with no control in it, and #3 is ejected for its runners. v2 met this four times over (the tip judges a candidate only when it ran every job; a probe runs the jobs its trailers name whatever its change reaches). The contract's line: a build that looks for a red's cause runs every job the red build ran.",
+  "build": 42,
+  "prs": [
+    {"number": 1, "at": 0},
+    {"number": 2, "at": 0},
+    {"number": 3, "at": 0},
+    {"number": 4, "at": 0},
+    {"number": 5, "at": 10}
+  ],
+  "red": [{"at": 0, "for": 180, "reach": 3}],
+  "ejected": []
+}

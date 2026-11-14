@@ -75,6 +75,10 @@ type Episode struct {
 	At, For  time.Duration
 	NeedsFix bool
 	Fix      time.Duration
+	// Reach, where set, is the one pull request whose change reaches the job that fails: on a
+	// CI that runs a build's jobs by what its change reaches, only a tree that holds this pull
+	// request ahead of the trunk runs that job, and every other build passes by skipping it.
+	Reach int
 }
 
 type simPR struct {
@@ -234,7 +238,7 @@ func (s *Sim) arrive() *simPR {
 // red is the episode that fails a build of this tree begun at this time, if any.
 func (s *Sim) red(tree map[int]bool, at time.Duration) bool {
 	for i, e := range s.shape.Episodes {
-		if at < e.At {
+		if at < e.At || (e.Reach > 0 && (!tree[e.Reach] || s.prs[e.Reach].landed)) {
 			continue
 		}
 		if !e.NeedsFix && at < e.At+e.For {

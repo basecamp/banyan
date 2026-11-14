@@ -561,6 +561,28 @@ func main() {
 		}
 	}
 
+	for _, c := range contracts() {
+		kinds := map[string]bool{}
+		for _, cfg := range []queue.Config{challenger["hey2"], challenger["hey-native-apps"]} {
+			for _, w := range c.play(mutant{plan: queue.Plan, verify: queue.Verify}, cfg) {
+				if i := strings.Index(w, "invariant "); i >= 0 {
+					kinds[w[i:][:11]] = true
+				}
+			}
+		}
+		var which []string
+		for k := range kinds {
+			which = append(which, k)
+		}
+		sort.Strings(which)
+		fmt.Printf("a CI where %s: breaks %s\n", strings.ReplaceAll(c.Name, "-", " "), strings.Join(which, ", "))
+		if len(which) == 0 {
+			fmt.Println("  the eval is blind to that line of the contract")
+			why = append(why, "the broken contract "+c.Name+" is not caught")
+			failed = true
+		}
+	}
+
 	lines := engineLines()
 	last := recorded()
 	var scores []Score

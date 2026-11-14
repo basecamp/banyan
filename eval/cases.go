@@ -12,7 +12,7 @@ import (
 	"github.com/basecamp/banyan/internal/queue"
 )
 
-//go:embed cases/*.json
+//go:embed cases/*.json contracts/*.json
 var caseFiles embed.FS
 
 // A Case is a world built by hand from something that happened to a real queue, and what the
@@ -39,8 +39,9 @@ type Case struct {
 	} `json:"builds"`
 	// Red is when the trunk fails by the clock, whatever is built on it.
 	Red []struct {
-		At  int `json:"at"`
-		For int `json:"for"`
+		At    int `json:"at"`
+		For   int `json:"for"`
+		Reach int `json:"reach"` // only builds whose change holds this pull request run the job that fails
 	} `json:"red"`
 	// Ejected is the pull requests that must leave as culprits and never reach the trunk.
 	// Every other one must land, and must never be ejected for any cause.
@@ -50,19 +51,26 @@ type Case struct {
 }
 
 // cases reads every case in eval/cases, in the order of their names.
-func cases() []Case {
-	files, err := caseFiles.ReadDir("cases")
+func cases() []Case { return read("cases") }
+
+// contracts reads every CI in eval/contracts that does what the repository's contract
+// forbids. The queue is not asked to survive one. Each is played to show its line of the
+// contract is needed: a queue that gets one right means the eval can't see that line broken.
+func contracts() []Case { return read("contracts") }
+
+func read(dir string) []Case {
+	files, err := caseFiles.ReadDir(dir)
 	if err != nil {
 		panic(err)
 	}
 	var all []Case
 	for _, f := range files {
-		data, _ := caseFiles.ReadFile(path.Join("cases", f.Name()))
+		data, _ := caseFiles.ReadFile(path.Join(dir, f.Name()))
 		c := Case{Name: strings.TrimSuffix(f.Name(), ".json")}
 		dec := json.NewDecoder(strings.NewReader(string(data)))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&c); err != nil {
-			panic(fmt.Sprintf("eval/cases/%s: %v", f.Name(), err))
+			panic(fmt.Sprintf("eval/%s/%s: %v", dir, f.Name(), err))
 		}
 		all = append(all, c)
 	}
@@ -80,7 +88,7 @@ func (c Case) shape() Shape {
 		s.Script, s.Takes = append(s.Script, b.Flakes), append(s.Takes, minutes(b.Takes))
 	}
 	for _, r := range c.Red {
-		s.Episodes = append(s.Episodes, Episode{At: minutes(r.At), For: minutes(r.For)})
+		s.Episodes = append(s.Episodes, Episode{At: minutes(r.At), For: minutes(r.For), Reach: r.Reach})
 	}
 	return s
 }
