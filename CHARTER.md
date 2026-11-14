@@ -20,11 +20,11 @@ Each is a check in `eval/`. One failure in any simulated world fails the eval.
 
 1. The trunk only fast-forwards to a SHA whose whole build passed.
 2. A pull request lands only at its head, as the build that lands it merged it, and only once that head passed its own checks.
-3. With no flakes, and a trunk that fails at most once during a test, no innocent pull request is ejected.
-4. Every queue drains, given a CI that eventually answers.
+3. With no flakes, and a trunk that fails at most once during a test, no innocent pull request is ejected. A pull request is innocent when the trunk with it and the pull requests ahead of it passes.
+4. Every pull request that is ready lands or leaves as the cause, given a CI that eventually answers. One that waits on its own checks, a conflict or a hold is not ready, and waits until that clears.
 5. A tick on an unchanged world does nothing.
 6. A crash after any side effect leaves a world the next tick finishes correctly.
-7. No SHA is built twice.
+7. No commit is pushed for a build twice, so a verdict answers for one build. A tree is built again as a new commit.
 8. A pull request is blamed only after a fair test. The build failed with it, passed without it, and failed with it again, with the passing build started between the two failures. A trunk or a CI that is broken for a while fails the build without it too, so it blames nobody. That holds only where the build without it runs every job the failed build ran, which the repository's CI owes the queue (`doc/design.md`, What a repository offers).
 
 CI that breaks, recovers and breaks again inside one test can still blame an innocent pull request, and so can two random failures in a row. Those are wrong ejections, and the first indicator caps them.

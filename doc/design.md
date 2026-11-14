@@ -70,7 +70,7 @@ A push to a queued pull request keeps it queued. The label says to land the pull
 
 Every ejection is a comment that names the head judged, the cause and the builds it rests on, with the marker `<!-- banyan eject <head> attributed=<cause> -->`.
 
-## No SHA is built twice
+## No commit is built twice
 
 A verdict belongs to one commit for good. A retry is the same merge carrying `Banyan-Try: <n>`, which is a new commit. The planner takes the first n whose commit it has never pushed, so a flake's retry, a lost build, and a pull request queued again all get a fresh build and a fresh verdict.
 
