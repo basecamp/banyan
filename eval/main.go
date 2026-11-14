@@ -552,6 +552,7 @@ func main() {
 	whole := flag.Duration("whole", 0, "with -history: how long a build of every job takes, the slowest tenth of the recorded builds where not given")
 	unrepaired := flag.Bool("unrepaired", false, "with -history: nothing mends a conflict but the author")
 	rerun := flag.Duration("rerun", 0, "with -history: the CI runs a red build's failed jobs once more, which takes this long")
+	runsOut := flag.Bool("runs-out", false, "with -history: the CI runs a build to its end though its branch is deleted")
 	rescued := flag.Float64("rescued", 0.6, "with -history and -rerun: the share of flakes that pass when run again")
 	flag.Var(&check, "check", `explore the planner deeper with the model checker, or one named world: -check "<world name>"`)
 	flag.Parse()
@@ -571,10 +572,10 @@ func main() {
 				cfgs = nil
 			}
 			cfg := dials(slots, batch, probe > 0)
-			cfg.Gather, probes = gather, max(probes, time.Duration(probe)*time.Minute)
+			cfg.Gather, cfg.Cancels, probes = gather, !*runsOut, max(probes, time.Duration(probe)*time.Minute)
 			cfgs = append(cfgs, cfg)
 		}
-		if err := replayHistory(*past, cfgs, 10, Shape{Flake: *flake, ProbeFlake: *flake * (1 - *rescued), Probe: probes, Whole: *whole, Rerun: *rerun, Rescued: *rescued}, !*unrepaired); err != nil {
+		if err := replayHistory(*past, cfgs, 10, Shape{Flake: *flake, ProbeFlake: *flake * (1 - *rescued), Probe: probes, Whole: *whole, Rerun: *rerun, Rescued: *rescued, Cancels: !*runsOut}, !*unrepaired); err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}

@@ -431,7 +431,7 @@ func (t trace) recorded() outcome {
 func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) outcome {
 	passed, fails := t.times()
 	sort.Slice(passed, func(i, j int) bool { return passed[i] < passed[j] })
-	shape.Name, shape.Build, shape.Times, shape.Fails, shape.Acts, shape.Cancels = "history", passed[len(passed)/2], passed, fails, t.acts(repair), true
+	shape.Name, shape.Build, shape.Times, shape.Fails, shape.Acts = "history", passed[len(passed)/2], passed, fails, t.acts(repair)
 	if shape.Whole == 0 {
 		shape.Whole = passed[len(passed)*9/10]
 	}
