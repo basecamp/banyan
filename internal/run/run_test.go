@@ -1237,8 +1237,8 @@ func TestABuildHasBegunOnceTheContextNamedForItAnswers(t *testing.T) {
 		t.Errorf("#1 was not ejected after side-by-side rounds answered: queued=%v comments=%+v", w.queued(1), w.pulls[1].comments)
 	}
 
-	// With no such context named, another context's answer says nothing of when the build began.
-	single := newWorld(t, `{"slots": 3, "build": ["changes (buildkite)", "gate (buildkite)"]}`)
+	// Another context's answer says nothing of when the build began, named for it or not.
+	single := newWorld(t, `{"slots": 3, "build": ["changes (buildkite)", "gate (buildkite)"], "begins": "upload (buildkite)"}`)
 	single.queue(1, "broken", "1\n")
 	single.now = single.now.Add(time.Minute)
 	if err := single.q.Tick(); err != nil {
