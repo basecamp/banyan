@@ -208,6 +208,10 @@ func (q *Queue) Tick() (err error) {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("the tick stopped: %v", p)
 		}
+		if len(q.Hub.Spent) > 0 {
+			line, _ := json.Marshal(map[string]any{"github": q.Hub.Spent})
+			fmt.Fprintln(q.Log, string(line))
+		}
 	}()
 	if err := q.settle(); err != nil {
 		return err

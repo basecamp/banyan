@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/basecamp/banyan/internal/github"
 	"github.com/basecamp/banyan/internal/gittest"
 	"github.com/basecamp/banyan/internal/queue"
 )
@@ -32,6 +33,8 @@ type hub struct {
 	// listing, where set, runs before each listing of the queue, with how many came before.
 	listing  func(n int)
 	listings int
+	// left, where set, is what remains of each hourly quota, which every reply then names.
+	left map[string]int
 }
 
 type pull struct {
@@ -118,6 +121,11 @@ var commitAlias = regexp.MustCompile(`(c\d+): object\(oid: "([0-9a-f]+)"\)`)
 
 func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
+	if quota := map[bool]string{true: "graphql", false: "core"}[r.URL.Path == "/graphql"]; h.left != nil {
+		h.left[quota]--
+		w.Header().Set("X-RateLimit-Resource", quota)
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(h.left[quota]))
+	}
 	reply := func(v any) { json.NewEncoder(w).Encode(v) }
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/o/r/"), "/")
 	switch {
@@ -782,5 +790,19 @@ func TestAPullRequestQueuedBehindABuildBegunAgainIsBuiltOnIt(t *testing.T) {
 	w.rounds(2)
 	if !w.landed(2) {
 		t.Errorf("#2 did not land\n%s", w.log)
+	}
+}
+
+func TestATickSaysWhatItSpentOfGitHubsQuotas(t *testing.T) {
+	w := newWorld(t, `{}`)
+	w.left = map[string]int{"core": 5000, "graphql": 5000}
+	w.queue(1, "a", "one\n")
+	w.round()
+	lines := strings.Split(strings.TrimSpace(w.log.String()), "\n")
+	var said struct{ GitHub map[string]github.Quota }
+	json.Unmarshal([]byte(lines[len(lines)-1]), &said)
+	core, graphql := said.GitHub["core"], said.GitHub["graphql"]
+	if core.Requests == 0 || core.Left != 5000-core.Requests || graphql.Requests == 0 || graphql.Left != 5000-graphql.Requests {
+		t.Errorf("the tick's last line counts %+v of core and %+v of graphql, from quotas of 5000 each\n%s", core, graphql, w.log)
 	}
 }

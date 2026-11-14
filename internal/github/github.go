@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,16 @@ type Client struct {
 	Repo  string // owner/name
 	Token string
 	HTTP  *http.Client
+	// Spent is what the client has asked of GitHub so far, by the quota each reply named
+	// (core, graphql): how many requests it made, and how much of the hour's quota the newest
+	// reply said is left.
+	Spent map[string]Quota
+}
+
+// Quota is one of GitHub's hourly quotas, as a client has drawn on it.
+type Quota struct {
+	Requests int `json:"requests"`
+	Left     int `json:"left"`
 }
 
 // Status is the newest report of one context on a commit.
@@ -52,6 +63,13 @@ func (c *Client) do(method, path string, in, out any) error {
 		return err
 	}
 	defer res.Body.Close()
+	if quota := res.Header.Get("X-RateLimit-Resource"); quota != "" {
+		left, _ := strconv.Atoi(res.Header.Get("X-RateLimit-Remaining"))
+		if c.Spent == nil {
+			c.Spent = map[string]Quota{}
+		}
+		c.Spent[quota] = Quota{c.Spent[quota].Requests + 1, left}
+	}
 	data, _ := io.ReadAll(res.Body)
 	if res.StatusCode >= 300 {
 		return &Error{Code: res.StatusCode, Text: fmt.Sprintf("%s %s: %s: %.300s", method, path, res.Status, data)}
