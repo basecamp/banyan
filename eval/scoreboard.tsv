@@ -1,4 +1,4 @@
-when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	eject_p90	builds_per_landing	landings_per_hour	engine_lines	note
+when	commit	shape	config	landed	wrong_per_1000	wait_p50	wait_p90	eject_p90	builds_per_landing	landings_per_hour	engine_lines	note	labelled_p50	labelled_p90	labelled_slowest_20th
 2026-11-11T08:23Z	4415dce	hey2	challenger	12497	0.16	1.76	4.56	3.12	1.40	7.7	634	baseline: the first challenger, beside serial, every-prefix and batched
 2026-11-11T08:24Z	4415dce	hey2	serial	12104	0.91	28.24	48.80	1.04	1.25	1.9	634	baseline: the first challenger, beside serial, every-prefix and batched
 2026-11-11T08:24Z	4415dce	hey2	every-prefix	12430	0.00	1.44	4.00	3.12	1.44	9.1	634	baseline: the first challenger, beside serial, every-prefix and batched

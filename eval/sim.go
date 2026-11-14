@@ -138,6 +138,7 @@ type Sim struct {
 	Whole    int
 	Probes   int
 	Waits    []float64 // ready to landed, in build times
+	Labelled []float64 // arrival to landed, in build times
 	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
 	Lands    []time.Duration // when each pull request landed
@@ -651,6 +652,7 @@ func (s *Sim) land(a queue.Action) {
 		s.Landed++
 		s.Lands = append(s.Lands, s.now)
 		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))
+		s.Labelled = append(s.Labelled, float64(s.now-p.arrived)/float64(s.shape.Build))
 	}
 	s.trunk, s.LastLand = a.SHA, s.now
 	delete(s.builds, a.SHA)

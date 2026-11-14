@@ -123,10 +123,10 @@ func configs(s Shape) []named {
 
 // Score is one row of the scoreboard.
 type Score struct {
-	Shape, Config                             string
-	Landed                                    int
-	Wrong, WaitP50, WaitP90, EjectP90, Builds float64
-	PerHour                                   float64
+	Shape, Config                                                            string
+	Landed                                                                   int
+	Wrong, WaitP50, WaitP90, LabelP50, LabelP90, LabelSlow, EjectP90, Builds float64
+	PerHour                                                                  float64
 	// What the queue costs everyone else: how long the other builds wait for an agent, or how
 	// much longer they take on a cold one, in minutes, beside the queue and with no queue. It
 	// is printed, and not on the scoreboard.
@@ -134,6 +134,9 @@ type Score struct {
 	// CI's own failures, which only a live score counts: the whole builds of trees that some
 	// whole build passed, and those of them that did not pass.
 	Good, Flaked int
+	// Landings of a pull request ejected as the cause at an earlier head: unchecked when scored
+	// without a clone, and unreadable when a commit could not be read from the clone.
+	Unchecked, Unreadable int
 }
 
 type agentWait struct{ Mean, P90, Share float64 }
@@ -156,12 +159,12 @@ const seeds = 200
 // thousand worlds and 15 in the next.
 const wide = 5
 
-const columns = "%-16s %-13s %7s %9s %8s %8s %9s %10s %8s\n"
+const columns = "%-16s %-13s %7s %9s %8s %8s %8s %8s %9s %9s %10s %8s\n"
 
 // print is the score's line in a run's output, and under it what the queue costs the other
 // builds, where the shape's pool has a limit.
 func (sc Score) print(shape Shape) {
-	fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.EjectP90, sc.Builds, sc.PerHour)
+	fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %8.2f %8.2f %9.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.LabelP50, sc.LabelP90, sc.LabelSlow, sc.EjectP90, sc.Builds, sc.PerHour)
 	switch {
 	case shape.Cold > 0:
 		fmt.Printf("  %.0f in 100 of the other builds start on a cold agent and take %s longer, against %.0f with no queue\n",
@@ -169,6 +172,16 @@ func (sc Score) print(shape Shape) {
 	case shape.Agents > 0:
 		fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
 			sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
+	}
+	if sc.Unchecked > 0 || sc.Unreadable > 0 {
+		var parts []string
+		if sc.Unchecked > 0 {
+			parts = append(parts, fmt.Sprintf("%d landed at a newer head after ejection unchecked", sc.Unchecked))
+		}
+		if sc.Unreadable > 0 {
+			parts = append(parts, fmt.Sprintf("%d unreadable in the clone", sc.Unreadable))
+		}
+		fmt.Printf("  %s\n", strings.Join(parts, "; "))
 	}
 }
 
@@ -197,7 +210,7 @@ func each[T any](n int, fn func(i int) T) []T {
 
 func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	var sc Score
-	var waits, ejects []float64
+	var waits, labelled, ejects []float64
 	var broken []string
 	var wrong, landed, whole, probes int
 	var beside, alone []float64
@@ -214,7 +227,7 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 		}
 		sc.Landed += s.Landed
 		whole, probes = whole+s.Whole, probes+s.Probes
-		waits, ejects = append(waits, s.Waits...), append(ejects, s.Ejects...)
+		waits, labelled, ejects = append(waits, s.Waits...), append(labelled, s.Labelled...), append(ejects, s.Ejects...)
 	}
 	if sc.Landed > 0 {
 		cost := float64(whole)
@@ -224,6 +237,7 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(landed), cost/float64(sc.Landed)
 	}
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
+	sc.LabelP50, sc.LabelP90, sc.LabelSlow = percentile(labelled, 50), percentile(labelled, 90), slowest(labelled, 20)
 	sc.Beside, sc.Alone = waited(beside), waited(alone)
 
 	// Throughput is what lands in an hour while a backlog stands: 120 queued and nothing
@@ -251,6 +265,19 @@ func percentile(xs []float64, p int) float64 {
 	}
 	sort.Float64s(xs)
 	return xs[min(len(xs)-1, len(xs)*p/100)]
+}
+
+func slowest(xs []float64, n int) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	sort.Float64s(xs)
+	k := max(1, len(xs)/n)
+	var sum float64
+	for _, x := range xs[len(xs)-k:] {
+		sum += x
+	}
+	return sum / float64(k)
 }
 
 // kinds is one configuration of each kind: every prefix, serial, batched with probes and
@@ -407,7 +434,7 @@ var mutants = map[string]mutant{
 }
 
 const scoreboard = "eval/scoreboard.tsv"
-const header = "when\tcommit\tshape\tconfig\tlanded\twrong_per_1000\twait_p50\twait_p90\teject_p90\tbuilds_per_landing\tlandings_per_hour\tengine_lines\tnote"
+const header = "when\tcommit\tshape\tconfig\tlanded\twrong_per_1000\twait_p50\twait_p90\teject_p90\tbuilds_per_landing\tlandings_per_hour\tengine_lines\tnote\tlabelled_p50\tlabelled_p90\tlabelled_slowest_20th"
 
 func main() {
 	record := flag.String("record", "", "append this run to the scoreboard, with this note")
@@ -417,6 +444,7 @@ func main() {
 	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes> [<flake rate> [<build minutes> [<share of a build a broken tree takes to fail> [<share of the agents broken for three hours>]]]]; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
+	clone := flag.String("clone", "", "with -live: local clone to compare changes when a pull request ejected as the cause lands at a newer head")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	again := flag.String("replay", "", "plan one recorded tick again from its recording alone, and print the actions")
 	flag.Parse()
@@ -428,12 +456,12 @@ func main() {
 		return
 	}
 	if *recordings != "" {
-		sc, win, err := live(*recordings)
+		sc, win, err := live(*recordings, *clone)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "eject90", "builds/pr", "per hour")
+		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "label50", "label90", "slow20th", "eject90", "builds/pr", "per hour")
 		sc.print(Shape{})
 		for _, shape := range shapes {
 			if shape.Name == *like {
@@ -451,7 +479,7 @@ func main() {
 		return
 	}
 	if *try != "" {
-		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "eject90", "builds/pr", "per hour")
+		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "label50", "label90", "slow20th", "eject90", "builds/pr", "per hour")
 		for _, spec := range strings.Split(*try, ";") {
 			var name string
 			var slots, batch int
@@ -594,7 +622,7 @@ func main() {
 	lines := engineLines()
 	last := recorded()
 	var scores []Score
-	fmt.Printf("\n"+columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "eject90", "builds/pr", "per hour")
+	fmt.Printf("\n"+columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "label50", "label90", "slow20th", "eject90", "builds/pr", "per hour")
 	for _, shape := range shapes {
 		for _, cfg := range configs(shape) {
 			if cfg.Name != "challenger" && !*baselines {
@@ -713,6 +741,15 @@ func worse(was, now Score) []string {
 	}
 	check("wait p50", was.WaitP50, now.WaitP50, true)
 	check("wait p90", was.WaitP90, now.WaitP90, true)
+	if was.LabelP50 > 0 {
+		check("labelled p50", was.LabelP50, now.LabelP50, true)
+	}
+	if was.LabelP90 > 0 {
+		check("labelled p90", was.LabelP90, now.LabelP90, true)
+	}
+	if was.LabelSlow > 0 {
+		check("labelled slowest 20th", was.LabelSlow, now.LabelSlow, true)
+	}
 	check("ejected p90", was.EjectP90, now.EjectP90, true)
 	check("builds per landing", was.Builds, now.Builds, true)
 	check("landings an hour", was.PerHour, now.PerHour, false)
@@ -733,6 +770,15 @@ func recorded() map[string]Score {
 // and not with the newest row, so small losses do not add up over kept steps. A rejected
 // experiment's row says so in its note, and nothing is compared with it.
 func best(rows []string) map[string]Score {
+	low := func(a, b float64) float64 {
+		if a == 0 {
+			return b
+		}
+		if b == 0 {
+			return a
+		}
+		return min(a, b)
+	}
 	out := map[string]Score{}
 	for _, line := range rows {
 		f := strings.Split(line, "\t")
@@ -742,9 +788,13 @@ func best(rows []string) map[string]Score {
 		sc := Score{Shape: f[2], Config: f[3]}
 		fmt.Sscan(f[4], &sc.Landed)
 		fmt.Sscan(f[5]+" "+f[6]+" "+f[7]+" "+f[8]+" "+f[9]+" "+f[10], &sc.Wrong, &sc.WaitP50, &sc.WaitP90, &sc.EjectP90, &sc.Builds, &sc.PerHour)
+		if len(f) >= 16 {
+			fmt.Sscan(f[13]+" "+f[14]+" "+f[15], &sc.LabelP50, &sc.LabelP90, &sc.LabelSlow)
+		}
 		key := sc.Shape + "\t" + sc.Config
 		if was, ok := out[key]; ok && !strings.HasPrefix(f[12], "baseline") {
 			sc.Wrong, sc.WaitP50, sc.WaitP90 = min(sc.Wrong, was.Wrong), min(sc.WaitP50, was.WaitP50), min(sc.WaitP90, was.WaitP90)
+			sc.LabelP50, sc.LabelP90, sc.LabelSlow = low(sc.LabelP50, was.LabelP50), low(sc.LabelP90, was.LabelP90), low(sc.LabelSlow, was.LabelSlow)
 			sc.EjectP90, sc.Builds, sc.PerHour = min(sc.EjectP90, was.EjectP90), min(sc.Builds, was.Builds), max(sc.PerHour, was.PerHour)
 		}
 		out[key] = sc
@@ -754,8 +804,8 @@ func best(rows []string) map[string]Score {
 
 // row is the score's line on the scoreboard.
 func (sc Score) row(lines int, note string) string {
-	return fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%d\t%s",
-		time.Now().UTC().Format("2006-01-02T15:04Z"), commit(), sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.EjectP90, sc.Builds, sc.PerHour, lines, note)
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%d\t%s\t%.2f\t%.2f\t%.2f",
+		time.Now().UTC().Format("2006-01-02T15:04Z"), commit(), sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.EjectP90, sc.Builds, sc.PerHour, lines, note, sc.LabelP50, sc.LabelP90, sc.LabelSlow)
 }
 
 func commit() string {

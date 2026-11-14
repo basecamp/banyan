@@ -38,6 +38,7 @@ Each is measured in simulation and live, by the same definition. A build time is
 | Wrong ejections per 1,000 landings | ≤ 1 | see scoreboard |
 | Time to an answer, landed, p50, in build times | ≤ 1.2 | see scoreboard |
 | Time to an answer, landed, p90, in build times | ≤ 2.5 | see scoreboard |
+| Labelled to landed, p50, p90 and mean of the slowest twentieth, in build times | to be set | see scoreboard |
 | Time to an answer, ejected as the cause, p90, in build times | to be set | see scoreboard |
 | Whole builds per landing | ≤ 1.3 one at a time, ≤ 0.3 batched | see scoreboard |
 | Landings an hour while a backlog stands | ≥ 12 (hey2), ≥ 16 (hey-native-apps) | see scoreboard |
