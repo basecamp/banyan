@@ -199,6 +199,24 @@ func TestAQueueThatCannotKeepUpIsStopped(t *testing.T) {
 	}
 }
 
+// The trunk breaks twice over, ten minutes apart, and each break has a fix of its own: a tree
+// passes only with both. Whichever fix is built first fails, as the trunk does, and the two
+// land once one is stacked on the other, where the first once waited on a red candidate of its
+// own and the queue stood still.
+func TestATrunkBrokenTwiceOverLandsItsTwoFixesTogether(t *testing.T) {
+	twice := Shape{Build: 20 * time.Minute, Probe: 7 * time.Minute, Hours: 3, Arrivals: 2, Episodes: []Episode{
+		{At: time.Hour, NeedsFix: true, Fix: 30 * time.Minute}, {At: 70 * time.Minute, NeedsFix: true, Fix: 40 * time.Minute}}}
+	for _, cfg := range []queue.Config{dials(1, 1, false), dials(5, 2, false), dials(3, 8, false), dials(3, 8, true)} {
+		for seed := int64(1); seed <= 5; seed++ {
+			s := NewSim(twice, cfg, seed)
+			s.Run()
+			if s.Stopped > 0 || len(s.Broken) > 0 {
+				t.Errorf("%d slots of %d, seed %d: stopped at %s with %v broken, where the two fixes together pass", cfg.Slots, cfg.MaxBatch, seed, s.Stopped, s.Broken)
+			}
+		}
+	}
+}
+
 // Every build takes 58 minutes and lands ten pull requests, so a full chain lands ten in every
 // 58 minutes. Timed from an empty chain, the hour in which nothing can land counts against it.
 func TestThroughputIsCountedOnceTheChainIsFull(t *testing.T) {

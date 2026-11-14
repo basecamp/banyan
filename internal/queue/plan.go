@@ -588,8 +588,10 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 	return b
 }
 
-// fill stacks new candidates on the chain while slots are free. It waits while the trunk is
-// red, unless a pull request labelled as its fix has yet to be built, and while probes are
+// fill stacks new candidates on the chain while slots are free. While the trunk is red it
+// builds only a pull request labelled as its fix, one a red candidate holds included: stacked
+// on another fix it is a tree no build has tried. It never builds the pull requests of a red
+// candidate again in their order, whatever commits now carry them. It waits while probes are
 // deciding whether a red candidate is real. While a candidate is still building, one that
 // would add fewer pull requests than gather waits for more, or for that build, unless it
 // holds one labelled to go first.
@@ -598,14 +600,17 @@ func (p *plan) fill() {
 	for _, m := range p.chain {
 		in[m.Number] = true
 	}
-	fix := slices.ContainsFunc(p.order, func(pr PR) bool { return pr.First && !in[pr.Number] && p.waits[pr.Number] == "" })
-	if p.wait || (p.held && !fix) {
+	free := func(pr PR) bool {
+		why := p.waits[pr.Number]
+		return !in[pr.Number] && (why == "" || why == redTrunk) && (pr.First || !p.held)
+	}
+	if p.wait {
 		return
 	}
 	for p.pending < p.c.Slots {
 		parent, added, held, first := p.prefix(len(p.chain)), 0, len(p.chain), false
 		for _, pr := range p.order {
-			if in[pr.Number] || p.waits[pr.Number] != "" {
+			if !free(pr) {
 				continue
 			}
 			sha, ok := p.w.Repo.Merge(parent, pr, "")
@@ -613,11 +618,12 @@ func (p *plan) fill() {
 				p.waits[pr.Number] = "it conflicts with a pull request ahead of it"
 				continue
 			}
-			if slices.ContainsFunc(p.reds, func(r *red) bool { return r.of == sha }) {
-				p.waits[pr.Number] = suspected
+			next := append(slices.Clone(p.chain), Member{pr.Number, pr.Head, sha})
+			if slices.ContainsFunc(p.reds, func(r *red) bool { return r.base == p.w.Trunk && same(next, r.chain) }) {
+				p.waits[pr.Number] = cmp.Or(p.waits[pr.Number], suspected)
 				continue
 			}
-			p.chain = append(p.chain, Member{pr.Number, pr.Head, sha})
+			p.chain = next
 			in[pr.Number], parent, first = true, sha, first || pr.First
 			if added++; added == max(p.c.MaxBatch, 1) || (pr.First && p.held) {
 				break

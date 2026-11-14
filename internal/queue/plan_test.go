@@ -341,6 +341,75 @@ func TestATrunkThatPassesAgainUnderProbesIsNoLongerHeld(t *testing.T) {
 	}
 }
 
+// The trunk fails by itself: #1's candidate failed, and so did the probes of the trunk alone and
+// of #1 on it. #3, labelled first as #1 is, was then built alone and failed too. #1 on #3 is a
+// tree no build has tried, so it is built next, where #1 once waited on its own red candidate
+// and two fixes that pass only together never met. #1 on the trunk is not built again, and #2,
+// which nobody labelled as a fix, waits.
+func TestAFixARedCandidateHoldsIsStackedOnAnotherWhileTheTrunkFails(t *testing.T) {
+	now := time.Date(2026, 11, 14, 23, 0, 0, 0, time.UTC)
+	m1, m3 := SHA(`merge(trunk,1,"")`), SHA(`merge(trunk,3,"")`)
+	one, three := []Member{member(1, m1)}, []Member{member(3, m3)}
+	probe := func(sha SHA, chain []Member) Build {
+		at := now.Add(time.Minute)
+		return Build{SHA: sha, Kind: Probe, Base: "trunk", Chain: chain, Round: 1, Of: m1, Verdict: Failure, Pushed: at, Started: at}
+	}
+	prs := queuedAt(now, 1, 2, 3)
+	prs[0].First, prs[2].First = true, true
+	w := World{Now: now.Add(3 * time.Minute), Trunk: "trunk", Repo: commits{}, PRs: prs,
+		Builds: []Build{
+			{SHA: m1, Base: "trunk", Chain: one, Verdict: Failure, Pushed: now, Started: now},
+			probe("p1a", nil), probe("p1b", one),
+			{SHA: m3, Base: "trunk", Chain: three, Verdict: Failure, Pushed: now, Started: now},
+		}}
+	var pushed [][]int
+	for _, a := range Plan(w, Config{Slots: 3, MaxBatch: 8, Probes: true, Recheck: 10 * time.Minute}) {
+		if a.Do == "push" {
+			var ns []int
+			for _, m := range a.Build.Chain {
+				ns = append(ns, m.Number)
+			}
+			pushed = append(pushed, ns)
+		}
+	}
+	if fmt.Sprint(pushed) != "[[3 1]]" {
+		t.Errorf("pushed %v, want [[3 1]]: the two fixes together, and nothing else while the trunk fails", pushed)
+	}
+}
+
+// While the trunk fails, a fix is never built again as the tree its red candidate tested. #1
+// alone on the trunk has failed, so nothing is pushed for it. And where #1 and #2 failed
+// together and #1 is being built again alone on a new commit, #2 on that commit is the same
+// two pull requests in the same order, so it is not built either: a candidate stacked on it
+// would read as stacked on the red one.
+func TestAFixIsNotBuiltAgainAsTheTreeItsRedCandidateTested(t *testing.T) {
+	now := time.Date(2026, 11, 14, 23, 30, 0, 0, time.UTC)
+	m1 := SHA(`merge(trunk,1,"")`)
+	m12 := SHA(fmt.Sprintf("merge(%s,2,%q)", m1, ""))
+	one, both := []Member{member(1, m1)}, []Member{member(1, m1), member(2, m12)}
+	held := func(red []Member, extra ...Build) World {
+		of := red[len(red)-1].Merge
+		builds := []Build{{SHA: of, Base: "trunk", Chain: red, Verdict: Failure, Pushed: now, Started: now}}
+		for j := 0; j <= len(red); j++ {
+			at := now.Add(time.Minute)
+			builds = append(builds, Build{SHA: fmt.Sprintf("p%d", j), Kind: Probe, Base: "trunk", Chain: red[:j], Round: 1, Of: of, Verdict: Failure, Pushed: at, Started: at})
+		}
+		prs := queuedAt(now, 1, 2)[:len(red)]
+		for i := range prs {
+			prs[i].First = true
+		}
+		return World{Now: now.Add(3 * time.Minute), Trunk: "trunk", Repo: commits{}, PRs: prs, Builds: append(builds, extra...)}
+	}
+	again := Build{SHA: "a2", Base: "trunk", Chain: []Member{member(1, "a2")}, Verdict: Pending, Pushed: now, Started: now}
+	for name, w := range map[string]World{"#1 alone": held(one), "#2 on #1 built again": held(both, again)} {
+		for _, a := range Plan(w, Config{Slots: 3, MaxBatch: 8, Probes: true, Recheck: 10 * time.Minute}) {
+			if a.Do == "push" {
+				t.Errorf("%s: pushed %+v, where the trunk fails and that tree has been tried", name, a.Build.Chain)
+			}
+		}
+	}
+}
+
 // #1 and #2 pass alone and fail together, and two red candidates hold them in opposite orders,
 // each with its test whole: one blames #2 on a tree holding #1, the other #1 on a tree holding
 // #2. Each stands on the other, so the first leaves, and the queue does not wait on both with
