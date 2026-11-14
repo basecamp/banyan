@@ -54,11 +54,13 @@ A test of five builds, fail, pass, fail, pass and fail, was tried for a CI that 
 
 Only the pull requests the rounds have not ruled out stay off the chain. The rest go back on it at once. One whose merge there would be the red candidate's own tree waits with them, since a build of that tree is an attempt of the red candidate and not a candidate on the chain.
 
-A red candidate and its rounds stand while the trunk moves under them, since they prove what they prove about the commits they were built on. They go when a pull request in the trees they build leaves the queue, and when their base is no longer the tip and fails by itself. So several red candidates are narrowed at once, each beside a chain that keeps landing.
+A red candidate and its rounds stand while the trunk moves under them, since they prove what they prove about the commits they were built on. They go when a pull request in the trees they build leaves the queue, and when their base is no longer the tip and fails by itself. Once a pull request under a red candidate has landed, a round's build from below that landing is a build of another tree, and it goes too. So several red candidates are narrowed at once, each beside a chain that keeps landing.
 
 A round's builds are whole builds by default. Where a repository's CI offers probes, a round uses them instead: a probe is an empty commit on a prefix that asks CI to run only what failed in the red build.
 
-Only `failure` is evidence. A build that was lost, cancelled or timed out is built again.
+Only `failure` is evidence. A build that was lost, cancelled or timed out is built again. A round that lost a build still counts the builds that reported. A round's build that timed out is deleted: it may yet begin, after the rounds pushed since, and a test holds only while each of its builds began after the last.
+
+Two red candidates can finish their tests in one tick. A test that passed with a pull request under it that leaves in that tick says nothing of the queue once that one is gone, so nobody is blamed on it.
 
 ## Who leaves the queue
 

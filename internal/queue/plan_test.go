@@ -83,3 +83,135 @@ func TestPullRequestsLabelledFirstBatchWithTheRestWhileTheTrunkPasses(t *testing
 		t.Errorf("pushed candidates of %v, want one of %v", pushed, want)
 	}
 }
+
+func member(n int, merge SHA) Member { return Member{n, fmt.Sprintf("h%d", n), merge} }
+
+func queuedAt(now time.Time, numbers ...int) (prs []PR) {
+	for _, n := range numbers {
+		prs = append(prs, PR{Number: n, Head: fmt.Sprintf("h%d", n), Queued: now.Add(time.Duration(n) * time.Minute), Checks: Success})
+	}
+	return prs
+}
+
+func ejections(acts []Action) (numbers []int, evidence [][]SHA) {
+	for _, a := range acts {
+		if a.Do == "eject" {
+			numbers, evidence = append(numbers, a.PR), append(evidence, a.Evidence)
+		}
+	}
+	return numbers, evidence
+}
+
+// #1 breaks the build and #2 does not. The second round lost its build of #1 alone, which was
+// the pass #2's test wanted, and its build of the trunk passed, which was the pass #1's test
+// wanted. A round that lost a build still says what its other builds said: #1 failed, the trunk
+// then passed, and #1 failed again, so #1 leaves. It used to wait with no end, its test whole
+// and the trunk's pass unread.
+func TestARoundThatLostABuildStillCountsTheBuildsThatReported(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	both := []Member{member(1, "m1"), member(2, "m2")}
+	check := func(sha SHA, chain []Member, round int, verdict Verdict) Build {
+		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: round, Of: "m2", Verdict: verdict, Pushed: now, Started: now}
+	}
+	w := World{Now: now.Add(time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
+		Builds: []Build{
+			{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now, Started: now},
+			check("both1", both, 1, Failure), check("one1", both[:1], 1, Failure),
+			check("one2", both[:1], 2, Error), check("trunk2", nil, 2, Success),
+			check("one3", both[:1], 3, Failure),
+		}}
+	numbers, evidence := ejections(Plan(w, Config{Slots: 2, MaxBatch: 2, Recheck: 10 * time.Minute}))
+	if fmt.Sprint(numbers) != "[1]" || fmt.Sprint(evidence) != "[[trunk2 one1 one3]]" {
+		t.Errorf("ejected %v on %v, where #1 leaves on the trunk's pass between its two failures", numbers, evidence)
+	}
+}
+
+// #2 clashes with #1, and #3 with #2. A probe of #1 failed while the trunk was red, so #2 and
+// #3 were built without it and failed too. Now both tests are whole: #2 fails on #1, and #3
+// fails on #2. Only #2 leaves. #3's test passed on a tree holding #2, which says nothing of the
+// queue once #2 is gone, and #3 lands with #1.
+func TestNobodyIsBlamedAgainstAPullRequestThatLeavesInTheSameTick(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	three := []Member{member(1, "a1"), member(2, "a2"), member(3, "a3")}
+	two := []Member{member(2, "b2"), member(3, "b3")}
+	probe := func(sha, of SHA, chain []Member, round int, verdict Verdict) Build {
+		return Build{SHA: sha, Kind: Probe, Base: "trunk", Chain: chain, Round: round, Of: of, Verdict: verdict, Pushed: now, Started: now}
+	}
+	w := World{Now: now.Add(time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2, 3),
+		Builds: []Build{
+			{SHA: "a3", Base: "trunk", Chain: three, Verdict: Failure, Pushed: now, Started: now},
+			probe("a-two-1", "a3", three[:2], 1, Failure), probe("a-one-1", "a3", three[:1], 1, Success), probe("a-trunk-1", "a3", nil, 1, Success),
+			probe("a-one-2", "a3", three[:1], 2, Success),
+			probe("a-two-3", "a3", three[:2], 3, Failure),
+			{SHA: "b3", Base: "trunk", Chain: two, Verdict: Failure, Pushed: now, Started: now},
+			probe("b-one-1", "b3", two[:1], 1, Success), probe("b-trunk-1", "b3", nil, 1, Success),
+			probe("b-two-2", "b3", two, 2, Failure),
+			probe("b-one-3", "b3", two[:1], 3, Success),
+			probe("b-two-4", "b3", two, 4, Failure),
+		}}
+	numbers, _ := ejections(Plan(w, Config{Slots: 2, MaxBatch: 3, Probes: true, Recheck: 10 * time.Minute}))
+	if fmt.Sprint(numbers) != "[2]" {
+		t.Errorf("ejected %v, where only #2 leaves and #3's test against it proves nothing once it is gone", numbers)
+	}
+}
+
+// #1 and #2 failed together, and #2 breaks the build. #1 was cleared and has landed, so the
+// red candidate now stands on the trunk that holds #1, and its builds of #1 alone are builds
+// of that trunk. The second round's was one of them, and failed. That round also built the
+// old trunk, without #1, and it passed: a build of a tree from below the landing, which is no
+// pass between #2's two failures. So #2 is not blamed on it, and the rounds go on.
+func TestABuildFromBelowALandingIsNoPartOfARedCandidatesRounds(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	two := []Member{member(2, "m2")}
+	check := func(sha, base SHA, chain []Member, round int, verdict Verdict) Build {
+		return Build{SHA: sha, Kind: Check, Base: base, Chain: chain, Round: round, Of: "m2", Verdict: verdict, Pushed: now, Started: now}
+	}
+	w := World{Now: now.Add(time.Hour), Trunk: "m1", Repo: commits{}, PRs: queuedAt(now, 2),
+		Builds: []Build{
+			{SHA: "m2", Base: "m1", Chain: two, Verdict: Failure, Pushed: now, Started: now},
+			check("both1", "m1", two, 1, Failure), check("one1", "m1", nil, 1, Success),
+			check("one2", "m1", nil, 2, Failure), check("old2", "old", nil, 2, Success),
+			check("both3", "m1", two, 3, Failure), check("one3", "m1", nil, 3, Success),
+		}}
+	acts := Plan(w, Config{Slots: 2, MaxBatch: 2, Recheck: 10 * time.Minute})
+	if numbers, evidence := ejections(acts); len(numbers) > 0 {
+		t.Errorf("ejected %v on %v, where the pass between the failures was a build of the old trunk", numbers, evidence)
+	}
+	fourth := false
+	for _, a := range acts {
+		fourth = fourth || (a.Do == "push" && a.Build.Round == 4)
+	}
+	if !fourth {
+		t.Errorf("no fourth round began, where #2's test starts again after the trunk's own failure: %+v", acts)
+	}
+}
+
+// #1 and #2 failed together, and CI began none of the first round's builds inside the timeout.
+// They go, and the round is built again. Left in place they would read as begun, a second
+// round would start, and a first-round failure that CI began after the second round's pass
+// would stand as the failure before it.
+func TestARoundsBuildsThatTimedOutGoAndAreBuiltAgain(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	both := []Member{member(1, "m1"), member(2, "m2")}
+	check := func(sha SHA, chain []Member) Build {
+		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: 1, Of: "m2", Pushed: now}
+	}
+	w := World{Now: now.Add(2 * time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
+		Builds: []Build{
+			{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now, Started: now},
+			check("both1", both), check("one1", both[:1]),
+		}}
+	var deleted []SHA
+	var rounds []int
+	for _, a := range Plan(w, Config{Slots: 2, MaxBatch: 2, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}) {
+		switch a.Do {
+		case "delete":
+			deleted = append(deleted, a.SHA)
+		case "push":
+			rounds = append(rounds, a.Build.Round)
+		}
+	}
+	if fmt.Sprint(deleted) != "[both1 one1]" || fmt.Sprint(rounds) != "[1 1]" {
+		t.Errorf("deleted %v and pushed rounds %v, where both builds go and the first round is built again", deleted, rounds)
+	}
+}

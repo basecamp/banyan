@@ -57,7 +57,8 @@ type red struct {
 	of     SHA // the prefix it tests, which names it whatever attempt was built
 	base   SHA
 	chain  []Member
-	builds []Build         // its attempts, and the rounds run on it
+	built  []Build         // every build of its rounds, whatever it was built on
+	builds []Build         // its attempts, and the rounds run where it stands
 	rounds map[int][]Build // the same by round
 	sha    SHA             // the attempt that failed last
 
@@ -149,28 +150,34 @@ func (p *plan) read() {
 	trunk := p.w.Trunk
 	byOf := map[SHA]*red{}
 	var reds []*red
+	late := func(b Build) bool {
+		return b.Verdict == Pending && p.c.Timeout > 0 && p.w.Now.Sub(b.Pushed) > p.c.Timeout
+	}
 	for _, b := range p.w.Builds {
-		if b.Round > 0 {
+		switch {
+		case b.Round == 0:
+		case late(b):
+			// A round's build that timed out may yet begin, after the rounds pushed since,
+			// so it goes, and what it would have said is built again.
+			p.drop(b)
+		default:
 			if byOf[b.Of] == nil {
-				byOf[b.Of] = &red{of: b.Of, base: b.Base}
+				byOf[b.Of] = &red{of: b.Of}
 				reds = append(reds, byOf[b.Of])
 			}
+			byOf[b.Of].built = append(byOf[b.Of].built, b)
 		}
 	}
 	var stacked []Build
 	for _, b := range p.w.Builds {
-		if b.Verdict == Pending && p.c.Timeout > 0 && p.w.Now.Sub(b.Pushed) > p.c.Timeout {
-			b.Verdict = Error
-		}
 		if b.Round > 0 {
-			byOf[b.Of].builds = append(byOf[b.Of].builds, b)
 			continue
 		}
-		if r := byOf[b.Tests()]; r != nil {
-			if chain, ok := b.above(r.base); ok {
-				r.chain, r.builds = chain, append(r.builds, b)
-				continue
-			}
+		if late(b) {
+			b.Verdict = Error
+		}
+		if r := byOf[b.Tests()]; r != nil && r.stands(b) {
+			continue
 		}
 		if rest, ok := b.above(trunk); ok && len(rest) > 0 && p.queued(rest) {
 			b.Base, b.Chain = trunk, rest
@@ -180,6 +187,13 @@ func (p *plan) read() {
 		}
 	}
 	for _, r := range reds {
+		for _, b := range r.built {
+			if b.Base == r.base {
+				r.builds = append(r.builds, b)
+			} else {
+				p.drop(b)
+			}
+		}
 		p.weigh(r)
 		// It goes when a pull request in the trees its rounds build has left, when a whole
 		// build of the red tree passed, and when its base is no longer the tip and fails by itself.
@@ -246,6 +260,22 @@ func (p *plan) read() {
 	}
 }
 
+// stands takes b as the red candidate's own build, and says whether it is one. The candidate
+// stands on the highest base its rounds were built on that b is above. Once a pull request
+// under it has landed, a round's build from below that landing is a build of another tree.
+func (r *red) stands(b Build) bool {
+	for _, round := range r.built {
+		if chain, ok := b.above(round.Base); ok && (r.base == "" || len(chain) < len(r.chain)) {
+			r.base, r.chain = round.Base, chain
+		}
+	}
+	_, ok := b.above(r.base)
+	if ok {
+		r.builds = append(r.builds, b)
+	}
+	return ok
+}
+
 // under is the red candidate on the trunk that this candidate is stacked on, if any.
 func (p *plan) under(b Build) *red {
 	for _, r := range p.reds {
@@ -307,8 +337,6 @@ func (p *plan) weigh(r *red) {
 			}
 		}
 		switch {
-		case r.void:
-			continue
 		case g >= k:
 			r.flake, r.cleared = probe, !probe
 			continue
@@ -401,13 +429,23 @@ func (p *plan) prefix(j int) SHA {
 // judge ejects the pull request that a red candidate's rounds have put to a fair test, and
 // says whether it ejected any.
 func (p *plan) judge() bool {
-	ejected := false
+	tests, leaving := map[*red][]Build{}, map[int]bool{}
 	for _, r := range p.reds {
 		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 {
-			p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: []SHA{t[1].SHA, t[0].SHA, t[2].SHA},
-				Text: fmt.Sprintf("the build with it failed, the build without it then passed (%.12s), and the build with it failed again", t[1].SHA)})
-			ejected = true
+			tests[r], leaving[r.chain[r.hi-1].Number] = t, true
 		}
+	}
+	ejected := false
+	for _, r := range p.reds {
+		t, under := tests[r], r.chain[:max(r.hi-1, 0)]
+		// A test that passed with a pull request under it that leaves now says nothing of
+		// the queue once that one is gone.
+		if t == nil || slices.ContainsFunc(under, func(m Member) bool { return leaving[m.Number] }) {
+			continue
+		}
+		p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: []SHA{t[1].SHA, t[0].SHA, t[2].SHA},
+			Text: fmt.Sprintf("the build with it failed, the build without it then passed (%.12s), and the build with it failed again", t[1].SHA)})
+		ejected = true
 	}
 	return ejected
 }
