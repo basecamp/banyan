@@ -40,7 +40,7 @@ Each is measured in simulation and live, by the same definition. A build time is
 | Time to an answer, landed, p90, in build times | ≤ 2.5 | see scoreboard |
 | Time to an answer, ejected as the cause, p90, in build times | to be set | see scoreboard |
 | Whole builds per landing | ≤ 1.3 one at a time, ≤ 0.3 batched | see scoreboard |
-| Landings an hour under backlog | ≥ 12 (hey2), ≥ 16 (hey-native-apps) | see scoreboard |
+| Landings an hour while a backlog stands | ≥ 12 (hey2), ≥ 16 (hey-native-apps) | see scoreboard |
 | Simulated against live | within 20% | none yet |
 | Engine size, non-test Go lines | none: recorded | v2: 5,500 of bash |
 

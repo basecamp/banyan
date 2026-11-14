@@ -137,6 +137,7 @@ type Sim struct {
 	Waits    []float64 // ready to landed, in build times
 	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
+	Lands    []time.Duration // when each pull request landed
 }
 
 const tick = 2 * time.Minute
@@ -633,6 +634,7 @@ func (s *Sim) land(a queue.Action) {
 		}
 		p.landed, p.queued = true, false
 		s.Landed++
+		s.Lands = append(s.Lands, s.now)
 		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))
 	}
 	s.trunk, s.LastLand = a.SHA, s.now

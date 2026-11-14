@@ -226,14 +226,18 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
 	sc.Beside, sc.Alone = waited(beside), waited(alone)
 
-	// Throughput is measured on a backlog alone: forty queued, nothing arriving. A world is
-	// short and its last landing is one draw, so it takes many of them to hold still.
+	// Throughput is what lands in an hour while a backlog stands: 120 queued and nothing
+	// arriving, timed to the landing that leaves a quarter of them. The last to land are the
+	// ones that waited on their authors, and how long an author takes is no part of what the
+	// queue can do.
 	backlog := shape
-	backlog.Backlog, backlog.Arrivals, backlog.Hours = 40, 0, 0
+	backlog.Backlog, backlog.Arrivals, backlog.Hours = 120, 0, 0
 	var drained int
 	var hours float64
-	for _, s := range each(2*seeds, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
-		drained, hours = drained+s.Landed, hours+s.LastLand.Hours()
+	for _, s := range each(seeds, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
+		if n := 3 * backlog.Backlog / 4; len(s.Lands) >= n {
+			drained, hours = drained+n, hours+s.Lands[n-1].Hours()
+		}
 	}
 	if hours > 0 {
 		sc.PerHour = float64(drained) / hours
