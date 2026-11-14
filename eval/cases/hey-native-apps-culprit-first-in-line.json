@@ -1,6 +1,0 @@
-{
-  "story": "hey-native-apps, 2026-10-27, stall #8449. 33 pull requests were queued and the first in line broke the build, so every candidate held it. The old queue went 146 minutes without a landing.",
-  "build": 42,
-  "prs": [{"number": 8411, "at": 0, "breaks": true}, {"number": 8409, "at": 0}, {"number": 8387, "at": 0}, {"number": 8417, "at": 0}, {"number": 8419, "at": 0}, {"number": 8364, "at": 0}, {"number": 8418, "at": 0}, {"number": 8428, "at": 0}, {"number": 8432, "at": 0}, {"number": 8311, "at": 0}, {"number": 8422, "at": 0}, {"number": 8435, "at": 0}, {"number": 8389, "at": 0}, {"number": 8406, "at": 0}, {"number": 8437, "at": 0}, {"number": 8434, "at": 0}, {"number": 8438, "at": 0}, {"number": 8439, "at": 0}, {"number": 8421, "at": 0}, {"number": 8429, "at": 0}, {"number": 8440, "at": 0}, {"number": 8442, "at": 0}, {"number": 8443, "at": 0}, {"number": 8444, "at": 0}, {"number": 8446, "at": 0}, {"number": 8447, "at": 0}, {"number": 8433, "at": 0}, {"number": 8430, "at": 0}, {"number": 8448, "at": 0}, {"number": 8426, "at": 0}, {"number": 8427, "at": 0}, {"number": 8431, "at": 0}, {"number": 8395, "at": 0}],
-  "ejected": [8411]
-}
