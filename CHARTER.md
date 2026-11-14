@@ -27,7 +27,7 @@ Each is a check in `eval/`. One failure in any simulated world fails the eval.
 7. No commit is pushed for a build twice, so a verdict answers for one build. A tree is built again as a new commit.
 8. A pull request is blamed only after a fair test. The build failed with it, passed without it, and failed with it again, with the passing build started between the two failures. A trunk or a CI that is broken for a while fails the build without it too, so it blames nobody. That holds only where the build without it runs every job the failed build ran, which the repository's CI owes the queue (`doc/design.md`, What a repository offers).
 
-CI that breaks, recovers and breaks again inside one test can still blame an innocent pull request, and so can two random failures in a row. Those are wrong ejections, and the first indicator caps them.
+CI that breaks, recovers and breaks again inside one test can still blame an innocent pull request, and so can two random failures in a row. Those are wrong ejections, and the first indicator caps them. The cap holds while under about a third of the builds of good trees fail. Past that it does not, and mending CI is the repository's (`doc/design.md`, Blame).
 
 ## Indicators
 
