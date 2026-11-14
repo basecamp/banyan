@@ -427,13 +427,20 @@ func TestARedTrunkEjectsNobody(t *testing.T) {
 	}
 }
 
-func TestAConflictWithTheTrunkWaitsInPlaceUntilItIsMended(t *testing.T) {
+func TestAConflictWithTheTrunkWaitsInPlaceUntilItIsMendedAndHoldsNobodyUp(t *testing.T) {
 	w := newWorld(t, `{}`)
 	one := w.queue(1, "same", "one\n")
 	w.o.Outside("same", "other\n")
 	w.rounds(2)
 	if s := w.last(one.heads[0], "merge-queue"); !w.queued(1) || len(one.comments) != 0 || s.State != "pending" || s.Description != "waits: it conflicts with the trunk" {
 		t.Fatalf("#1 conflicts with the trunk: queued %v, comments %+v, status %q %q\n%s", w.queued(1), one.comments, s.State, s.Description, w.log)
+	}
+	said := len(w.statuses[one.heads[0]])
+	w.queue(2, "b", "two\n")
+	w.rounds(3)
+	if !w.landed(2) || !w.queued(1) || len(w.statuses[one.heads[0]]) != said {
+		t.Fatalf("with #1 left in conflict, #2 landed %v, #1 is queued %v and its head was given %d more statuses\n%s",
+			w.landed(2), w.queued(1), len(w.statuses[one.heads[0]])-said, w.log)
 	}
 	one.heads = append(one.heads, w.o.PR(1, "same", "one on the other\n"))
 	w.rounds(3)
