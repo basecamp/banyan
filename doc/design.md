@@ -38,7 +38,7 @@ The red candidate is narrowed by rounds: builds of some of its prefixes. A round
 
 ### The fair test
 
-A pull request leaves on three builds in three rounds in a row: its prefix failed, the prefix below it passed, and its own failed again. Each round is pushed as soon as CI has begun every build of the round before, whatever that round will say. So the three run side by side, and each began after the last. No more than three rounds are begun past the last one read, since a test is three: a round whose builds report minutes apart starts no test over on its half. A trunk or a CI that was broken for a while and failed both failures would have failed the pass between them too.
+A pull request leaves on three builds in three rounds in a row: its prefix failed, the prefix below it passed, and its own failed again. Each round is pushed as soon as CI has begun every build of the round before, whatever that round will say. So the three run side by side, and each began after the last. No more than three rounds are begun past the last one read, since a test is three: a round whose builds report minutes apart starts no test over on its half. A trunk or a CI that was broken for a while and failed both failures would have failed the pass between them too. That takes a build's answer as settled when it begins. A break that starts after the pass has finished, while a build begun before it has yet to run the job that fails, fails both failures and blames. It needs the break to start inside those few minutes of one test, and the first indicator counts it.
 
 Where the span holds several pull requests, each round is the next build of every one's test, so the test finds the culprit wherever it is. A pass of the candidate's own tree clears it, as above.
 
@@ -88,7 +88,7 @@ A verdict belongs to one commit for good. A retry is the same merge carrying `Ba
 2. **Probes, optionally.** A commit carrying `Banyan-Probe-Of: <sha>` runs only what failed in the build of that SHA, and reports under the probe context, which the trunk's rule never accepts.
 3. **Cancelling, optionally.** The queue deletes the branch of a build it no longer needs. The repository's CI may cancel a build whose branch is gone. `cancels` says whether it does. Where it does not, the build runs to its end and holds an agent, so a candidate the queue no longer wants is left until it reports and holds its slot. Otherwise every head that moves leaves a chain's worth of builds behind, and on a small pool the queue's own leavings outrun the agents.
 
-4. **When a build began, optionally.** Where the statuses say CI has begun a build, a fair test's rounds overlap and it answers in about one build time. Where they do not, it takes three. A check run says so itself. A commit status says so in words, and `started` names a word its pending status carries once the build runs: Buildkite's reads "Build #7 started".
+4. **When a build began, optionally.** Where the statuses say CI has begun a build, a fair test's rounds overlap and it answers in about one build time. Where they do not, it takes three. A check run says so itself. A commit status says so in words, and `started` names a word its pending status carries once the build runs: Buildkite's reads "Build #7 started". A build of several contexts has begun once one of them has passed or failed.
 
 The queue never calls a CI provider's API and never reads a log.
 
