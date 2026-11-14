@@ -450,7 +450,9 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 		o.broken = append(o.broken, s.Broken...)
 		longest := 0.0
 		for n, at := range s.history.blamed {
-			o.blame = append(o.blame, (at - s.history.labelled[n]).Minutes())
+			if first, ok := s.history.labelled[n]; ok && first >= 0 {
+				o.blame = append(o.blame, (at - first).Minutes())
+			}
 		}
 		o.builds, o.minutes, o.wrong, o.spared = o.builds+s.Whole, o.minutes+s.Minutes, o.wrong+s.Wrong, o.spared+s.history.spared
 		for _, n := range s.Ejected {
