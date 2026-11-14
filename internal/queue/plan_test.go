@@ -239,6 +239,41 @@ func TestARoundPushedPastABuildCIHadNotBegunSkipsANumberThatNoTestSpans(t *testi
 	}
 }
 
+// Probes pass on #1's red tree, a whole build of it is late and then fails, and probes pushed
+// meanwhile pass on it again in a later round. Once a whole build has failed where probes
+// passed, their passing says nothing: the rounds go on to #1's test as whole builds, and it
+// leaves, where the queue once built the red tree whole again after every failure.
+func TestProbesThatPassAfterAWholeBuildFailedDoNotAskForItAgain(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	one := []Member{member(1, "m1")}
+	round := func(sha SHA, kind Kind, chain []Member, n int, verdict Verdict) Build {
+		at := now.Add(time.Duration(n) * time.Minute)
+		return Build{SHA: sha, Kind: kind, Base: "trunk", Chain: chain, Round: n, Of: "m1", Verdict: verdict, Pushed: at, Started: at}
+	}
+	builds := []Build{
+		{SHA: "m1", Base: "trunk", Chain: one, Verdict: Failure, Pushed: now, Started: now},
+		round("p1", Probe, one, 1, Success), round("p2", Probe, nil, 2, Failure),
+		round("c4", Check, one, 4, Failure),
+		round("p6a", Probe, nil, 6, Success), round("p6b", Probe, one, 6, Success),
+		round("c7", Check, one, 7, Failure),
+	}
+	cfg := Config{Slots: 1, MaxBatch: 1, Probes: true, Recheck: 10 * time.Minute}
+	w := World{Now: now.Add(time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1), Builds: builds}
+	var pushed []string
+	for _, a := range Plan(w, cfg) {
+		if a.Do == "push" && a.Build.Of == "m1" {
+			pushed = append(pushed, fmt.Sprintf("%d of %d", a.Build.Round, len(a.Build.Chain)))
+		}
+	}
+	if fmt.Sprint(pushed) != "[8 of 0]" {
+		t.Errorf("pushed rounds %v, where round 8 builds the trunk alone, the pass of #1's test", pushed)
+	}
+	w.Builds = append(builds, round("c8", Check, nil, 8, Success), round("c9", Check, one, 9, Failure))
+	if numbers, _ := ejections(Plan(w, cfg)); fmt.Sprint(numbers) != "[1]" {
+		t.Errorf("ejected %v, where #1 failed, the trunk passed without it and it failed again", numbers)
+	}
+}
+
 // #1 and #2 pass alone and fail together, and two red candidates hold them in opposite orders,
 // each with its test whole: one blames #2 on a tree holding #1, the other #1 on a tree holding
 // #2. Each stands on the other, so the first leaves, and the queue does not wait on both with

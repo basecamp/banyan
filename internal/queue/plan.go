@@ -71,7 +71,7 @@ type red struct {
 	pushed  time.Time
 	running bool // a round's build has no verdict yet
 	tip     bool // the tip failed in the last round that passed nothing
-	flake   bool // probes passed on the red tree itself
+	flake   bool // probes passed on the red tree itself, where no whole build has failed since they last did
 	cleared bool // a whole build of the red tree passed
 	void    bool // the last round lost a build
 	whole   bool // rounds are whole builds, not probes
@@ -335,7 +335,7 @@ func (p *plan) weigh(r *red) {
 		}
 		switch {
 		case g >= k:
-			r.flake, r.cleared = probe, !probe
+			r.flake, r.cleared = probe && !r.whole, !probe
 			continue
 		case g >= 0:
 			r.tip, r.lo = false, max(r.lo, g)
