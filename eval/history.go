@@ -373,7 +373,6 @@ func (t trace) recorded() outcome {
 	o := outcome{name: "recorded", runs: 1}
 	window := t.Window.To.Sub(t.Window.From).Seconds()
 	for _, pr := range t.PRs {
-		o.ejected += len(pr.Ejections)
 		first, asked := -1.0, false
 		for _, l := range pr.Labels {
 			if l.On {
@@ -383,6 +382,11 @@ func (t trace) recorded() outcome {
 		}
 		for _, c := range pr.Conflicts {
 			asked = asked || c.Kind == "repair-ask"
+		}
+		for _, e := range pr.Ejections {
+			if e.At >= 0 && e.At <= window {
+				o.ejected++
+			}
 		}
 		for _, e := range pr.Ejections {
 			if pr.Breaks && e.Cause == "culprit" && e.Attributed != "checks" && first >= 0 {

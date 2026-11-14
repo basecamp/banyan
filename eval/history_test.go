@@ -88,3 +88,16 @@ func TestAConflictIsMendedByItsAuthorWhereNothingRepairs(t *testing.T) {
 		t.Errorf("the mending head is pushed at %s with repair and %s without, where a person takes %s from the conflict", with, without, authorMends)
 	}
 }
+
+func TestTheRecordCountsTheWindowsEjectionsAlone(t *testing.T) {
+	var tr trace
+	carried := `{"window": {"from": "2026-11-04T00:00:00Z", "to": "2026-11-04T01:00:00Z"}, "prs": [
+		{"number": 1, "labels": [{"at": -7200, "label": "land", "on": true, "by": "person"}],
+			"ejections": [{"at": -3600, "cause": "conflict"}, {"at": 600, "cause": "conflict"}, {"at": 4000, "cause": "conflict"}]}]}`
+	if err := json.Unmarshal([]byte(carried), &tr); err != nil {
+		t.Fatal(err)
+	}
+	if o := tr.recorded(); o.ejected != 1 {
+		t.Errorf("a pull request ejected before, in and after the window reads as %d ejections, where the window holds 1", o.ejected)
+	}
+}
