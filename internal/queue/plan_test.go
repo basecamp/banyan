@@ -308,6 +308,39 @@ func TestProbesThatPassAfterAWholeBuildFailedDoNotAskForItAgain(t *testing.T) {
 	}
 }
 
+// The trunk broke under #1's candidate: probes of the trunk alone and of #1 on it both failed.
+// A round later both pass. The trunk no longer fails, so the queue builds #1's tree whole at
+// once and says so, where it once held for the recheck and went on saying the trunk failed.
+func TestATrunkThatPassesAgainUnderProbesIsNoLongerHeld(t *testing.T) {
+	now := time.Date(2026, 11, 14, 22, 0, 0, 0, time.UTC)
+	one := []Member{member(1, "m1")}
+	probe := func(sha SHA, chain []Member, n int, verdict Verdict) Build {
+		at := now.Add(time.Duration(n) * time.Minute)
+		return Build{SHA: sha, Kind: Probe, Base: "trunk", Chain: chain, Round: n, Of: "m1", Verdict: verdict, Pushed: at, Started: at}
+	}
+	w := World{Now: now.Add(3 * time.Minute), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1),
+		Builds: []Build{
+			{SHA: "m1", Base: "trunk", Chain: one, Verdict: Failure, Pushed: now, Started: now},
+			probe("p1a", nil, 1, Failure), probe("p1b", one, 1, Failure),
+			probe("p2a", nil, 2, Success), probe("p2b", one, 2, Success),
+		}}
+	var pushed, notes []string
+	for _, a := range Plan(w, Config{Slots: 1, MaxBatch: 1, Probes: true, Recheck: 10 * time.Minute}) {
+		switch a.Do {
+		case "push":
+			pushed = append(pushed, fmt.Sprintf("kind %d, round %d of %d", a.Build.Kind, a.Build.Round, len(a.Build.Chain)))
+		case "note":
+			notes = append(notes, a.Text)
+		}
+	}
+	if want := fmt.Sprintf("[kind %d, round 3 of 1]", Check); fmt.Sprint(pushed) != want {
+		t.Errorf("pushed %v, want %s: a whole build of #1's tree, as probes passed on it", pushed, want)
+	}
+	if slices.ContainsFunc(notes, func(s string) bool { return strings.Contains(s, redTrunk) }) {
+		t.Errorf("notes %q say the trunk is failing, where its probe passed", notes)
+	}
+}
+
 // #1 and #2 pass alone and fail together, and two red candidates hold them in opposite orders,
 // each with its test whole: one blames #2 on a tree holding #1, the other #1 on a tree holding
 // #2. Each stands on the other, so the first leaves, and the queue does not wait on both with

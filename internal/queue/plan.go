@@ -336,7 +336,7 @@ func (p *plan) weigh(r *red) {
 		}
 		switch {
 		case g >= k:
-			r.flake, r.cleared = probe && !r.whole, !probe
+			r.flake, r.cleared, r.tip = probe && !r.whole, !probe, false
 			continue
 		case g >= 0:
 			r.tip, r.lo = false, max(r.lo, g)
