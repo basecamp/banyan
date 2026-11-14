@@ -31,10 +31,12 @@ import (
 
 // The shapes the indicators are measured on.
 //
-// hey2 is fitted to what it measured. Its pool is its pipeline's, as `go run ./eval -fit`
-// shows, and it cancels a build whose branch is deleted. Its build time and its flakes are its
-// queue's own builds from 2026-11-12 to 2026-11-13: a whole build that passed took 34 minutes,
-// 29 at its tenth fastest in a hundred and 38 at its tenth slowest. Of its first 45 builds of
+// hey2 is fitted to what it measured, and it cancels a build whose branch is deleted. Its pool
+// is the 13 agents that keep its compiles warm, which hey-native-apps' jobs have shared since
+// 2026-11-13: in the 13 hours after, 49 of those an hour ran there for 9 minutes each and 10 of
+// hey2's other builds for 19, and nothing waited, since a build that found them busy started
+// on a cold agent, as 31 in 100 did (`go run ./eval -fit`). Its queue's builds that passed
+// took 31 minutes on a warm agent and 36 on a cold one. Of its first 45 builds of
 // trees that also passed, 8 failed: 5 on an agent that was lost, which its pipeline now runs
 // again, and 3 on a step that dropped its connection, since fixed. None of the 15 after both
 // failed, so its flake rate is taken as 1 in 20 until more builds say. A queue build stops at
@@ -52,9 +54,9 @@ import (
 // has run there and too few builds have for a flake rate, so its probe is taken as a third of
 // a build and its rates are estimates.
 var shapes = []Shape{
-	{Name: "hey2", Build: 34 * time.Minute, Spread: 0.15, Fails: 0.6, Flake: 0.05, Break: 0.03, Clash: 0.02, Conflict: 0.12, Ahead: 0.02,
+	{Name: "hey2", Build: 31 * time.Minute, Spread: 0.15, Fails: 0.6, Flake: 0.05, Break: 0.03, Clash: 0.02, Conflict: 0.12, Ahead: 0.02,
 		Lost: 0.005, Errored: 0.01, Backlog: 15, Arrivals: 5, Hours: 10, Moves: 0.3, Removals: 0.05,
-		Agents: 13, Others: 21, Burst: 2.5, Hold: 18 * time.Minute, Cancels: true},
+		Agents: 13, Cold: 5 * time.Minute, Others: 59, Burst: 4, Hold: 10 * time.Minute, Cancels: true},
 	{Name: "hey-native-apps", Build: 42 * time.Minute, Probe: 14 * time.Minute, Spread: 0.2, Fails: 0.9, Flake: 0.07, ProbeFlake: 0.02,
 		Break: 0.015, Clash: 0.005, Conflict: 0.08, Ahead: 0.03, Lost: 0.005, Errored: 0.01,
 		Backlog: 20, Arrivals: 16, Hours: 10, Moves: 1, Removals: 0.1, Cancels: true},
@@ -125,22 +127,26 @@ type Score struct {
 	Landed                                    int
 	Wrong, WaitP50, WaitP90, EjectP90, Builds float64
 	PerHour                                   float64
-	// What the queue costs everyone else: how long the other builds wait for an agent, in
-	// minutes, beside the queue and with no queue. It is printed, and not on the scoreboard.
+	// What the queue costs everyone else: how long the other builds wait for an agent, or how
+	// much longer they take on a cold one, in minutes, beside the queue and with no queue. It
+	// is printed, and not on the scoreboard.
 	Beside, Alone agentWait
 	// CI's own failures, which only a live score counts: the whole builds of trees that some
 	// whole build passed, and those of them that did not pass.
 	Good, Flaked int
 }
 
-type agentWait struct{ Mean, P90 float64 }
+type agentWait struct{ Mean, P90, Share float64 }
 
 func waited(minutes []float64) agentWait {
-	var sum float64
+	var sum, some float64
 	for _, m := range minutes {
 		sum += m
+		if m > 0 {
+			some++
+		}
 	}
-	return agentWait{sum / float64(max(len(minutes), 1)), percentile(minutes, 90)}
+	return agentWait{sum / float64(max(len(minutes), 1)), percentile(minutes, 90), some / float64(max(len(minutes), 1))}
 }
 
 const seeds = 200
@@ -156,7 +162,11 @@ const columns = "%-16s %-13s %7s %9s %8s %8s %9s %10s %8s\n"
 // builds, where the shape's pool has a limit.
 func (sc Score) print(shape Shape) {
 	fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.EjectP90, sc.Builds, sc.PerHour)
-	if shape.Agents > 0 {
+	switch {
+	case shape.Cold > 0:
+		fmt.Printf("  %.0f in 100 of the other builds start on a cold agent and take %s longer, against %.0f with no queue\n",
+			100*sc.Beside.Share, shape.Cold, 100*sc.Alone.Share)
+	case shape.Agents > 0:
 		fmt.Printf("  the other builds wait %.1f min longer for an agent: %.1f at the mean and %.1f at p90, against %.1f and %.1f with no queue\n",
 			sc.Beside.Mean-sc.Alone.Mean, sc.Beside.Mean, sc.Beside.P90, sc.Alone.Mean, sc.Alone.P90)
 	}
@@ -633,69 +643,27 @@ func replay(spec string) {
 	fmt.Printf("landed %d, wrong %d, ejected %v, broken %v\n", s.Landed, s.Wrong, s.Ejected, s.Broken)
 }
 
-// pipelines is what each shape's CI measured with no queue of ours running. hey2's is its
-// pipeline's newest 800 builds, 37 hours of them, read on 2026-11-11.
-var pipelines = map[string]pipeline{
-	"hey2": {Running: 6, AtMost10: 0.72, Full: 0.147, Wait: [3]float64{0.3, 6.8, 11.1}, Starts: [2]float64{20, 39}},
-}
-
-// pipeline is a pool with no queue: the builds running at once at the median, the share of
-// the time at ten or fewer and with no agent free, a build's wait for an agent in minutes at
-// p50, p90 and p99, and the builds that start in an hour at p50 and p90.
-type pipeline struct {
-	Running, AtMost10, Full float64
-	Wait                    [3]float64
-	Starts                  [2]float64
-}
+// cold is the share of each shape's other builds that started on a cold agent, as its CI
+// measured. hey2's is its pipeline's builds in the 13 hours from 2026-11-13T17:37Z, read on
+// 2026-11-14: 38 of 124.
+var cold = map[string]float64{"hey2": 0.31}
 
 // fit plays each shape's pool with no queue, 37 hours at a time, and prints what it does
-// beside what the pipeline measured.
+// beside what its CI measured.
 func fit() {
 	for _, shape := range shapes {
-		if shape.Agents == 0 {
-			fmt.Printf("%s: no limit on its agents, and nothing measured\n", shape.Name)
+		if shape.Cold == 0 {
+			fmt.Printf("%s: no pool fitted, and nothing measured\n", shape.Name)
 			continue
 		}
-		quiet := Shape{Name: shape.Name, Build: shape.Build, Hours: 37, Agents: shape.Agents, Others: shape.Others, Burst: shape.Burst, Hold: shape.Hold}
-		var busy, waits, starts []float64
-		var sim pipeline
+		quiet := Shape{Name: shape.Name, Build: shape.Build, Hours: 37, Agents: shape.Agents, Cold: shape.Cold, Others: shape.Others, Burst: shape.Burst, Hold: shape.Hold}
+		var waits []float64
 		for _, s := range each(seeds, func(i int) *Sim { s := NewSim(quiet, queue.Config{}, int64(i)); s.Run(); return s }) {
-			for _, n := range s.pool.Busy {
-				busy = append(busy, float64(n))
-				if n <= 10 {
-					sim.AtMost10++
-				}
-				if n >= shape.Agents {
-					sim.Full++
-				}
-			}
-			for _, n := range s.pool.Came[:min(37, len(s.pool.Came))] {
-				starts = append(starts, float64(n))
-			}
 			waits = append(waits, s.pool.Waited...)
 		}
-		sim.Running, sim.AtMost10, sim.Full = percentile(busy, 50), sim.AtMost10/float64(len(busy)), sim.Full/float64(len(busy))
-		sim.Wait = [3]float64{percentile(waits, 50), percentile(waits, 90), percentile(waits, 99)}
-		sim.Starts = [2]float64{percentile(starts, 50), percentile(starts, 90)}
-		was := pipelines[shape.Name]
-		fmt.Printf("%s: %d agents, %.0f other builds an hour in bursts of %.1f, %s each, over %d worlds of 37 hours\n",
+		fmt.Printf("%s: %d warm agents, %.0f other builds an hour in bursts of %.1f, %s each, over %d worlds of 37 hours\n",
 			shape.Name, shape.Agents, shape.Others, shape.Burst, shape.Hold, seeds)
-		fmt.Printf("  %-42s %9s %9s\n", "", "simulated", "measured")
-		for _, row := range []struct {
-			name      string
-			sim, real float64
-		}{
-			{"builds running at once, median", sim.Running, was.Running},
-			{"share of the time at 10 or fewer", sim.AtMost10, was.AtMost10},
-			{"share of the time with no agent free", sim.Full, was.Full},
-			{"wait for an agent, p50, minutes", sim.Wait[0], was.Wait[0]},
-			{"wait for an agent, p90, minutes", sim.Wait[1], was.Wait[1]},
-			{"wait for an agent, p99, minutes", sim.Wait[2], was.Wait[2]},
-			{"builds started in an hour, p50", sim.Starts[0], was.Starts[0]},
-			{"builds started in an hour, p90", sim.Starts[1], was.Starts[1]},
-		} {
-			fmt.Printf("  %-42s %9.2f %9.2f\n", row.name, row.sim, row.real)
-		}
+		fmt.Printf("  share of them that start on a cold agent: %.2f simulated, %.2f measured\n", waited(waits).Share, cold[shape.Name])
 	}
 }
 

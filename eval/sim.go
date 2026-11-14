@@ -42,6 +42,9 @@ type Shape struct {
 	// The CI's pool: how many builds run at once, 0 for no limit. A build waits for an agent
 	// behind every build that came before it, the queue's or not.
 	Agents int
+	// Cold makes the pool elastic: a build that finds every agent busy starts at once on a
+	// cold one, and takes this much longer.
+	Cold time.Duration
 	// The other builds that share the pool: Others come an hour, Burst of them together on
 	// average, and each holds an agent for Hold.
 	Others, Burst float64

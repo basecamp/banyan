@@ -11,7 +11,8 @@ const never = time.Duration(math.MaxInt64)
 
 // pool is a CI's agents and the builds waiting for one, in the order they came. The other
 // builds arrive by its own dice, so two pools of one seed see the same ones whatever the
-// queue does.
+// queue does. Where the shape's pool is elastic nothing waits: a build that finds every agent
+// busy starts on a cold one and takes that much longer.
 type pool struct {
 	shape   Shape
 	rng     *rand.Rand
@@ -19,7 +20,7 @@ type pool struct {
 	waiting []*job
 	next    time.Duration // when the next of the other builds come
 
-	Waited []float64 // how long each of the other builds waited for an agent, in minutes
+	Waited []float64 // how long each of the other builds waited for an agent, or ran longer on a cold one, in minutes
 	Busy   []int     // the agents busy at each look
 	Came   []int     // the other builds that came in each hour so far
 }
@@ -29,6 +30,7 @@ type job struct {
 	build      *simBuild
 	came, ends time.Duration
 	hold       time.Duration
+	cold       bool
 }
 
 func newPool(shape Shape, seed int64) *pool {
@@ -58,7 +60,7 @@ func (p *pool) advance(to time.Duration) {
 		if ends {
 			at = p.running[first].ends
 		}
-		if len(p.waiting) > 0 && len(p.running) < p.shape.Agents && p.waiting[0].came < at {
+		if len(p.waiting) > 0 && p.room() && p.waiting[0].came < at {
 			at, ends, came = p.waiting[0].came, false, true
 		}
 		switch {
@@ -90,13 +92,31 @@ func (p *pool) line(j *job) {
 	p.waiting = slices.Insert(p.waiting, i, j)
 }
 
+// room says whether the build at the head of the line can start now.
+func (p *pool) room() bool {
+	return p.shape.Cold > 0 || len(p.running) < p.shape.Agents
+}
+
+func (p *pool) warm() int {
+	n := 0
+	for _, j := range p.running {
+		if !j.cold {
+			n++
+		}
+	}
+	return n
+}
+
 func (p *pool) start(at time.Duration) {
-	for len(p.waiting) > 0 && p.waiting[0].came <= at && len(p.running) < p.shape.Agents {
+	for len(p.waiting) > 0 && p.waiting[0].came <= at && p.room() {
 		j := p.waiting[0]
 		p.waiting = p.waiting[1:]
+		if j.cold = p.warm() >= p.shape.Agents; j.cold {
+			j.hold += p.shape.Cold
+		}
 		j.ends = at + j.hold
 		if j.build == nil {
-			p.Waited = append(p.Waited, (at - j.came).Minutes())
+			p.Waited = append(p.Waited, (j.ends - j.came - p.shape.Hold).Minutes())
 		} else {
 			j.build.start, j.build.end = at, j.ends
 		}
