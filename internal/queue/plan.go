@@ -156,11 +156,14 @@ func (p *plan) read() {
 	for _, b := range p.w.Builds {
 		switch {
 		case b.Round == 0:
-		case late(b):
-			// A round's build that timed out may yet begin, after the rounds pushed since,
-			// so it goes, and what it would have said is built again.
+		case late(b) && b.Started.IsZero():
+			// A round's build that CI has not begun inside the timeout may yet begin, after
+			// the rounds pushed since, so it goes, and what it would have said is built again.
 			p.drop(b)
 		default:
+			if late(b) {
+				b.Verdict = Error
+			}
 			if byOf[b.Of] == nil {
 				byOf[b.Of] = &red{of: b.Of}
 				reds = append(reds, byOf[b.Of])
@@ -430,24 +433,30 @@ func (p *plan) prefix(j int) SHA {
 // says whether it ejected any.
 func (p *plan) judge() bool {
 	tests, leaving := map[*red][]Build{}, map[int]bool{}
+	var tested []*red
 	for _, r := range p.reds {
 		if t := r.test(r.hi, false); !r.passed && r.hi == r.lo+1 && len(t) == 3 {
-			tests[r], leaving[r.chain[r.hi-1].Number] = t, true
+			tests[r], leaving[r.chain[r.hi-1].Number], tested = t, true, append(tested, r)
 		}
 	}
-	ejected := false
-	for _, r := range p.reds {
-		t, under := tests[r], r.chain[:max(r.hi-1, 0)]
-		// A test that passed with a pull request under it that leaves now says nothing of
-		// the queue once that one is gone.
-		if t == nil || slices.ContainsFunc(under, func(m Member) bool { return leaving[m.Number] }) {
-			continue
-		}
+	blame := func(r *red) {
+		t := tests[r]
 		p.act(Action{Do: "eject", PR: r.chain[r.hi-1].Number, Cause: "culprit", Evidence: []SHA{t[1].SHA, t[0].SHA, t[2].SHA},
 			Text: fmt.Sprintf("the build with it failed, the build without it then passed (%.12s), and the build with it failed again", t[1].SHA)})
-		ejected = true
 	}
-	return ejected
+	// A test that passed with a pull request under it that leaves now says nothing of the
+	// queue once that one is gone. Where each of them stands on another, the first leaves.
+	ejected := false
+	for _, r := range tested {
+		if !slices.ContainsFunc(r.chain[:r.hi-1], func(m Member) bool { return leaving[m.Number] }) {
+			blame(r)
+			ejected = true
+		}
+	}
+	if !ejected && len(tested) > 0 {
+		blame(tested[0])
+	}
+	return len(tested) > 0
 }
 
 // land moves the trunk to the highest prefix whose whole build passed.

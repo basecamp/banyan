@@ -186,32 +186,51 @@ func TestABuildFromBelowALandingIsNoPartOfARedCandidatesRounds(t *testing.T) {
 	}
 }
 
-// #1 and #2 failed together, and CI began none of the first round's builds inside the timeout.
-// They go, and the round is built again. Left in place they would read as begun, a second
-// round would start, and a first-round failure that CI began after the second round's pass
-// would stand as the failure before it.
-func TestARoundsBuildsThatTimedOutGoAndAreBuiltAgain(t *testing.T) {
+// #1 and #2 failed together, and the first round has waited past the timeout. CI never began
+// its build of both, so that one goes and is built again: left in place it would read as
+// begun, later rounds would start, and a failure CI began after their pass would stand as the
+// failure before it. CI did begin its build of #1 alone, which stays and reads as lost until
+// it reports: it began before any round after it, and deleting a build that is running would
+// lose every verdict of a CI slower than the timeout.
+func TestARoundsBuildThatNeverBeganInsideTheTimeoutGoes(t *testing.T) {
 	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
 	both := []Member{member(1, "m1"), member(2, "m2")}
-	check := func(sha SHA, chain []Member) Build {
-		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: 1, Of: "m2", Pushed: now}
-	}
 	w := World{Now: now.Add(2 * time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
 		Builds: []Build{
 			{SHA: "m2", Base: "trunk", Chain: both, Verdict: Failure, Pushed: now, Started: now},
-			check("both1", both), check("one1", both[:1]),
+			{SHA: "both1", Kind: Check, Base: "trunk", Chain: both, Round: 1, Of: "m2", Pushed: now},
+			{SHA: "one1", Kind: Check, Base: "trunk", Chain: both[:1], Round: 1, Of: "m2", Pushed: now, Started: now},
 		}}
 	var deleted []SHA
-	var rounds []int
 	for _, a := range Plan(w, Config{Slots: 2, MaxBatch: 2, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}) {
-		switch a.Do {
-		case "delete":
+		if a.Do == "delete" {
 			deleted = append(deleted, a.SHA)
-		case "push":
-			rounds = append(rounds, a.Build.Round)
 		}
 	}
-	if fmt.Sprint(deleted) != "[both1 one1]" || fmt.Sprint(rounds) != "[1 1]" {
-		t.Errorf("deleted %v and pushed rounds %v, where both builds go and the first round is built again", deleted, rounds)
+	if fmt.Sprint(deleted) != "[both1]" {
+		t.Errorf("deleted %v, where only the build CI never began goes", deleted)
+	}
+}
+
+// #1 and #2 pass alone and fail together, and two red candidates hold them in opposite orders,
+// each with its test whole: one blames #2 on a tree holding #1, the other #1 on a tree holding
+// #2. Each stands on the other, so the first leaves, and the queue does not wait on both with
+// no end.
+func TestOneLeavesWhereTwoTestsStandOnEachOther(t *testing.T) {
+	now := time.Date(2026, 11, 14, 17, 0, 0, 0, time.UTC)
+	ab := []Member{member(1, "a"), member(2, "ab")}
+	ba := []Member{member(2, "b"), member(1, "ba")}
+	check := func(sha, of SHA, chain []Member, round int, verdict Verdict) Build {
+		return Build{SHA: sha, Kind: Check, Base: "trunk", Chain: chain, Round: round, Of: of, Verdict: verdict, Pushed: now, Started: now}
+	}
+	w := World{Now: now.Add(time.Hour), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2),
+		Builds: []Build{
+			{SHA: "ab", Base: "trunk", Chain: ab, Verdict: Failure, Pushed: now, Started: now},
+			{SHA: "ba", Base: "trunk", Chain: ba, Verdict: Failure, Pushed: now, Started: now},
+			check("a1", "ab", ab, 1, Failure), check("a2", "ab", ab[:1], 2, Success), check("a3", "ab", ab, 3, Failure),
+			check("b1", "ba", ba, 1, Failure), check("b2", "ba", ba[:1], 2, Success), check("b3", "ba", ba, 3, Failure),
+		}}
+	if numbers, _ := ejections(Plan(w, Config{Slots: 2, MaxBatch: 2, Recheck: 10 * time.Minute})); len(numbers) != 1 {
+		t.Errorf("ejected %v, where exactly one of the two leaves", numbers)
 	}
 }
