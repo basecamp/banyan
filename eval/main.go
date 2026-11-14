@@ -127,6 +127,13 @@ type Score struct {
 	Landed                                                                   int
 	Wrong, WaitP50, WaitP90, LabelP50, LabelP90, LabelSlow, EjectP90, Builds float64
 	PerHour                                                                  float64
+	// Noise is how far each indicator moves by chance between two runs, in the order of
+	// indicators. It is printed and used, and not on the scoreboard.
+	Noise []float64
+	// Stopped is how many of the Worlds the queue did not keep up in, and Cutoff how far
+	// into the middle one of them it was stopped.
+	Stopped, Worlds int
+	Cutoff          time.Duration
 	// What the queue costs everyone else: how long the other builds wait for an agent, or how
 	// much longer they take on a cold one, in minutes, beside the queue and with no queue. It
 	// is printed, and not on the scoreboard.
@@ -137,6 +144,13 @@ type Score struct {
 	// Landings of a pull request ejected as the cause at an earlier head: unchecked when scored
 	// without a clone, and unreadable when a commit could not be read from the clone.
 	Unchecked, Unreadable int
+}
+
+// indicated names what a run measures, in the order it prints.
+var indicated = []string{"wrong ejections per 1,000", "wait p50", "wait p90", "labelled p50", "labelled p90", "labelled slowest 20th", "ejected p90", "builds per landing", "landings an hour"}
+
+func (sc Score) indicators() []float64 {
+	return []float64{sc.Wrong, sc.WaitP50, sc.WaitP90, sc.LabelP50, sc.LabelP90, sc.LabelSlow, sc.EjectP90, sc.Builds, sc.PerHour}
 }
 
 type agentWait struct{ Mean, P90, Share float64 }
@@ -154,6 +168,9 @@ func waited(minutes []float64) agentWait {
 
 const seeds = 200
 
+// blocks is how many blocks the seeds are split into to see how far an indicator scatters.
+const blocks = 8
+
 // wide is how many times more worlds wrong ejections are counted over than the rest. They are
 // a few in ten thousand landings: over one set of worlds the same planner counts 5 in one
 // thousand worlds and 15 in the next.
@@ -161,10 +178,17 @@ const wide = 5
 
 const columns = "%-16s %-13s %7s %9s %8s %8s %8s %8s %9s %9s %10s %8s\n"
 
-// print is the score's line in a run's output, and under it what the queue costs the other
-// builds, where the shape's pool has a limit.
+// print is the score's line in a run's output. Under it go how far each indicator moves by
+// chance, where the queue did not keep up, and what the queue costs the other builds, where
+// the shape's pool has a limit.
 func (sc Score) print(shape Shape) {
 	fmt.Printf("%-16s %-13s %7d %9.2f %8.2f %8.2f %8.2f %8.2f %9.2f %9.2f %10.2f %8.1f\n", sc.Shape, sc.Config, sc.Landed, sc.Wrong, sc.WaitP50, sc.WaitP90, sc.LabelP50, sc.LabelP90, sc.LabelSlow, sc.EjectP90, sc.Builds, sc.PerHour)
+	if n := sc.Noise; len(n) == len(indicated) {
+		fmt.Printf("  %-36s %9.2f %8.2f %8.2f %8.2f %8.2f %8.2f %9.2f %10.2f %8.1f\n", "by chance, between two runs", n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7], n[8])
+	}
+	if sc.Stopped > 0 {
+		fmt.Printf("  the queue did not keep up in %d of %d worlds, and was stopped %s into the middle one\n", sc.Stopped, sc.Worlds, sc.Cutoff.Round(time.Minute))
+	}
 	switch {
 	case shape.Cold > 0:
 		fmt.Printf("  %.0f in 100 of the other builds start on a cold agent and take %s longer, against %.0f with no queue\n",
@@ -208,26 +232,89 @@ func each[T any](n int, fn func(i int) T) []T {
 	return out
 }
 
+// worldScore is what one world leaves to score, so the world itself can go.
+type worldScore struct {
+	wrong, landed, whole, probes int
+	broken                       []string
+	stopped                      time.Duration
+	waits, labelled, ejects      []float64
+	beside, alone                []float64
+}
+
+// span is the landings counted in one world's throughput window, and the window's length.
+type span struct {
+	landed int
+	hours  float64
+}
+
 func measure(shape Shape, cfg queue.Config) (Score, []string) {
-	var sc Score
-	var waits, labelled, ejects []float64
+	worlds := each(wide*seeds, func(i int) worldScore {
+		s := NewSim(shape, cfg, int64(i))
+		s.Run()
+		w := worldScore{wrong: s.Wrong, landed: s.Landed, whole: s.Whole, probes: s.Probes, broken: s.Broken, stopped: s.Stopped}
+		if i < seeds {
+			w.waits, w.labelled, w.ejects = s.Waits, s.Labelled, s.Ejects
+			if s.pool != nil {
+				w.beside, w.alone = s.pool.Waited, s.alone.Waited
+			}
+		}
+		return w
+	})
+	spans := each(seeds, func(i int) span { return throughput(shape, cfg, int64(i)) })
+	sc := tally(worlds[:seeds], worlds, spans, shape)
+	sc.Noise, sc.Worlds = noise(worlds, spans, shape), len(worlds)
 	var broken []string
-	var wrong, landed, whole, probes int
-	var beside, alone []float64
-	for i, s := range each(wide*seeds, func(i int) *Sim { s := NewSim(shape, cfg, int64(i)); s.Run(); return s }) {
-		wrong, landed = wrong+s.Wrong, landed+s.Landed
-		for _, b := range s.Broken {
+	var stopped []time.Duration
+	for i, w := range worlds {
+		for _, b := range w.broken {
 			broken = append(broken, fmt.Sprintf("%s seed %d: %s", shape.Name, i+1, b))
 		}
-		if i >= seeds {
-			continue
+		if w.stopped > 0 {
+			stopped = append(stopped, w.stopped)
 		}
-		if s.pool != nil {
-			beside, alone = append(beside, s.pool.Waited...), append(alone, s.alone.Waited...)
+	}
+	if sc.Stopped = len(stopped); sc.Stopped > 0 {
+		slices.Sort(stopped)
+		sc.Cutoff = stopped[len(stopped)/2]
+	}
+	return sc, broken
+}
+
+// Throughput is what lands in an hour while a backlog stands: 540 queued and nothing
+// arriving, counted from the second hour, when the chain is full, to the eighth. The window
+// closes sooner at the landing that leaves a quarter of them: the last to land are the ones
+// that waited on their authors, and how long an author takes is no part of what the queue
+// can do.
+const backlog, from, to = 540, 2 * time.Hour, 8 * time.Hour
+
+func throughput(shape Shape, cfg queue.Config, seed int64) span {
+	shape.Backlog, shape.Arrivals, shape.Hours = backlog, 0, 0
+	s := NewSim(shape, cfg, seed)
+	for s.now < to && len(s.Broken) == 0 && len(s.Lands) < 3*backlog/4 && !s.overloaded() {
+		s.Step()
+	}
+	sp := span{hours: max(s.now-from, 0).Hours()}
+	for _, at := range s.Lands {
+		if at > from {
+			sp.landed++
 		}
-		sc.Landed += s.Landed
-		whole, probes = whole+s.Whole, probes+s.Probes
-		waits, labelled, ejects = append(waits, s.Waits...), append(labelled, s.Labelled...), append(ejects, s.Ejects...)
+	}
+	return sp
+}
+
+// tally scores the worlds, with wrong ejections counted over the wider set rare.
+func tally(worlds, rare []worldScore, spans []span, shape Shape) Score {
+	var sc Score
+	var waits, labelled, ejects, beside, alone []float64
+	var wrong, landed, whole, probes int
+	for _, w := range rare {
+		wrong, landed = wrong+w.wrong, landed+w.landed
+	}
+	for _, w := range worlds {
+		sc.Landed += w.landed
+		whole, probes = whole+w.whole, probes+w.probes
+		waits, labelled, ejects = append(waits, w.waits...), append(labelled, w.labelled...), append(ejects, w.ejects...)
+		beside, alone = append(beside, w.beside...), append(alone, w.alone...)
 	}
 	if sc.Landed > 0 {
 		cost := float64(whole)
@@ -239,24 +326,36 @@ func measure(shape Shape, cfg queue.Config) (Score, []string) {
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
 	sc.LabelP50, sc.LabelP90, sc.LabelSlow = percentile(labelled, 50), percentile(labelled, 90), slowest(labelled, 20)
 	sc.Beside, sc.Alone = waited(beside), waited(alone)
-
-	// Throughput is what lands in an hour while a backlog stands: 120 queued and nothing
-	// arriving, timed to the landing that leaves a quarter of them. The last to land are the
-	// ones that waited on their authors, and how long an author takes is no part of what the
-	// queue can do.
-	backlog := shape
-	backlog.Backlog, backlog.Arrivals, backlog.Hours = 120, 0, 0
 	var drained int
 	var hours float64
-	for _, s := range each(seeds, func(i int) *Sim { s := NewSim(backlog, cfg, int64(i)); s.Run(); return s }) {
-		if n := 3 * backlog.Backlog / 4; len(s.Lands) >= n {
-			drained, hours = drained+n, hours+s.Lands[n-1].Hours()
-		}
+	for _, sp := range spans {
+		drained, hours = drained+sp.landed, hours+sp.hours
 	}
 	if hours > 0 {
 		sc.PerHour = float64(drained) / hours
 	}
-	return sc, broken
+	return sc
+}
+
+// noise is how far each indicator moves by chance between two runs of one planner: twice the
+// standard error of the difference between two runs, from how the indicator scatters across
+// blocks of seeds.
+func noise(worlds []worldScore, spans []span, shape Shape) []float64 {
+	per, more := seeds/blocks, (wide-1)*seeds/blocks
+	sum, squares := make([]float64, len(indicated)), make([]float64, len(indicated))
+	for b := 0; b < blocks; b++ {
+		block := worlds[b*per : (b+1)*per]
+		rare := append(slices.Clone(block), worlds[seeds+b*more:seeds+(b+1)*more]...)
+		for i, x := range tally(block, rare, spans[b*per:(b+1)*per], shape).indicators() {
+			sum[i], squares[i] = sum[i]+x, squares[i]+x*x
+		}
+	}
+	out := make([]float64, len(indicated))
+	for i := range out {
+		variance := max(squares[i]-sum[i]*sum[i]/blocks, 0) / (blocks - 1)
+		out[i] = 2 * math.Sqrt(2*variance/blocks)
+	}
+	return out
 }
 
 func percentile(xs []float64, p int) float64 {
@@ -299,13 +398,13 @@ func invariants(m mutant, worlds int) []string {
 		}
 		shape.Instant = m.unwaited
 		for _, cfg := range kinds {
-			for i, s := range each(worlds, func(i int) *Sim {
+			for i, list := range each(worlds, func(i int) []string {
 				s := NewSim(shape, cfg, int64(i))
 				s.plan, s.verify = m.plan, m.verify
 				s.Run()
-				return s
+				return s.Broken
 			}) {
-				for _, b := range s.Broken {
+				for _, b := range list {
 					broken = append(broken, fmt.Sprintf("%s, %d slots of %d, probes %v, seed %d: %s", shape.Name, cfg.Slots, cfg.MaxBatch, cfg.Probes, i+1, b))
 				}
 			}
@@ -637,12 +736,18 @@ func main() {
 			}
 			sc.print(shape)
 			scores = append(scores, sc)
-			if was, ok := last[sc.Shape+"\t"+sc.Config]; ok && cfg.Name == "challenger" && *record == "" {
-				for _, w := range worse(was, sc) {
-					fmt.Println("  worse than its best kept row: " + w)
-					why = append(why, w)
-					failed = true
+			if cfg.Name == "challenger" && *record == "" {
+				var faults []string
+				if sc.Stopped > 0 {
+					faults = append(faults, fmt.Sprintf("%s %s did not keep up in %d of %d worlds", sc.Shape, sc.Config, sc.Stopped, sc.Worlds))
 				}
+				if was, ok := last[sc.Shape+"\t"+sc.Config]; ok {
+					for _, w := range worse(was, sc) {
+						fmt.Println("  worse than its best kept row: " + w)
+						faults = append(faults, w)
+					}
+				}
+				why, failed = append(why, faults...), failed || len(faults) > 0
 			}
 		}
 	}
@@ -725,34 +830,35 @@ func fit() {
 	}
 }
 
-// worse lists the indicators that are worse than they were by more than a twentieth. Wrong
-// ejections are a count of rare events, so they are worse only past twice the count's own
-// scatter, and never for fewer than three more.
+// worse lists the indicators that are worse than they were by more than a twentieth, and by
+// more than they move by chance. Wrong ejections are a count of rare events, so they are
+// worse only past twice the count's own scatter, and never for fewer than three more.
 func worse(was, now Score) []string {
 	var out []string
-	if n := float64(wide * was.Landed); n > 0 && now.Wrong > was.Wrong+1000*max(3, 2*math.Sqrt(was.Wrong*n/1000))/n {
-		out = append(out, fmt.Sprintf("%s %s, wrong ejections per 1,000: %.2f, was %.2f", now.Shape, now.Config, now.Wrong, was.Wrong))
-	}
-	check := func(name string, before, after float64, lowerIsBetter bool) {
-		slack := 0.05*before + 0.01
-		if (lowerIsBetter && after > before+slack) || (!lowerIsBetter && after < before-slack) {
-			out = append(out, fmt.Sprintf("%s %s, %s: %.2f, was %.2f", now.Shape, now.Config, name, after, before))
+	before, after := was.indicators(), now.indicators()
+	for i, name := range indicated {
+		slack, more := 0.05*before[i]+0.01, after[i]-before[i]
+		switch name {
+		case "wrong ejections per 1,000":
+			n := float64(wide * was.Landed)
+			if n == 0 {
+				continue
+			}
+			slack = 1000 * max(3, 2*math.Sqrt(was.Wrong*n/1000)) / n
+		case "labelled p50", "labelled p90", "labelled slowest 20th":
+			if before[i] == 0 {
+				continue
+			}
+		case "landings an hour":
+			more = -more
+		}
+		if i < len(now.Noise) {
+			slack = max(slack, now.Noise[i])
+		}
+		if more > slack {
+			out = append(out, fmt.Sprintf("%s %s, %s: %.2f, was %.2f", now.Shape, now.Config, name, after[i], before[i]))
 		}
 	}
-	check("wait p50", was.WaitP50, now.WaitP50, true)
-	check("wait p90", was.WaitP90, now.WaitP90, true)
-	if was.LabelP50 > 0 {
-		check("labelled p50", was.LabelP50, now.LabelP50, true)
-	}
-	if was.LabelP90 > 0 {
-		check("labelled p90", was.LabelP90, now.LabelP90, true)
-	}
-	if was.LabelSlow > 0 {
-		check("labelled slowest 20th", was.LabelSlow, now.LabelSlow, true)
-	}
-	check("ejected p90", was.EjectP90, now.EjectP90, true)
-	check("builds per landing", was.Builds, now.Builds, true)
-	check("landings an hour", was.PerHour, now.PerHour, false)
 	return out
 }
 

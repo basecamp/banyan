@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -179,5 +180,62 @@ func TestOldScoreboardRowsStayReadableAndJudgeHoldsNewColumns(t *testing.T) {
 	slow.LabelSlow = 9.0
 	if w := worse(got, slow); len(w) == 0 {
 		t.Error("worse did not catch regression in labelled_slowest_20th")
+	}
+}
+
+// Sixteen pull requests an hour arrive, and one at a time lands under two: the queue falls
+// behind and does not recover. Its world is stopped and says when, with no invariant broken.
+// The same world at the challenger's dials keeps up and runs to its end.
+func TestAQueueThatCannotKeepUpIsStopped(t *testing.T) {
+	serial := NewSim(shapes[1], dials(1, 1, false), 1)
+	serial.Run()
+	if serial.Stopped == 0 || len(serial.Broken) > 0 {
+		t.Errorf("stopped at %s with %v broken, where one pull request at a time cannot keep up", serial.Stopped, serial.Broken)
+	}
+	batched := NewSim(shapes[1], dials(3, 12, true), 1)
+	batched.Run()
+	if batched.Stopped > 0 {
+		t.Errorf("stopped at %s at three slots of twelve, where the queue keeps up", batched.Stopped)
+	}
+}
+
+// Every build takes 58 minutes and lands ten pull requests, so a full chain lands ten in every
+// 58 minutes. Timed from an empty chain, the hour in which nothing can land counts against it.
+func TestThroughputIsCountedOnceTheChainIsFull(t *testing.T) {
+	steady := Shape{Name: "steady", Build: 58 * time.Minute, Instant: true, Cancels: true, Takes: []time.Duration{118 * time.Minute}}
+	sc, broken := measure(steady, dials(1, 10, false))
+	if len(broken) > 0 {
+		t.Fatal(broken)
+	}
+	if math.Abs(sc.PerHour-10) > 0.1 {
+		t.Errorf("%.2f landings an hour, where a full chain lands 10", sc.PerHour)
+	}
+}
+
+// Eight blocks of seeds, each landing 100 pull requests on 100 to 170 builds: builds per
+// landing scatter from 1.0 to 1.7, with a standard deviation of 0.245 across blocks. Twice the
+// standard error of a difference between two runs of all eight is 0.245. A change inside
+// that is not called worse, and one past it is.
+func TestAChangeInsideTheNoiseIsNotWorse(t *testing.T) {
+	worlds := make([]worldScore, wide*seeds)
+	for i := range worlds {
+		worlds[i] = worldScore{landed: 4, whole: 4}
+	}
+	for b := 0; b < blocks; b++ {
+		worlds[b*seeds/blocks].whole += 10 * b
+	}
+	n := noise(worlds, make([]span, seeds), Shape{})
+	if builds := n[7]; math.Abs(builds-0.245) > 0.001 {
+		t.Fatalf("builds per landing move %.3f by chance, where the blocks' scatter makes it 0.245", builds)
+	}
+	was := Score{Shape: "hey2", Config: "challenger", Landed: 100, Builds: 1.35}
+	inside, past := was, was
+	inside.Noise, inside.Builds = n, 1.55
+	past.Noise, past.Builds = n, 1.65
+	if w := worse(was, inside); len(w) > 0 {
+		t.Errorf("a change of 0.20 inside noise of 0.245 was called worse: %v", w)
+	}
+	if w := worse(was, past); len(w) != 1 {
+		t.Errorf("a change of 0.30 past noise of 0.245 gave %v", w)
 	}
 }

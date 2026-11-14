@@ -130,7 +130,8 @@ type Sim struct {
 	alone   *pool // the same pool and the same other builds, with no queue
 
 	Trace    io.Writer
-	Broken   []string // invariants broken, each with what happened
+	Broken   []string      // invariants broken, each with what happened
+	Stopped  time.Duration // when a queue that did not keep up was stopped
 	Landed   int
 	Wrong    int
 	Ejected  map[string]int
@@ -670,6 +671,10 @@ func (s *Sim) Run() {
 		if s.now.Hours() >= s.shape.Hours && s.idle() {
 			return
 		}
+		if len(s.Broken) == 0 && s.overloaded() {
+			s.Stopped = s.now
+			return
+		}
 	}
 	if len(s.Broken) > 0 {
 		return
@@ -680,6 +685,24 @@ func (s *Sim) Run() {
 			return
 		}
 	}
+}
+
+// overloaded says the queue is not keeping up and will not recover: more builds are alive
+// than ten rounds of every slot would leave, or more pull requests are queued than arrive in
+// twelve builds, over what it began with. A queue with nothing building is left to run, so a
+// planner that has stalled still breaks invariant 4.
+func (s *Sim) overloaded() bool {
+	building, queued := false, 0
+	for _, b := range s.builds {
+		building = building || (b.Verdict == queue.Pending && !b.lost)
+	}
+	for _, p := range s.prs {
+		if p.queued {
+			queued++
+		}
+	}
+	behind := s.shape.Arrivals > 0 && building && queued > max(80, s.shape.Backlog+int(12*s.shape.Arrivals*s.shape.Build.Hours()))
+	return behind || len(s.builds) > max(300, 10*s.cfg.Slots*s.cfg.MaxBatch)
 }
 
 // idle says nothing is queued or coming back, and no episode is still to come.
