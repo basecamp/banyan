@@ -128,3 +128,23 @@ func TestAnEjectionSoonerThanTheRecordsIsTimedWhereItFellAndItsAuthorActsSooner(
 		t.Errorf("#1 landed %v at %s on %s, where its author pushes the fix ten minutes after this queue's ejection and it lands before the record's ejection", one.landed, one.at, one.Head)
 	}
 }
+
+func TestABreakTheRecordEjectedBeforeTheWindowIsNotPlayedAgain(t *testing.T) {
+	var tr trace
+	carried := `{"window": {"from": "2026-11-04T00:00:00Z", "to": "2026-11-04T04:00:00Z"}, "prs": [
+		{"number": 1, "labels": [{"at": -7200, "label": "land", "on": true, "by": "person"}, {"at": -3600, "label": "land", "on": false, "by": "queue"}, {"at": -600, "label": "land", "on": true, "by": "person"}],
+			"heads": [{"at": -7300, "checks_done": -7250, "checks": "success"}, {"at": -900, "checks_done": -700, "checks": "success"}],
+			"ejections": [{"at": -3600, "cause": "culprit", "attributed": "bisection"}], "breaks": true, "merged": 3000}],
+		"candidates": [{"attempts": [{"started": 0, "ended": 1500, "conclusion": "success"}, {"started": 0, "ended": 1200, "conclusion": "failure"}]}]}`
+	if err := json.Unmarshal([]byte(carried), &tr); err != nil {
+		t.Fatal(err)
+	}
+	passed, fails := tr.times()
+	s := NewSim(Shape{Name: "history", Build: passed[0], Times: passed, Whole: passed[0], Fails: fails, Acts: tr.acts(true), Cancels: true}, dials(2, 1, false), 0)
+	for s.now < 4*time.Hour && len(s.Broken) == 0 {
+		s.Step()
+	}
+	if one := s.prs[1]; len(s.Broken) > 0 || !one.landed || len(s.Ejected) != 0 {
+		t.Errorf("#1 landed %v with ejections %v (%v), where the record ejected it and took its fix before the window began", one.landed, s.Ejected, s.Broken)
+	}
+}

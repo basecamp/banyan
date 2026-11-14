@@ -249,7 +249,7 @@ func (t trace) acts(repair bool) (all []Act) {
 			}
 		}
 		for _, e := range pr.Ejections {
-			if pr.Breaks && e.Cause == "culprit" && e.Attributed != "checks" {
+			if pr.Breaks && e.Cause == "culprit" && e.Attributed != "checks" && e.At >= 0 {
 				broke = min(broke, seconds(e.At))
 			}
 		}
@@ -258,7 +258,7 @@ func (t trace) acts(repair bool) (all []Act) {
 		}
 		head := func(at time.Duration, i int) queue.SHA {
 			sha := queue.SHA(fmt.Sprintf("head%d.%d", pr.Number, i))
-			add(at, Act{Do: "head", Head: sha, Breaks: pr.Breaks && at < broke})
+			add(at, Act{Do: "head", Head: sha, Breaks: at < broke && broke < never})
 			return sha
 		}
 		var pushed []time.Duration
