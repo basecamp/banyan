@@ -341,8 +341,31 @@ type outcome struct {
 	builds                 int
 	minutes                float64
 	left, spared           int
+	inHand                 int     // of those left, the ones labelled, passed by their own checks and clear of a conflict at the window's end
 	longest                float64 // the longest any pull request took from its first label to its landing, in minutes, a run
 	broken                 []string
+}
+
+// inHand says the record's queue could have landed the pull request at this time: it was
+// labelled, its newest head had passed its own checks, and no conflict stood.
+func (pr tracePR) inHand(at float64) bool {
+	on, passed, clear := false, false, true
+	for _, l := range pr.Labels {
+		if l.At <= at {
+			on = l.On
+		}
+	}
+	for _, h := range pr.Heads {
+		if h.At != nil && *h.At <= at {
+			passed = h.Done != nil && *h.Done <= at && h.Checks != nil && *h.Checks == "success"
+		}
+	}
+	for _, c := range pr.Conflicts {
+		if c.At <= at && (c.Mended == nil || *c.Mended > at) {
+			clear = false
+		}
+	}
+	return on && passed && clear && (pr.Closed == nil || *pr.Closed > at)
 }
 
 // recorded is the record's own queue, read from the trace.
@@ -370,6 +393,9 @@ func (t trace) recorded() outcome {
 		switch {
 		case pr.Merged == nil || *pr.Merged > window:
 			o.left++
+			if pr.inHand(window) {
+				o.inHand++
+			}
 		case first >= 0:
 			o.landed++
 			o.label = append(o.label, (*pr.Merged-first)/60)
@@ -422,6 +448,9 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 			switch {
 			case !p.landed:
 				o.left++
+				if p.queued && p.Checks == queue.Success && !p.conflict && p.ahead == 0 {
+					o.inHand++
+				}
 			case ok && first >= 0:
 				o.landed++
 				o.label = append(o.label, (p.at - first).Minutes())
@@ -438,9 +467,9 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 
 func (o outcome) print() {
 	n, landed := float64(o.runs), float64(max(o.landed, 1))
-	fmt.Printf("%-10s %7.0f %8.1f %8.1f %8.1f %8.1f %7.3f %9.1f %7.1f %9.2f %10.1f %6.1f %8.1f %8.0f %7.1f %7.0f\n", o.name, float64(o.landed)/n,
+	fmt.Printf("%-10s %7.0f %8.1f %8.1f %8.1f %8.1f %7.3f %9.1f %7.1f %9.2f %10.1f %6.1f %8.1f %8.1f %8.0f %7.1f %7.0f\n", o.name, float64(o.landed)/n,
 		percentile(o.label, 50), percentile(o.label, 90), percentile(o.clean, 50), percentile(o.clean, 90), float64(len(o.clean))/landed,
-		100*float64(o.ejected)/landed, float64(o.wrong)/n, float64(o.builds)/landed, o.minutes/landed, float64(o.left)/n, percentile(o.label, 99), o.longest/n, float64(o.spared)/n, percentile(o.blame, 50))
+		100*float64(o.ejected)/landed, float64(o.wrong)/n, float64(o.builds)/landed, o.minutes/landed, float64(o.left)/n, float64(o.inHand)/n, percentile(o.label, 99), o.longest/n, float64(o.spared)/n, percentile(o.blame, 50))
 	for _, b := range o.broken {
 		fmt.Println("  broken:", b)
 	}
@@ -453,7 +482,7 @@ func replayHistory(path string, dials []queue.Config, seeds int, shape Shape, re
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-10s %7s %8s %8s %8s %8s %7s %9s %7s %9s %10s %6s %8s %8s %7s %7s\n", "queue", "landed", "label50", "label90", "clean50", "clean90", "clean", "eject/100", "wrong", "builds/pr", "build min", "left", "label99", "longest", "spared", "blame")
+	fmt.Printf("%-10s %7s %8s %8s %8s %8s %7s %9s %7s %9s %10s %6s %8s %8s %8s %7s %7s\n", "queue", "landed", "label50", "label90", "clean50", "clean90", "clean", "eject/100", "wrong", "builds/pr", "build min", "left", "in hand", "label99", "longest", "spared", "blame")
 	t.recorded().print()
 	for _, cfg := range dials {
 		t.replayed(cfg, seeds, shape, repair).print()
