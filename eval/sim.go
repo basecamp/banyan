@@ -274,18 +274,42 @@ func (s *Sim) guilty(tree map[int]bool) bool {
 	return false
 }
 
+func (s *Sim) checkedPR(n int) checkedPR {
+	p := s.prs[n]
+	if p == nil {
+		return checkedPR{number: n}
+	}
+	return checkedPR{number: p.Number, head: p.Head, breaks: p.breaks, clash: p.clash, queued: p.queued, landed: p.landed, checks: p.Checks, wait: p.Wait}
+}
+
+func (s *Sim) checkedPRs() []checkedPR {
+	ns := s.numbers()
+	prs := make([]checkedPR, 0, len(ns))
+	for _, n := range ns {
+		prs = append(prs, s.checkedPR(n))
+	}
+	return prs
+}
+
+func (s *Sim) checkedBuild(sha queue.SHA) (checkedBuild, bool) {
+	b := s.builds[sha]
+	if b == nil {
+		return checkedBuild{}, false
+	}
+	var heads map[int]queue.SHA
+	if len(b.Chain) > 0 {
+		heads = make(map[int]queue.SHA, len(b.Chain))
+		for _, m := range b.Chain {
+			heads[m.Number] = m.Head
+		}
+	}
+	return checkedBuild{kind: b.Kind, verdict: b.Verdict, start: int64(b.start), holds: s.holds[sha], heads: heads}, true
+}
+
 // culprit says whether ejecting this pull request for a red build is right: it breaks the
 // build alone, or it is one of a pair that clash and the other has landed or is still queued.
 func (s *Sim) culprit(p *simPR) bool {
-	if p.breaks {
-		return true
-	}
-	for _, o := range s.prs {
-		if (o.Number == p.clash || o.clash == p.Number) && (o.landed || o.queued) {
-			return true
-		}
-	}
-	return false
+	return culpritPR(p.Number, s.checkedPRs())
 }
 
 // agent is where in the pool a build lands, from 0 to 1, by the commit alone.
@@ -461,10 +485,6 @@ func (s *Sim) World() queue.World {
 	return w
 }
 
-func (s *Sim) broke(n int, format string, args ...any) {
-	s.Broken = append(s.Broken, fmt.Sprintf("invariant %d: %s", n, fmt.Sprintf(format, args...)))
-}
-
 // tick runs the planner until it has nothing more to do, as the executor does, and applies
 // what it asks for. A crash drops the rest of one pass.
 func (s *Sim) tick() {
@@ -473,8 +493,8 @@ func (s *Sim) tick() {
 		if len(acts) == 0 {
 			return
 		}
-		if pass == 6 {
-			s.broke(5, "the tick still had %d actions after six passes, the first %s", len(acts), acts[0].Do)
+		if msg := checkPass(pass, acts); msg != "" {
+			s.Broken = append(s.Broken, msg)
 			return
 		}
 		crashed := s.chance(s.shape.Crash)
@@ -531,8 +551,8 @@ func (s *Sim) apply(a queue.Action) {
 }
 
 func (s *Sim) push(b queue.Build) {
-	if s.seen[b.SHA] {
-		s.broke(7, "%.12s was pushed for a second build", b.SHA)
+	if msg := checkPush(s.seen[b.SHA], b.SHA); msg != "" {
+		s.Broken = append(s.Broken, msg)
 		return
 	}
 	s.seen[b.SHA] = true
@@ -585,67 +605,28 @@ func (s *Sim) eject(a queue.Action) {
 	p.queued = false
 	s.Ejected[a.Cause]++
 	s.Left[a.PR] = a.Cause
-	switch a.Cause {
-	default:
-		s.broke(3, "#%d was ejected as %q, which is no cause to leave", a.PR, a.Cause)
-	case "culprit":
-		if !s.fair(a) {
-			s.broke(8, "#%d was blamed with no fair test in %.7s", a.PR, a.Evidence)
-		}
-		if s.culprit(p) {
-			p.gone = true
-			s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
-			return
-		}
-		s.Wrong++
-		p.back = s.now + 10*time.Minute
-		if !s.flakes() {
-			s.broke(3, "#%d is innocent and was ejected with no flake in play", a.PR)
-		}
+	culprit := a.Cause == "culprit" && s.culprit(p)
+	s.Broken = append(s.Broken, checkEject(a, culprit, s.flakes(), s.checkedBuild)...)
+	if a.Cause != "culprit" {
+		return
 	}
-}
-
-// fair says an ejection's evidence is a fair test of its pull request, by when CI really began
-// each build: the first is a build that passed without it, and among the rest are two builds
-// of that tree with it that failed, one begun no later than the pass and one no earlier.
-func (s *Sim) fair(a queue.Action) bool {
-	if len(a.Evidence) == 0 || s.builds[a.Evidence[0]] == nil {
-		return false
+	if culprit {
+		p.gone = true
+		s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
+		return
 	}
-	pass := s.builds[a.Evidence[0]]
-	without := s.holds[pass.SHA]
-	var failed, before, after int
-	for _, sha := range a.Evidence[1:] {
-		b, with := s.builds[sha], s.holds[sha]
-		same := b != nil && b.Verdict == queue.Failure && with[a.PR] && len(with) == len(without)+1
-		for n := range without {
-			same = same && with[n]
-		}
-		if !same {
-			continue
-		}
-		failed++
-		if b.start <= pass.start {
-			before++
-		}
-		if b.start >= pass.start {
-			after++
-		}
-	}
-	return pass.Verdict == queue.Success && !without[a.PR] && failed >= 2 && before >= 1 && after >= 1
+	s.Wrong++
+	p.back = s.now + 10*time.Minute
 }
 
 func (s *Sim) land(a queue.Action) {
-	b := s.builds[a.SHA]
-	if b == nil || b.Kind != queue.Candidate || b.Verdict != queue.Success {
-		s.broke(1, "the trunk was moved to %.12s, which no whole build passed", a.SHA)
+	broken, ok := checkLand(a, s.checkedBuild, s.checkedPR)
+	s.Broken = append(s.Broken, broken...)
+	if !ok {
 		return
 	}
 	for _, m := range a.Members {
 		p := s.prs[m.Number]
-		if !p.queued || p.Head != m.Head || p.Checks != queue.Success {
-			s.broke(2, "#%d landed at %.12s, which is not its head with its checks passed", m.Number, m.Head)
-		}
 		if p.landed {
 			continue
 		}
@@ -679,11 +660,8 @@ func (s *Sim) Run() {
 	if len(s.Broken) > 0 {
 		return
 	}
-	for _, n := range s.numbers() {
-		if p := s.prs[n]; p.queued && p.Wait == "" && p.Checks == queue.Success {
-			s.broke(4, "#%d was still queued after %s", n, limit)
-			return
-		}
+	if msg := checkDrain(s.checkedPRs(), limit.String()); msg != "" {
+		s.Broken = append(s.Broken, msg)
 	}
 }
 

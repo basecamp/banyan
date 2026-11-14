@@ -546,7 +546,13 @@ func main() {
 	clone := flag.String("clone", "", "with -live: local clone to compare changes when a pull request ejected as the cause lands at a newer head")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	again := flag.String("replay", "", "plan one recorded tick again from its recording alone, and print the actions")
+	var check checkFlag
+	flag.Var(&check, "check", `explore the planner deeper with the model checker, or one named world: -check "<world name>"`)
 	flag.Parse()
+	if check.on {
+		check.run(flag.Args())
+		return
+	}
 	if *again != "" {
 		if err := planAgain(*again); err != nil {
 			fmt.Println(err)
@@ -629,6 +635,12 @@ func main() {
 		fmt.Println("  " + b)
 	}
 	failed = failed || len(broken) > 0
+
+	sum := reportCheck(defaultWorlds(), mutant{plan: queue.Plan, verify: queue.Verify})
+	if sum.brokenWorlds > 0 {
+		why = append(why, fmt.Sprintf("%d model-checked worlds broke (%s)", sum.brokenWorlds, strings.Join(sum.brokenInvs, ", ")))
+		failed = true
+	}
 
 	wrong := history(mutant{plan: queue.Plan, verify: queue.Verify})
 	fmt.Printf("cases: %d played, %d failures\n", len(cases()), len(wrong))
