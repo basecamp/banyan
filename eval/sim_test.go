@@ -151,7 +151,13 @@ func TestOldScoreboardRowsStayReadableAndJudgeHoldsNewColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	realBest := best(strings.Split(string(raw), "\n")[1:])["hey2\tchallenger"]
+	var old []string
+	for _, line := range strings.Split(string(raw), "\n")[1:] {
+		if len(strings.Split(line, "\t")) == 13 {
+			old = append(old, line)
+		}
+	}
+	realBest := best(old)["hey2\tchallenger"]
 	if realBest.Builds == 0 || realBest.LabelP50 != 0 || realBest.LabelP90 != 0 || realBest.LabelSlow != 0 {
 		t.Fatalf("unexpected real best from 13-column scoreboard: %+v", realBest)
 	}
