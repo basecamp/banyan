@@ -678,6 +678,7 @@ func (s *Sim) eject(a queue.Action) {
 	}
 	if culprit {
 		p.gone = s.history == nil
+		s.history.blame(a.PR, s.now)
 		s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
 		return
 	}

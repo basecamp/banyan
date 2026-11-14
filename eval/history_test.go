@@ -101,3 +101,30 @@ func TestTheRecordCountsTheWindowsEjectionsAlone(t *testing.T) {
 		t.Errorf("a pull request ejected before, in and after the window reads as %d ejections, where the window holds 1", o.ejected)
 	}
 }
+
+func TestAnEjectionSoonerThanTheRecordsIsTimedWhereItFellAndItsAuthorActsSooner(t *testing.T) {
+	var tr trace
+	late := `{"window": {"from": "2026-11-04T00:00:00Z", "to": "2026-11-04T08:00:00Z"}, "prs": [
+		{"number": 1, "labels": [{"at": 60, "label": "land", "on": true, "by": "person"}, {"at": 18000, "label": "land", "on": false, "by": "queue"}, {"at": 18700, "label": "land", "on": true, "by": "person"}],
+			"heads": [{"at": 0, "checks_done": 30, "checks": "success"}, {"at": 18600, "checks_done": 18660, "checks": "success"}],
+			"ejections": [{"at": 18000, "cause": "culprit", "attributed": "bisection"}], "breaks": true, "merged": 21000}],
+		"candidates": [{"attempts": [{"started": 0, "ended": 1500, "conclusion": "success"}, {"started": 0, "ended": 1200, "conclusion": "failure"}]}]}`
+	if err := json.Unmarshal([]byte(late), &tr); err != nil {
+		t.Fatal(err)
+	}
+	passed, fails := tr.times()
+	s := NewSim(Shape{Name: "history", Build: passed[0], Times: passed, Whole: passed[0], Fails: fails, Acts: tr.acts(true), Cancels: true}, dials(2, 1, false), 0)
+	for s.now < 8*time.Hour && len(s.Broken) == 0 {
+		s.Step()
+	}
+	if len(s.Broken) > 0 {
+		t.Fatal(s.Broken)
+	}
+	recorded := 18000 * time.Second
+	if at, ok := s.history.blamed[1]; !ok || at >= recorded {
+		t.Errorf("#1 is timed as ejected at %s, where this queue ejected it before the record's did at %s", at, recorded)
+	}
+	if one := s.prs[1]; !one.landed || one.Head != "head1.2" || one.at >= recorded {
+		t.Errorf("#1 landed %v at %s on %s, where its author pushes the fix ten minutes after this queue's ejection and it lands before the record's ejection", one.landed, one.at, one.Head)
+	}
+}

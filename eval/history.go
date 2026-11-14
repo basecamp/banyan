@@ -65,15 +65,27 @@ func (s *Sim) play() {
 	}
 }
 
-// early says a conflict has come sooner than recorded, because one of the pull requests that
-// brought it has landed sooner. Its author then acts that much sooner too.
+// early says an act comes sooner than recorded: a conflict, once one of the pull requests that
+// brought it has landed, and the record's ejection of a pull request that broke the build, once
+// this queue has ejected it. What its author did next comes that much sooner too.
 func (s *Sim) early(a Act) bool {
 	p := s.prs[a.Number]
 	early := a.Do == "conflict" && p != nil && !p.landed && slices.ContainsFunc(a.After, func(n int) bool { return s.prs[n] != nil && s.prs[n].landed })
-	if early {
+	if _, blamed := s.history.blamed[a.Number]; early || (a.Do == "ejected" && blamed) {
 		s.history.behind[a.Number] = s.now - a.At
+		return true
 	}
-	return early
+	return false
+}
+
+// blame notes when this queue first ejected a pull request that broke the build.
+func (h *script) blame(n int, at time.Duration) {
+	if h == nil {
+		return
+	}
+	if _, ok := h.blamed[n]; !ok {
+		h.blamed[n] = at
+	}
 }
 
 // act does one act, and says whether it could. The record's ejection of a pull request that
@@ -122,10 +134,7 @@ func (s *Sim) act(a Act) bool {
 		if p.queued && p.breaks {
 			return false
 		}
-		if _, ok := h.blamed[a.Number]; !ok && s.Left[a.Number] == "culprit" {
-			h.blamed[a.Number] = s.now
-		}
-		p.breaks, h.behind[a.Number] = false, max(0, s.now-a.At)
+		p.breaks, h.behind[a.Number] = false, s.now-a.At
 	}
 	return true
 }

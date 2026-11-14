@@ -571,7 +571,7 @@ func main() {
 				cfgs = nil
 			}
 			cfg := dials(slots, batch, probe > 0)
-			cfg.Gather, probes = gather, time.Duration(probe)*time.Minute
+			cfg.Gather, probes = gather, max(probes, time.Duration(probe)*time.Minute)
 			cfgs = append(cfgs, cfg)
 		}
 		if err := replayHistory(*past, cfgs, 10, Shape{Flake: *flake, ProbeFlake: *flake * (1 - *rescued), Probe: probes, Whole: *whole, Rerun: *rerun, Rescued: *rescued}, !*unrepaired); err != nil {
