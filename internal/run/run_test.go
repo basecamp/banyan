@@ -1459,3 +1459,38 @@ func TestCandidatesAnotherQueueLeftAreLandedAsTheyStand(t *testing.T) {
 		t.Errorf("branches left: %v, where only the one the queue never reads should stand", left)
 	}
 }
+
+func TestAProbeCarriesTheJobsThatFailedInTheRedBuild(t *testing.T) {
+	w := newWorld(t, `{"slots": 3, "max_batch": 2, "probe": "merge-queue/probe"}`)
+	w.queue(1, "a", "1\n")
+	w.queue(2, "broken", "2\n")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	w.check(cand, "linux (ci)", "failure", w.now)
+	w.check(cand, "apple (ci)", "success", w.now)
+	w.set(cand, "merge-queue/build", "failure")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	probes := 0
+	for _, sha := range w.o.Branches("merge-queue/") {
+		said := gittest.Sh(t, w.o.Bare, "git", "show", "--no-patch", "--format=%B", sha)
+		if !strings.Contains(said, "Banyan-Probe-Of: "+cand) {
+			continue
+		}
+		probes++
+		if !strings.Contains(said, "\nBanyan-Probe-Failed: linux (ci)") || strings.Contains(said, "apple (ci)") || strings.Contains(said, "Banyan-Probe-Failed: merge-queue") {
+			t.Errorf("a probe says:\n%s\nwhere it names linux (ci), the one job that failed, and neither the job that passed nor the build's own verdict", said)
+		}
+	}
+	if probes == 0 {
+		t.Fatalf("no probe of the red candidate was pushed\n%s", w.log)
+	}
+}

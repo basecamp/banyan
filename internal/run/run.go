@@ -181,6 +181,12 @@ func (q *Queue) Read() (*Read, error) {
 			contexts = []string{q.Probe}
 		}
 		b.Verdict, _ = github.Verdict(st, contexts)
+		for name, s := range st {
+			if s.State == queue.Failure && name != q.Status && !slices.Contains(contexts, name) && !strings.ContainsAny(name, "\r\n") {
+				b.Failed = append(b.Failed, name)
+			}
+		}
+		slices.Sort(b.Failed)
 		b.Pushed = st[q.Status].At
 		for _, c := range contexts {
 			s := st[c]

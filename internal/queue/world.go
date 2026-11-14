@@ -71,7 +71,10 @@ type Build struct {
 	// Of names the red candidate a round's build is evidence about, by its prefix.
 	Of      SHA
 	Verdict Verdict
-	Pushed  time.Time
+	// Failed names the contexts that failed on the commit beside its verdict's own: the jobs
+	// of its build, where the repository's CI reports each as a context.
+	Failed []string
+	Pushed time.Time
 	// Started is when CI began running the build: zero until it has, and always zero where
 	// the repository's CI does not say.
 	Started time.Time

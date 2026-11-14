@@ -3,6 +3,7 @@ package queue
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -327,5 +328,32 @@ func TestOneLeavesWhereTwoTestsStandOnEachOther(t *testing.T) {
 		}}
 	if numbers, _ := ejections(Plan(w, Config{Slots: 2, MaxBatch: 2, Recheck: 10 * time.Minute})); len(numbers) != 1 {
 		t.Errorf("ejected %v, where exactly one of the two leaves", numbers)
+	}
+}
+
+func TestAProbeNamesTheContextsThatFailedOnTheRedBuild(t *testing.T) {
+	now := time.Date(2026, 11, 14, 21, 0, 0, 0, time.UTC)
+	chain := []Member{member(1, "m1"), member(2, "m2")}
+	red := Build{SHA: "m2", Base: "trunk", Chain: chain, Verdict: Failure, Failed: []string{"apple (ci)", "linux (ci)"}, Pushed: now, Started: now}
+	w := World{Now: now.Add(time.Minute), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2), Builds: []Build{red}}
+	probes, whole := 0, 0
+	for _, a := range Plan(w, Config{Slots: 2, MaxBatch: 2, Probes: true}) {
+		if a.Do == "push" && a.Build.Kind == Probe {
+			probes++
+			if !strings.Contains(a.Build.SHA, `Banyan-Probe-Of: m2\nBanyan-Probe-Failed: apple (ci)\nBanyan-Probe-Failed: linux (ci)`) {
+				t.Errorf("a probe of the red build is marked %s, where it names the two contexts that failed on it", a.Build.SHA)
+			}
+		}
+	}
+	for _, a := range Plan(w, Config{Slots: 2, MaxBatch: 2}) {
+		if a.Do == "push" && a.Build.Round > 0 {
+			whole++
+			if strings.Contains(a.Build.SHA, "Banyan-Probe") {
+				t.Errorf("a whole build is marked %s, where it runs every job and names none", a.Build.SHA)
+			}
+		}
+	}
+	if probes == 0 || whole == 0 {
+		t.Errorf("pushed %d probes and %d whole builds of a red candidate, where each plan pushes a round", probes, whole)
 	}
 }

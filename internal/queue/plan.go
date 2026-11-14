@@ -61,6 +61,7 @@ type red struct {
 	builds []Build         // its attempts, and the rounds run where it stands
 	rounds map[int][]Build // the same by round
 	sha    SHA             // the attempt that failed last
+	failed []string        // the contexts that failed on it
 
 	// What the rounds say so far: the culprit is in prefixes lo+1 to hi, and lo is -1 while
 	// nothing has passed.
@@ -303,7 +304,7 @@ func (p *plan) weigh(r *red) {
 	r.lo, r.hi, r.whole, r.rounds = -1, k, !p.c.Probes, map[int][]Build{}
 	for _, b := range r.builds {
 		if b.Round == 0 && b.Verdict == Failure {
-			r.sha = b.SHA
+			r.sha, r.failed = b.SHA, b.Failed
 		}
 		if b.Round > 0 && b.Pushed.After(r.pushed) {
 			r.pushed = b.Pushed
@@ -494,7 +495,7 @@ func (p *plan) candidate(j int) Build {
 		if n == 1 {
 			return b.Chain[j-1].Merge
 		}
-		return merge(note(Candidate, 0, "", "", n))
+		return merge(note(Candidate, 0, "", "", nil, n))
 	})
 	return b
 }
@@ -583,7 +584,7 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 	if whole {
 		b.Kind, red = Check, ""
 	}
-	b.SHA = p.fresh(func(n int) SHA { return p.w.Repo.Mark(parent, note(b.Kind, b.Round, r.of, red, n)) })
+	b.SHA = p.fresh(func(n int) SHA { return p.w.Repo.Mark(parent, note(b.Kind, b.Round, r.of, red, r.failed, n)) })
 	return b
 }
 
@@ -655,7 +656,7 @@ func (p *plan) notes() {
 }
 
 // note is the trailers a commit carries, which a later tick reads the build back from.
-func note(kind Kind, round int, of, red SHA, try int) string {
+func note(kind Kind, round int, of, red SHA, failed []string, try int) string {
 	s := fmt.Sprintf("Banyan-Try: %d", try)
 	if round > 0 {
 		s += fmt.Sprintf("\nBanyan-Round: %d\nBanyan-Of: %s", round, of)
@@ -665,6 +666,9 @@ func note(kind Kind, round int, of, red SHA, try int) string {
 		s += "\nBanyan-Check: whole"
 	case Probe:
 		s += "\nBanyan-Probe-Of: " + red
+		for _, context := range failed {
+			s += "\nBanyan-Probe-Failed: " + context
+		}
 	}
 	return s
 }
