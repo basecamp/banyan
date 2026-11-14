@@ -564,7 +564,7 @@ func (p *plan) fill() {
 			}
 			p.chain = append(p.chain, Member{pr.Number, pr.Head, sha})
 			in[pr.Number], parent = true, sha
-			if added++; added == max(p.c.MaxBatch, 1) || pr.First {
+			if added++; added == max(p.c.MaxBatch, 1) || (pr.First && p.held) {
 				break
 			}
 		}

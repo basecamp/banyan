@@ -59,3 +59,27 @@ func TestNobodyIsBlamedOnARoundReadBeforeTheOneBeforeItIsWhole(t *testing.T) {
 		t.Errorf("the rounds started over with %d builds of a fourth round, where both pull requests' tests begin again", fourth)
 	}
 }
+
+// Three of five queued pull requests are labelled to go first, and the trunk passes. They go
+// ahead of the rest, and one candidate holds all five: a batch ends at a pull request labelled
+// first only while the trunk is red, when that pull request is its fix.
+func TestPullRequestsLabelledFirstBatchWithTheRestWhileTheTrunkPasses(t *testing.T) {
+	now := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	w := World{Now: now, Trunk: "trunk", Repo: commits{}}
+	for n := 1; n <= 5; n++ {
+		w.PRs = append(w.PRs, PR{Number: n, Head: fmt.Sprintf("h%d", n), Queued: now.Add(time.Duration(n) * time.Minute), First: n >= 3, Checks: Success})
+	}
+	var pushed [][]int
+	for _, a := range Plan(w, Config{Slots: 3, MaxBatch: 12, Recheck: 10 * time.Minute}) {
+		if a.Do == "push" {
+			var ns []int
+			for _, m := range a.Build.Chain {
+				ns = append(ns, m.Number)
+			}
+			pushed = append(pushed, ns)
+		}
+	}
+	if want := [][]int{{3, 4, 5, 1, 2}}; fmt.Sprint(pushed) != fmt.Sprint(want) {
+		t.Errorf("pushed candidates of %v, want one of %v", pushed, want)
+	}
+}
