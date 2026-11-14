@@ -1428,3 +1428,34 @@ func TestAnEjectionBeginsWithTheSentenceEveryReaderExpects(t *testing.T) {
 		t.Errorf("default name comment:\n%+v", two.comments)
 	}
 }
+
+func TestCandidatesAnotherQueueLeftAreLandedAsTheyStand(t *testing.T) {
+	w := newWorld(t, `{"slots": 3}`)
+	a, b := w.queue(1, "a", "1\n"), w.queue(2, "b", "2\n")
+	tip := w.o.Trunk()
+	merge := func(p *pull, said string) string {
+		gittest.Sh(t, w.o.Work, "git", "-c", "user.name=Another Queue", "-c", "user.email=other@example.com", "merge", "--quiet", "--no-ff", "-m", said, p.heads[0])
+		return gittest.Sh(t, w.o.Work, "git", "rev-parse", "HEAD")
+	}
+	gittest.Sh(t, w.o.Work, "git", "fetch", "--quiet", "origin")
+	gittest.Sh(t, w.o.Work, "git", "checkout", "--quiet", "--detach", tip)
+	one := merge(a, "Teach the importer a new trick\n\nWhy, at length.\n\n<!-- a bot's note, copied from the pull request -->\n\nMerges #1")
+	two := merge(b, "Fix the thing the importer broke (#2)\n\nMerges #2")
+	for name, sha := range map[string]string{two[:12]: two, tip[:12]: tip, one[:12] + "-express": one} {
+		gittest.Sh(t, w.o.Work, "git", "push", "--quiet", "origin", sha+":refs/heads/merge-queue/main/"+name)
+	}
+	w.set(two, "merge-queue/build", "success")
+
+	w.rounds(2)
+
+	if !w.landed(1) || !w.landed(2) || w.o.Trunk() != two {
+		t.Fatalf("the trunk is %.12s and #1, #2 landed %v, %v, where the candidate left at %.12s had passed\n%s", w.o.Trunk(), w.landed(1), w.landed(2), two, w.log)
+	}
+	if strings.Contains(w.log.String(), `"do":"push"`) {
+		t.Errorf("the queue pushed a build of its own for a candidate that had already passed\n%s", w.log)
+	}
+	left := w.o.Branches("merge-queue/")
+	if _, read := left["refs/heads/merge-queue/main/"+one[:12]+"-express"]; !read || len(left) != 1 {
+		t.Errorf("branches left: %v, where only the one the queue never reads should stand", left)
+	}
+}
