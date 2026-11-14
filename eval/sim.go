@@ -79,6 +79,9 @@ type Episode struct {
 	// CI that runs a build's jobs by what its change reaches, only a tree that holds this pull
 	// request ahead of the trunk runs that job, and every other build passes by skipping it.
 	Reach int
+	// Share, where set, is the share of the agents the episode breaks: a build that lands on
+	// one fails whatever its tree, and the rest are untouched. 0 is all of them.
+	Share float64
 }
 
 type simPR struct {
@@ -236,10 +239,10 @@ func (s *Sim) arrive() *simPR {
 	return p
 }
 
-// red is the episode that fails a build of this tree begun at this time, if any.
-func (s *Sim) red(tree map[int]bool, at time.Duration) bool {
+// red is the episode that fails this build of this tree begun at this time, if any.
+func (s *Sim) red(sha queue.SHA, tree map[int]bool, at time.Duration) bool {
 	for i, e := range s.shape.Episodes {
-		if at < e.At || (e.Reach > 0 && (!tree[e.Reach] || s.prs[e.Reach].landed)) {
+		if at < e.At || (e.Reach > 0 && (!tree[e.Reach] || s.prs[e.Reach].landed)) || (e.Share > 0 && agent(sha) >= e.Share) {
 			continue
 		}
 		if !e.NeedsFix && at < e.At+e.For {
@@ -283,8 +286,20 @@ func (s *Sim) culprit(p *simPR) bool {
 	return false
 }
 
+// agent is where in the pool a build lands, from 0 to 1, by the commit alone.
+func agent(sha queue.SHA) float64 {
+	var n int64
+	fmt.Sscanf(sha[min(len(sha), 4):min(len(sha), 10)], "%x", &n)
+	return float64(n%10000) / 10000
+}
+
 // flakes says whether any build of this world may fail on a good tree.
 func (s *Sim) flakes() bool {
+	for _, e := range s.shape.Episodes {
+		if e.Share > 0 {
+			return true
+		}
+	}
 	for _, f := range s.shape.Script {
 		if f {
 			return true
@@ -296,7 +311,7 @@ func (s *Sim) flakes() bool {
 func (s *Sim) verdict(b *simBuild) queue.Verdict {
 	tree := s.holds[b.SHA]
 	switch {
-	case s.red(tree, b.start), s.guilty(tree):
+	case s.red(b.SHA, tree, b.start), s.guilty(tree):
 		return queue.Failure
 	case b.flake:
 		return queue.Failure
@@ -355,7 +370,7 @@ func (s *Sim) Step() {
 				continue
 			}
 			b.Verdict = s.verdict(b)
-			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
+			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
 		}
 	}
 	s.tick()

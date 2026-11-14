@@ -414,7 +414,7 @@ func main() {
 	judge := flag.String("judge", "", "record this run as the test of this hypothesis, with the verdict the rule gives it: kept, or rejected and why")
 	baselines := flag.Bool("baselines", false, "measure the baselines too, as -record does")
 	trace := flag.String("trace", "", `replay one world and print what the queue did: "<shape> <slots> <batch> <probes> <seed>"`)
-	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes> [<flake rate> [<build minutes> [<share of a build a broken tree takes to fail>]]]; ..."`)
+	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes> [<flake rate> [<build minutes> [<share of a build a broken tree takes to fail> [<share of the agents broken for three hours>]]]]; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
@@ -456,8 +456,8 @@ func main() {
 			var name string
 			var slots, batch int
 			var probes bool
-			flake, minutes, fails := -1.0, 0.0, 0.0
-			fmt.Sscan(spec, &name, &slots, &batch, &probes, &flake, &minutes, &fails)
+			flake, minutes, fails, out := -1.0, 0.0, 0.0, 0.0
+			fmt.Sscan(spec, &name, &slots, &batch, &probes, &flake, &minutes, &fails, &out)
 			for _, shape := range slices.Concat(shapes, stages) {
 				if shape.Name == name {
 					sc := Score{Config: fmt.Sprintf("%d of %d", slots, batch)}
@@ -472,6 +472,10 @@ func main() {
 					if fails > 0 {
 						shape.Fails = fails
 						sc.Config += fmt.Sprintf(", red in %.0f%%", 100*fails)
+					}
+					if out > 0 {
+						shape.Episodes = append(shape.Episodes, Episode{At: 2 * time.Hour, For: 3 * time.Hour, Share: out})
+						sc.Config += fmt.Sprintf(", %.0f%% of agents out for 3h", 100*out)
 					}
 					config := sc.Config
 					sc, _ = measure(shape, dials(slots, batch, probes))
