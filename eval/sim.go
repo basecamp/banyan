@@ -39,6 +39,17 @@ type Shape struct {
 	Queue        []Queued        // a case's pull requests, each queued at its own time
 	Takes        []time.Duration // a case's builds: how long the nth takes, in place of Build
 
+	// A recorded window, played in place of arrivals drawn by chance: what its people, their
+	// checks and its trunk did to each pull request, how long its CI's builds took, and how
+	// long a build takes that runs every job whatever the change reaches.
+	Acts  []Act
+	Times []time.Duration
+	Whole time.Duration
+	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
+	// takes this much longer, and Rescued is the share of flakes that pass then.
+	Rerun   time.Duration
+	Rescued float64
+
 	// The CI's pool: how many builds run at once, 0 for no limit. A build waits for an agent
 	// behind every build that came before it, the queue's or not.
 	Agents int
@@ -99,6 +110,7 @@ type simPR struct {
 	mend        time.Duration // when its author pushes the head that mends its conflict with the trunk
 	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
 	checksGreen time.Duration
+	at          time.Duration // when it landed
 }
 
 type simBuild struct {
@@ -146,6 +158,8 @@ type Sim struct {
 	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
 	Lands    []time.Duration // when each pull request landed
+	Minutes  float64         // the time its builds took, each to its end
+	history  *script
 }
 
 const tick = 2 * time.Minute
@@ -160,6 +174,9 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	}
 	for i := 0; i < shape.Backlog; i++ {
 		s.arrive()
+	}
+	if shape.Acts != nil {
+		s.history = newScript(shape.Acts)
 	}
 	s.queue()
 	return s
@@ -389,6 +406,7 @@ func (s *Sim) Step() {
 		s.arrive()
 	}
 	s.queue()
+	s.play()
 	for i, e := range s.shape.Episodes {
 		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
@@ -568,6 +586,9 @@ func (s *Sim) apply(a queue.Action) {
 		if b := s.builds[a.SHA]; b != nil && s.pool != nil && s.shape.Cancels {
 			s.pool.cancel(b, s.now)
 		}
+		if b := s.builds[a.SHA]; b != nil && s.shape.Cancels && b.end != never && b.end > s.now {
+			s.Minutes -= (b.end - s.now).Minutes()
+		}
 		delete(s.builds, a.SHA)
 	case "push":
 		s.push(a.Build)
@@ -608,7 +629,15 @@ func (s *Sim) push(b queue.Build) {
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
 	}
+	if len(s.shape.Times) > 0 && b.Kind != queue.Probe {
+		d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
+		if b.Kind == queue.Check && s.shape.Whole > 0 {
+			d = s.shape.Whole
+		}
+	}
+
 	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
+	s.Minutes += d.Minutes()
 	if s.pool != nil {
 		sb.end = never
 		s.pool.add(sb, d-s.pickup(b.SHA), sb.start)
@@ -617,6 +646,10 @@ func (s *Sim) push(b queue.Build) {
 		sb.flake = s.started < len(s.shape.Script) && s.shape.Script[s.started]
 	} else {
 		sb.flake = s.chance(flake)
+	}
+	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || s.guilty(s.holds[b.SHA])) {
+		sb.end, sb.flake = sb.end+s.shape.Rerun, sb.flake && !s.chance(s.shape.Rescued)
+		s.Minutes += s.shape.Rerun.Minutes()
 	}
 	s.started++
 	s.builds[b.SHA] = sb
@@ -644,7 +677,7 @@ func (s *Sim) eject(a queue.Action) {
 		return
 	}
 	if culprit {
-		p.gone = true
+		p.gone = s.history == nil
 		s.Ejects = append(s.Ejects, float64(s.now-p.ready)/float64(s.shape.Build))
 		return
 	}
@@ -663,7 +696,7 @@ func (s *Sim) land(a queue.Action) {
 		if p.landed {
 			continue
 		}
-		p.landed, p.queued = true, false
+		p.landed, p.queued, p.at = true, false, s.now
 		s.Landed++
 		s.Lands = append(s.Lands, s.now)
 		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))

@@ -547,10 +547,37 @@ func main() {
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	again := flag.String("replay", "", "plan one recorded tick again from its recording alone, and print the actions")
 	var check checkFlag
+	past := flag.String("history", "", `play a recorded window to the planner and print it beside what the record's own queue did: -history <trace.json> ["<slots> <batch>" ...]`)
+	flake := flag.Float64("flake", 0.07, "with -history: the share of whole builds of a good tree that fail")
+	whole := flag.Duration("whole", 0, "with -history: how long a build of every job takes, the slowest tenth of the recorded builds where not given")
+	unrepaired := flag.Bool("unrepaired", false, "with -history: nothing mends a conflict but the author")
+	rerun := flag.Duration("rerun", 0, "with -history: the CI runs a red build's failed jobs once more, which takes this long")
+	rescued := flag.Float64("rescued", 0.6, "with -history and -rerun: the share of flakes that pass when run again")
 	flag.Var(&check, "check", `explore the planner deeper with the model checker, or one named world: -check "<world name>"`)
 	flag.Parse()
 	if check.on {
 		check.run(flag.Args())
+		return
+	}
+	if *past != "" {
+		cfgs := []queue.Config{challenger["hey-native-apps"]}
+		for i, arg := range flag.Args() {
+			var slots, batch, gather int
+			if n, err := fmt.Sscan(arg, &slots, &batch, &gather); n < 2 {
+				fmt.Println(arg+":", err)
+				os.Exit(1)
+			}
+			if i == 0 {
+				cfgs = nil
+			}
+			cfg := dials(slots, batch, false)
+			cfg.Gather = gather
+			cfgs = append(cfgs, cfg)
+		}
+		if err := replayHistory(*past, cfgs, 10, Shape{Flake: *flake, Whole: *whole, Rerun: *rerun, Rescued: *rescued}, !*unrepaired); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 		return
 	}
 	if *again != "" {
