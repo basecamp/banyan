@@ -829,7 +829,7 @@ func replay(spec string) {
 	var seed int64
 	fmt.Sscan(spec, &name, &slots, &batch, &probes, &seed)
 	shape := storm
-	for _, s := range shapes {
+	for _, s := range slices.Concat(shapes, stages) {
 		if s.Name == name {
 			shape = s
 		}
