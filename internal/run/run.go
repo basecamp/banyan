@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -33,6 +34,8 @@ type Config struct {
 	Probe    string   `json:"probe"`    // the context that judges a probe; without one there are no probes
 	Admit    []string `json:"admit"`    // the contexts a pull request's head must pass to join the chain
 	Threads  bool     `json:"threads"`  // an unresolved review thread keeps a pull request out
+	Message  string   `json:"message"`  // description: a merge says the pull request's title and description, not GitHub's first line
+	Reword   string   `json:"reword"`   // a pattern no title or description a merge says may hold
 	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
 	Started  string   `json:"started"`  // a word CI's pending status carries once the build runs; a check run says so itself
 	Begins   string   `json:"begins"`   // a context that answers once CI has queued the build's jobs, where nothing says the build runs
@@ -82,11 +85,22 @@ func Load(path string) (Config, error) {
 	if c.MaxBatch == 0 {
 		c.MaxBatch = 1
 	}
+	if err == nil && c.Message != "" && c.Message != "description" {
+		err = fmt.Errorf("%s: message is %q, and may only be description", path, c.Message)
+	}
+	if _, bad := regexp.Compile(c.Reword); err == nil && bad != nil {
+		err = fmt.Errorf("%s: reword: %w", path, bad)
+	}
 	return c, err
 }
 
 func (c Config) names() github.Names {
-	return github.Names{Trunk: c.Trunk, Label: c.Label, First: c.First, Hold: c.Hold, Status: c.Status, Admit: c.Admit, Threads: c.Threads}
+	n := github.Names{Trunk: c.Trunk, Label: c.Label, First: c.First, Hold: c.Hold, Status: c.Status, Admit: c.Admit, Threads: c.Threads,
+		Message: c.Message == "description"}
+	if c.Reword != "" {
+		n.Reword = regexp.MustCompile(c.Reword)
+	}
+	return n
 }
 
 func (c Config) dials() queue.Config {

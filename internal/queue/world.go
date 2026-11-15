@@ -39,8 +39,11 @@ type PR struct {
 	Head   SHA
 	// Branch is the head branch as GitHub's own merge commits name it, owner/branch.
 	Branch string
-	Queued time.Time
-	First  bool
+	// Message is its title and description, where its merge says them rather than GitHub's
+	// first line.
+	Message string
+	Queued  time.Time
+	First   bool
 	// Wait is why the pull request is not ready to join the chain, empty when it is: a hold
 	// label, a draft, a base that is not the trunk, a review thread left open.
 	Wait   string

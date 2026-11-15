@@ -42,6 +42,8 @@ type hub struct {
 
 type pull struct {
 	number   int
+	title    string
+	body     string
 	heads    []string
 	labels   map[string]time.Time
 	events   []labelEvent
@@ -108,7 +110,7 @@ func (h *hub) node(p *pull) map[string]any {
 	for _, sha := range p.heads {
 		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha, "", 100)}})
 	}
-	return map[string]any{"number": p.number, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base,
+	return map[string]any{"number": p.number, "title": p.title, "body": p.body, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base,
 		"headRefName": fmt.Sprintf("pr%d", p.number), "headRepositoryOwner": map[string]any{"login": "o"},
 		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": h.timeline(p, 50, ""),
 		"reviewThreads": map[string]any{"totalCount": len(p.threads) + p.unread, "nodes": threads}, "commits": map[string]any{"nodes": commits}}
@@ -1494,5 +1496,79 @@ func TestAProbeCarriesTheJobsThatFailedInTheRedBuild(t *testing.T) {
 	}
 	if probes == 0 {
 		t.Fatalf("no probe of the red candidate was pushed\n%s", w.log)
+	}
+}
+
+func TestAMergeSaysTheTitleAndDescriptionWhereTheQueueCarriesThem(t *testing.T) {
+	w := newWorld(t, `{"message": "description", "reword": "example\\.com/session/\\w+"}`)
+	said := w.queue(1, "a", "1\n")
+	said.title, said.body = "A title  ", "It quotes the queue: \r\nBanyan-Try: 9\r\nMerges #9\r\n\r\nCard: one\r\n"
+	skips := w.queue(2, "b", "2\n")
+	skips.title = "A quick fix [Skip CI]"
+	links := w.queue(3, "c", "3\n")
+	links.title, links.body = "Another", "From https://example.com/session/abc123"
+	w.rounds(4)
+
+	if got, want := gittest.Sh(t, w.o.Bare, "git", "show", "--no-patch", "--format=%B", "main"), "A title\n\nIt quotes the queue:\nBanyan-Try: 9\nMerges #9\n\nCard: one\n\nMerges #1"; !w.landed(1) || got != want {
+		t.Errorf("#1 landed %v, and the trunk's tip says:\n%s\nwant:\n%s\n%s", w.landed(1), got, want, w.log)
+	}
+	for p, held := range map[*pull]string{skips: `"[Skip CI]"`, links: `"example.com/session/abc123"`} {
+		want := "waits: its title or description holds " + held + "; reword it"
+		if s := w.last(p.heads[0], "merge-queue"); s.State != "pending" || s.Description != want || !w.queued(p.number) {
+			t.Errorf("#%d says %q, %q, and should wait in place saying %q", p.number, s.State, s.Description, want)
+		}
+	}
+
+	skips.title, links.body = "A quick fix", ""
+	w.rounds(4)
+	if !w.landed(2) || !w.landed(3) {
+		t.Errorf("reworded, #2 landed %v and #3 landed %v\n%s", w.landed(2), w.landed(3), w.log)
+	}
+}
+
+func TestAPullRequestRewordedWhileItsRedCandidateIsTestedLandsAsItWasBuilt(t *testing.T) {
+	tested := func(reword bool) (built int, says string) {
+		w := newWorld(t, `{"message": "description", "slots": 2}`)
+		failed := false
+		w.red = func(sha string) bool {
+			flake := !failed && w.o.Holds(sha, "a")
+			failed = failed || flake
+			return flake
+		}
+		p := w.queue(1, "a", "1\n")
+		p.title = "As queued"
+		w.round()
+		if reword {
+			p.title = "As reworded since"
+		}
+		w.rounds(5)
+		if !w.landed(1) || len(p.comments) != 0 {
+			t.Errorf("reworded %v, #1 landed %v with comments %+v\n%s", reword, w.landed(1), p.comments, w.log)
+		}
+		return len(w.built), gittest.Sh(t, w.o.Bare, "git", "show", "--no-patch", "--format=%B", "main")
+	}
+	plain, _ := tested(false)
+	if built, says := tested(true); built != plain || !strings.HasPrefix(says, "As queued\n\n") {
+		t.Errorf("reworded, CI built %d commits and the trunk says %q; left alone it built %d", built, says, plain)
+	}
+}
+
+func TestAPatternThatMatchesNoWordsStillKeepsAPullRequestOut(t *testing.T) {
+	w := newWorld(t, `{"message": "description", "reword": "^|secret"}`)
+	p := w.queue(1, "a", "1\n")
+	p.title = "A secret"
+	w.rounds(3)
+	if s := w.last(p.heads[0], "merge-queue"); w.landed(1) || s.Description != `waits: its title or description matches "^|secret"; reword it` {
+		t.Errorf("#1 landed %v saying %q", w.landed(1), s.Description)
+	}
+}
+
+func TestASettingTheQueueCannotReadStopsItBeforeItTicks(t *testing.T) {
+	for config, want := range map[string]string{`{"message": "title"}`: "message", `{"reword": "("}`: "reword"} {
+		path := t.TempDir() + "/merge-queue.json"
+		os.WriteFile(path, []byte(config), 0o644)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s loads with %v, and should be refused for its %s", config, err, want)
+		}
 	}
 }

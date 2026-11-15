@@ -11,10 +11,12 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/basecamp/banyan/internal/queue"
 )
@@ -260,6 +262,45 @@ type Names struct {
 	Status  string   // the queue's own context
 	Admit   []string // the contexts a head must pass before it joins the chain
 	Threads bool     // whether an unresolved review thread keeps it out
+	// Message says a merge carries the pull request's title and description, and Reword is
+	// what neither may then hold.
+	Message bool
+	Reword  *regexp.Regexp
+}
+
+// skips is what a commit message tells GitHub Actions, Buildkite and their like to build
+// nothing for: a candidate that said it would wait for a verdict that never comes.
+var skips = regexp.MustCompile(`(?i)\[(skip|no) ci\]|\[ci skip\]|\[skip actions\]|\[actions skip\]|skip-checks: ?true`)
+
+// unfit says what in a message keeps its pull request out, and nothing where it may be said.
+func (n Names) unfit(message string) string {
+	for _, refused := range []*regexp.Regexp{skips, n.Reword} {
+		if refused == nil {
+			continue
+		}
+		if at := refused.FindStringIndex(message); at != nil && at[1] > at[0] {
+			return fmt.Sprintf("holds %.40q", message[at[0]:at[1]])
+		} else if at != nil {
+			return fmt.Sprintf("matches %.40q", refused.String())
+		}
+	}
+	return ""
+}
+
+// message is a title and description as a commit says them: no carriage return, no control
+// character git or a terminal would choke on, nothing trailing a line or the whole.
+func message(title, description string) string {
+	lines := strings.Split(strings.ReplaceAll(title+"\n\n"+description, "\r\n", "\n"), "\n")
+	for i, l := range lines {
+		l = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) && r != '\t' {
+				return -1
+			}
+			return r
+		}, l)
+		lines[i] = strings.TrimRight(l, " \t")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // Pull is a pull request the queue knows, open or merged.
@@ -285,6 +326,8 @@ type pullTimeline struct {
 
 type pullNode struct {
 	Number        int
+	Title         string
+	Body          string
 	IsDraft       bool
 	Merged        bool
 	BaseRefName   string
@@ -310,7 +353,7 @@ type pullNode struct {
 const timelineFields = `pageInfo { hasPreviousPage startCursor } nodes {
 	... on LabeledEvent { createdAt label { name } } }`
 
-const pullFields = `number isDraft merged baseRefName headRefOid headRefName headRepositoryOwner { login }
+const pullFields = `number title body isDraft merged baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 100) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { ` + timelineFields + ` }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
@@ -348,6 +391,11 @@ func (n Names) pull(node pullNode) Pull {
 		p.Note = said.Description
 	}
 	p.Checks, p.Gate = Verdict(p.Statuses, n.Admit)
+	unfit := ""
+	if n.Message {
+		p.Message = message(node.Title, node.Body)
+		unfit = n.unfit(p.Message)
+	}
 	switch open := 0; {
 	case labels[n.Hold]:
 		p.Wait = "it is labelled " + n.Hold
@@ -355,6 +403,8 @@ func (n Names) pull(node pullNode) Pull {
 		p.Wait = "it is a draft"
 	case node.BaseRefName != n.Trunk:
 		p.Wait = "its base is " + node.BaseRefName + ", not " + n.Trunk
+	case unfit != "":
+		p.Wait = "its title or description " + unfit + "; reword it"
 	case n.Threads:
 		for _, t := range node.ReviewThreads.Nodes {
 			if !t.IsResolved {

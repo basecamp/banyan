@@ -34,24 +34,32 @@ type Repo struct {
 
 	commits map[string]commit
 	made    map[string]queue.SHA
+	said    map[merged]string
+}
+
+// merged is a pull request at the head a commit of the queue's merged.
+type merged struct {
+	number int
+	head   queue.SHA
 }
 
 type commit struct {
 	parents  []string
 	tree     string
 	date     string
-	subject  string
-	merges   int  // the pull request it merges, by its last line
-	trailer  bool // an older release wrote the number as a Banyan-Merges trailer instead
+	says     string // its message above the last paragraph, which is the queue's own to write
+	merges   int    // the pull request it merges, by its last line
+	trailer  bool   // an older release wrote the number as a Banyan-Merges trailer instead
 	trailers map[string]string
 }
 
-func (r *Repo) git(args ...string) (string, error) { return r.dated("", args...) }
+func (r *Repo) git(args ...string) (string, error) { return r.run("", "", args...) }
 
-// dated runs git with the queue's identity, and with date as the time of any commit it makes.
-func (r *Repo) dated(date string, args ...string) (string, error) {
+// run runs git with the queue's identity, with date as the time of any commit it makes, and
+// with input to read.
+func (r *Repo) run(date, input string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
-	cmd.Dir = r.Dir
+	cmd.Dir, cmd.Stdin = r.Dir, strings.NewReader(input)
 	// Nothing of the machine's own configuration may change a merge or a commit.
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME="+r.Name, "GIT_AUTHOR_EMAIL="+r.Email, "GIT_COMMITTER_NAME="+r.Name, "GIT_COMMITTER_EMAIL="+r.Email,
@@ -110,19 +118,25 @@ func (r *Repo) read(sha string) (commit, error) {
 	if err != nil {
 		return commit{}, err
 	}
-	lines := strings.Split(out, "\n")
+	lines := strings.SplitN(out, "\n", 4)
 	c := commit{tree: lines[0], date: lines[1], parents: strings.Fields(lines[2]), trailers: map[string]string{}}
 	if len(lines) > 3 {
-		c.subject = lines[3]
+		c.says = lines[3]
 	}
-	if len(lines) > 4 {
-		if rest, ok := strings.CutPrefix(lines[len(lines)-1], "Merges #"); ok {
+	// Only the last paragraph is read as the queue's, so a description that quotes a trailer
+	// or a merge line is never taken for one.
+	var own []string
+	if at := strings.LastIndex(c.says, "\n\n"); at >= 0 {
+		c.says, own = c.says[:at], strings.Split(c.says[at+2:], "\n")
+	}
+	if len(own) > 0 {
+		if rest, ok := strings.CutPrefix(own[len(own)-1], "Merges #"); ok {
 			if n, err := strconv.Atoi(rest); err == nil && n > 0 && strconv.Itoa(n) == rest {
 				c.merges = n
 			}
 		}
 	}
-	for _, l := range lines[3:] {
+	for _, l := range own {
 		if k, v, ok := strings.Cut(l, ": "); ok && strings.HasPrefix(k, "Banyan-") {
 			c.trailers[k] = v
 		}
@@ -145,7 +159,7 @@ func (r *Repo) commitTree(tree string, parents []string, message string) (queue.
 		return sha, nil
 	}
 	date := ""
-	args := []string{"-c", "commit.gpgsign=false", "commit-tree", tree, "-m", message}
+	args := []string{"-c", "commit.gpgsign=false", "commit-tree", tree, "-F", "-"}
 	for _, p := range parents {
 		c, err := r.read(p)
 		if err != nil {
@@ -156,7 +170,9 @@ func (r *Repo) commitTree(tree string, parents []string, message string) (queue.
 		}
 		args = append(args, "-p", p)
 	}
-	sha, err := r.dated(date, args...)
+	// The message is read rather than passed, since a description may be longer than one
+	// argument may be.
+	sha, err := r.run(date, message+"\n", args...)
 	if err != nil {
 		return "", err
 	}
@@ -167,17 +183,26 @@ func (r *Repo) commitTree(tree string, parents []string, message string) (queue.
 	return sha, nil
 }
 
-// subject is the first line of a merge, which is GitHub's own where the branch is known, so
-// a history the queue wrote reads like one the merge button wrote.
-func subject(pr queue.PR) string {
+// says is what a merge says above the queue's own last paragraph. A commit the queue still
+// holds that merges this head has the say, so a title or description edited since changes no
+// commit the queue names. Else it is the pull request's own words where the queue carries
+// them, and GitHub's first line where the branch is known, so a history the queue wrote reads
+// like one the merge button wrote.
+func (r *Repo) says(pr queue.PR) string {
+	if said := r.said[merged{pr.Number, pr.Head}]; said != "" {
+		return said
+	}
+	if pr.Message != "" {
+		return pr.Message
+	}
 	if pr.Branch == "" {
 		return fmt.Sprintf("Merge #%d", pr.Number)
 	}
 	return fmt.Sprintf("Merge pull request #%d from %s", pr.Number, pr.Branch)
 }
 
-func message(subject string, number int, note string) string {
-	s := subject + "\n"
+func message(says string, number int, note string) string {
+	s := says + "\n"
 	if note != "" {
 		s += "\n" + note
 	}
@@ -195,7 +220,7 @@ func (r *Repo) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, boo
 	if errors.As(err, &exit) && exit.ExitCode() == 1 && tree != "" {
 		return "", false
 	}
-	return r.must(r.commitTree(r.must(tree, err), []string{parent, pr.Head}, message(subject(pr), pr.Number, note))), true
+	return r.must(r.commitTree(r.must(tree, err), []string{parent, pr.Head}, message(r.says(pr), pr.Number, note))), true
 }
 
 func (r *Repo) must(out string, err error) string {
@@ -231,6 +256,7 @@ func (r *Repo) Builds(trunk queue.SHA) ([]queue.Build, error) {
 		return nil, err
 	}
 	var builds []queue.Build
+	r.said = map[merged]string{}
 	for _, line := range strings.Split(out, "\n") {
 		sha, name, _ := strings.Cut(line, " ")
 		if sha == "" || !strings.HasSuffix(name, "/"+sha[:12]) {
@@ -259,10 +285,11 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 	case top.trailers["Banyan-Check"] != "":
 		b.Kind, at = queue.Check, top.parents[0]
 	case top.trailers["Banyan-Try"] != "" && top.merges > 0 && len(top.parents) == 2:
+		r.keep(top)
 		// A later try of a merge: the chain knows it by the merge that carries no try.
-		said := message(top.subject, top.merges, "")
+		said := message(top.says, top.merges, "")
 		if top.trailer {
-			said = fmt.Sprintf("%s\n\nBanyan-Merges: %d", top.subject, top.merges)
+			said = fmt.Sprintf("%s\n\nBanyan-Merges: %d", top.says, top.merges)
 		}
 		plain, err := r.commitTree(top.tree, top.parents, said)
 		if err != nil {
@@ -281,11 +308,19 @@ func (r *Repo) build(sha, trunk queue.SHA) (queue.Build, error) {
 		if c.merges == 0 || len(c.parents) != 2 {
 			break
 		}
+		r.keep(c)
 		b.Chain = append([]queue.Member{{Number: c.merges, Head: c.parents[1], Merge: at}}, b.Chain...)
 		at = c.parents[0]
 	}
 	b.Base = at
 	return b, nil
+}
+
+// keep notes what a merge the queue holds says, for the next merge of that head to say.
+func (r *Repo) keep(c commit) {
+	if of := (merged{c.merges, c.parents[1]}); r.said[of] == "" {
+		r.said[of] = c.says
+	}
 }
 
 // Holds says whether the trunk at this tip already holds the commit.

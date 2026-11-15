@@ -74,7 +74,11 @@ A push to a queued pull request keeps it queued. The label says to land the pull
 
 Every ejection is a comment that names the head judged, the cause and the builds it rests on, with the marker `<!-- <status> eject <head> attributed=<cause> -->`. It begins "`<name>` took this pull request out of the queue (cause: `<cause>`), judging its head `<head>`:", which other tools may read. An ejection takes off the queue's label and the label that put the pull request first.
 
-A merge commit's message ends with the line `Merges #<number>`, and the queue reads a build's chain back from those lines.
+A merge commit's message ends with the line `Merges #<number>`, and the queue reads a build's chain back from those lines. Above it the merge says GitHub's own first line, `Merge pull request #<number> from <branch>`. With `message` set to `description` it says the pull request's title and description instead, as GitHub's own setting for merge commits does, for a history that is read for them.
+
+- **Only the last paragraph is the queue's.** The queue reads its trailers and the `Merges` line from the message's last paragraph, which it always writes itself. A description that quotes either is never taken for one.
+- **A merge keeps the words it was built with.** While the queue holds a commit that merges a head, every later merge of that head says what that commit says. So a title or description edited while its candidate builds changes no commit the queue names, and takes effect once the queue holds none.
+- **Some words keep a pull request out.** A title or description that holds a marker CI skips a commit for, such as `[skip ci]`, would leave its candidate with no verdict. The pull request waits and says so until it is reworded. `reword` is a pattern for whatever else a repository's history must not hold.
 
 ## No commit is built twice
 

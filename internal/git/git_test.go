@@ -319,3 +319,102 @@ func TestAMergeEndsWithWhatItMergesAndMarksCarryNone(t *testing.T) {
 		}
 	}
 }
+
+func TestAMergeIsReadBackByItsLastParagraphWhateverItsDescriptionQuotes(t *testing.T) {
+	o := newOrigin(t)
+	a := o.pr(12, "a", "a\n")
+	a.Message = "A title\n\nIt quotes the queue:\n\nBanyan-Probe-Of: abc\nBanyan-Try: 9\nMerges #99"
+	trunk := o.fetch()
+
+	plain, _ := o.Repo.Merge(trunk, a, "")
+	if got, want := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", plain), a.Message+"\n\nMerges #12"; got != want {
+		t.Errorf("plain merge message:\n%s\nwant:\n%s", got, want)
+	}
+	retry, _ := o.Repo.Merge(trunk, a, "Banyan-Try: 2")
+	for _, sha := range []queue.SHA{plain, retry} {
+		if err := o.Repo.Push(sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.fetch()
+	builds, err := o.Repo.Builds(trunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := []queue.Member{{Number: 12, Head: a.Head, Merge: plain}}
+	for _, b := range builds {
+		if w := (queue.Build{SHA: b.SHA, Kind: queue.Candidate, Base: trunk, Chain: chain}); fmt.Sprint(b) != fmt.Sprint(w) {
+			t.Errorf("read back\n %+v\nwant\n %+v", b, w)
+		}
+	}
+	if len(builds) != 2 {
+		t.Errorf("read back %d builds, want the merge and its second try", len(builds))
+	}
+}
+
+func TestAMergeTheQueueHoldsKeepsItsWordsWhenThePullRequestIsReworded(t *testing.T) {
+	o := newOrigin(t)
+	a := o.pr(1, "a", "a\n")
+	a.Message = "As queued"
+	trunk := o.fetch()
+	first, _ := o.Repo.Merge(trunk, a, "")
+	if err := o.Repo.Push(first); err != nil {
+		t.Fatal(err)
+	}
+
+	later := func() {
+		o.Repo = &Repo{Dir: o.Clone, Remote: "origin", Trunk: "main", Lane: "merge-queue", Name: "Banyan", Email: "banyan@example.com"}
+		o.fetch()
+		if _, err := o.Repo.Builds(trunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later()
+	a.Message = "As reworded since"
+	if again, _ := o.Repo.Merge(trunk, a, ""); again != first {
+		t.Errorf("merged again as %s, which says %q, while the queue holds %s", again, gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", again), first)
+	}
+	try, _ := o.Repo.Merge(trunk, a, "Banyan-Try: 2")
+	if got, want := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", try), "As queued\n\nBanyan-Try: 2\nMerges #1"; got != want {
+		t.Errorf("its second try says:\n%s\nwant:\n%s", got, want)
+	}
+	if err := o.Repo.Push(try); err != nil {
+		t.Fatal(err)
+	}
+	o.fetch()
+	builds, err := o.Repo.Builds(trunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range builds {
+		if b.Tests() != first {
+			t.Errorf("%s is read back as a build of %s, and both are builds of %s", b.SHA, b.Tests(), first)
+		}
+	}
+
+	// The same queue, reading again once it holds no merge of the head, says the new words.
+	for _, sha := range []queue.SHA{first, try} {
+		if err := o.Repo.Delete(sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.fetch()
+	if _, err := o.Repo.Builds(trunk); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := o.Repo.Merge(trunk, a, "")
+	if got, want := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", fresh), "As reworded since\n\nMerges #1"; got != want {
+		t.Errorf("with no merge of it held, it says:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestADescriptionLongerThanAnArgumentMayBeIsSaidWhole(t *testing.T) {
+	o := newOrigin(t)
+	a := o.pr(1, "a", "a\n")
+	a.Message = "A title\n\n" + strings.TrimSpace(strings.Repeat("words and more words\n", 12000))
+	trunk := o.fetch()
+	merge, ok := o.Repo.Merge(trunk, a, "")
+	if got := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", merge); !ok || got != a.Message+"\n\nMerges #1" {
+		t.Errorf("merged %v, saying %d bytes of the %d queued", ok, len(got), len(a.Message))
+	}
+}
