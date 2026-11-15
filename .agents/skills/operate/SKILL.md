@@ -39,7 +39,7 @@ A surprise from a real queue becomes a case in `eval/cases/` before its fix. The
 
 Do these in order, and prove each before the next.
 
-1. **CI builds every `merge-queue/**` branch whole** and reports one commit status, `merge-queue/build` unless `build` names others. Push a branch there by hand and watch the status arrive.
+1. **CI builds every `merge-queue/**` branch whole** and reports one commit status, `merge-queue/build` unless `build` names others. Push a branch there by hand and watch the status arrive. The queue itself reads only branches named `merge-queue/<trunk>/<sha12>`. With `keep` set, one pushed by hand under that name at the trunk's tip is marked and stands at least `keep` before the queue deletes it; at an older trunk commit it goes as a candidate beneath the tip does.
 2. **No branch is named `merge-queue` itself.** Git can't hold it beside the queue's branches, and every push is refused while it exists.
 3. **The tick's identity** can push to the trunk and to `merge-queue/**`, write statuses, comments and labels, and change workflow files if pull requests do. Where the trunk requires pull requests, that identity bypasses the rule and nobody else does. Where the trunk requires a status, CI posts it on the queue's builds too, or that identity bypasses it: GitHub takes a push of one merge on its pull request's statuses, and refuses a push of two.
 4. **The tick runs one at a time,** on a schedule and when: one of the queue's labels goes on or comes off, the trunk moves, a build begins or reports, and a status in `admit` reports. GitHub runs a five-minute schedule every six to fifteen, so the events carry the queue and the schedule only catches what they miss.

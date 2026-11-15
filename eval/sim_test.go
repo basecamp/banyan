@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"slices"
@@ -14,7 +15,13 @@ import (
 // One world of each shape runs to its end without breaking an invariant.
 func TestOneWorldOfEachShape(t *testing.T) {
 	for _, shape := range append([]Shape{storm}, shapes...) {
-		for _, cfg := range append(configs(shape), named{"probes", dials(3, 6, true)}) {
+		runs := append(configs(shape), named{"probes", dials(3, 6, true)})
+		if shape.Name == shapes[0].Name {
+			kept := dials(3, 1, false)
+			kept.Keep = 6 * time.Minute
+			runs = append(runs, named{"keep", kept})
+		}
+		for _, cfg := range runs {
 			if cfg.Slots == 0 {
 				continue
 			}
@@ -285,5 +292,214 @@ func TestTheSimulatorReadsABuildAgainstTheTrunkAsGitDoes(t *testing.T) {
 	s = NewSim(shapes[0], dials(5, 2, false), 1)
 	if base, numbers := chain(s, 1); base != "trunk0" || len(numbers) != 2 {
 		t.Errorf("stacked beside what landed, the build reads on %.7s holding %v, where it stands on the old trunk holding both", base, numbers)
+	}
+}
+
+func TestKeepSimRetainsBuildsUntilExpiry(t *testing.T) {
+	cfg := dials(1, 1, false)
+	cfg.Keep = 5 * time.Minute
+	s := NewSim(Shape{Build: time.Minute, Backlog: 1}, cfg, 1)
+	s.Step()
+	s.Step()
+	if s.Landed != 1 || len(s.builds) != 1 {
+		t.Fatalf("landing: landed=%d builds=%d", s.Landed, len(s.builds))
+	}
+	for _, b := range s.builds {
+		if len(s.World().Builds) != 1 || s.World().Builds[0].Landed.IsZero() {
+			t.Fatal("landing mark not read")
+		}
+		if !b.Landed.Equal(s.epoch.Add(s.now)) {
+			t.Fatal("landing did not record its own time")
+		}
+	}
+	s.Step()
+	s.Step()
+	if len(s.builds) != 1 {
+		t.Fatal("deleted inside keep")
+	}
+	s.Step()
+	if len(s.builds) != 0 {
+		t.Fatal("did not delete at keep")
+	}
+	if len(s.Broken) != 0 {
+		t.Fatal(s.Broken)
+	}
+}
+
+func TestKeepSimDoesNotCountKeptBranchesAsOverload(t *testing.T) {
+	cfg := dials(1, 1, false)
+	cfg.Keep = time.Hour
+	s := NewSim(Shape{}, cfg, 1)
+	for i := range 301 {
+		sha := fmt.Sprint(i)
+		s.trunks[sha] = true
+		s.builds[sha] = &simBuild{Build: queue.Build{SHA: sha, Verdict: queue.Success, Landed: s.epoch}}
+	}
+	if s.overloaded() {
+		t.Fatal("kept branches counted as overload")
+	}
+	if !s.idle() {
+		t.Fatal("marked branches prevented idle")
+	}
+	for _, verdict := range []queue.Verdict{queue.Pending, queue.Success} {
+		for _, b := range s.builds {
+			b.Verdict, b.Landed = verdict, time.Time{}
+		}
+		if !s.overloaded() {
+			t.Fatalf("verdict=%d: landed branches without marks escaped overload count", verdict)
+		}
+		keptOverload, keptIdle := s.overloaded(), s.idle()
+		s.cfg.Keep = 0
+		if keptOverload != s.overloaded() || keptIdle != s.idle() {
+			t.Fatalf("verdict=%d: landed branches without marks changed overload or idle", verdict)
+		}
+		s.cfg.Keep = cfg.Keep
+	}
+}
+
+func TestKeepSimMarksLowerOnlyOnceItsVerdictIsIn(t *testing.T) {
+	for _, cancels := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancels), func(t *testing.T) {
+			cfg := queue.Config{Slots: 2, MaxBatch: 1, Keep: time.Hour}
+			s := NewSim(Shape{Cancels: cancels, Queue: []Queued{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}}, Build: tick, Takes: []time.Duration{10 * tick, tick}}, cfg, 1)
+			s.Step()
+			first := ""
+			for sha, b := range s.builds {
+				if len(b.Chain) == 1 {
+					first = sha
+				}
+			}
+			if first == "" {
+				t.Fatal("no lower candidate")
+			}
+			for n := 0; n < 5 && s.Landed < 2; n++ {
+				s.Step()
+			}
+			if len(s.Broken) != 0 || s.Landed != 2 {
+				t.Fatalf("landed=%d broken=%v", s.Landed, s.Broken)
+			}
+			w := s.World()
+			pending := 0
+			for _, b := range w.Builds {
+				if b.Kind == queue.Candidate && b.Verdict == queue.Pending {
+					pending++
+				}
+			}
+			if pending != cfg.Slots {
+				t.Fatalf("pending candidates = %d, want %d", pending, cfg.Slots)
+			}
+			lower := s.builds[first]
+			if (lower == nil) != cancels {
+				t.Fatalf("cancels=%v lower=%+v", cancels, lower)
+			}
+			if lower != nil {
+				if lower.Verdict != queue.Pending || !lower.Landed.IsZero() || !s.trunks[first] {
+					t.Fatalf("lower build is not landed and pending: %+v", lower)
+				}
+				read := func() queue.Build {
+					t.Helper()
+					for _, b := range s.World().Builds {
+						if b.SHA == first {
+							return b
+						}
+					}
+					t.Fatal("lower branch missing from world")
+					return queue.Build{}
+				}
+				if b := read(); b.Verdict != queue.Pending || !b.Landed.IsZero() {
+					t.Fatalf("pending lower was marked: %+v", b)
+				}
+				lower.Verdict = queue.Failure
+				if b := read(); !b.Landed.Equal(s.epoch.Add(s.now)) || b.Verdict != queue.Failure {
+					t.Fatalf("answered lower was not marked: %+v", b)
+				}
+				if msg := checkKeep(s.World(), cfg, queue.Plan(s.World(), cfg)); msg != "" {
+					t.Fatal(msg)
+				}
+			}
+		})
+	}
+}
+
+func TestKeepSimCatchesEarlyAndLateDeletion(t *testing.T) {
+	for _, cm := range keepMutants()[:2] {
+		t.Run(cm.name, func(t *testing.T) {
+			cfg := dials(1, 1, false)
+			cfg.Keep = 6 * time.Minute
+			s := NewSim(Shape{Build: tick, Backlog: 1}, cfg, 1)
+			s.plan = cm.mutant.plan
+			s.Run()
+			rule := "keep retention:"
+			if strings.HasPrefix(cm.name, "never") {
+				rule = "keep expiry:"
+			}
+			if !slices.ContainsFunc(s.Broken, func(msg string) bool { return strings.HasPrefix(msg, rule) }) {
+				t.Fatalf("mutant broke %v, want %s", s.Broken, rule)
+			}
+			t.Logf("%v", s.Broken)
+		})
+	}
+}
+
+func TestKeepSimCrashBeforeMarkIsRepaired(t *testing.T) {
+	cfg := dials(1, 1, false)
+	cfg.Keep = 5 * time.Minute
+	s := NewSim(Shape{Build: time.Minute, Backlog: 1}, cfg, 1)
+	s.Step()
+	var sha string
+	for _, b := range s.builds {
+		sha = b.SHA
+		b.Verdict = queue.Success
+	}
+	s.now += time.Minute
+	s.crashAfterPush = true
+	for _, a := range queue.Plan(s.World(), cfg) {
+		if a.Do == "land" {
+			s.apply(a)
+		}
+	}
+	if !s.trunks[sha] || !s.builds[sha].Landed.IsZero() {
+		t.Fatal("crash did not fall before mark")
+	}
+	if !s.kept() {
+		t.Fatal("run can end with an unmarked landing")
+	}
+	s.now += time.Minute
+	s.World()
+	if !s.builds[sha].Landed.Equal(s.epoch.Add(s.now)) {
+		t.Fatal("next read did not mark")
+	}
+}
+
+func TestKeepSimCrashMarksLandingBeforeALaterAction(t *testing.T) {
+	continued := false
+	for seed := int64(1); seed <= 20; seed++ {
+		cfg := dials(1, 1, false)
+		cfg.Keep = 5 * time.Minute
+		s := NewSim(Shape{Build: time.Minute, Backlog: 1}, cfg, seed)
+		s.Step()
+		var sha queue.SHA
+		for _, b := range s.builds {
+			sha, b.Verdict = b.SHA, queue.Success
+		}
+		s.shape.Crash = 1
+		s.plan = func(w queue.World, c queue.Config) []queue.Action {
+			for _, a := range queue.Plan(w, c) {
+				if a.Do == "land" {
+					return []queue.Action{a, {Do: "note", PR: 1, Text: "after landing"}}
+				}
+			}
+			return nil
+		}
+		s.tick()
+		if s.prs[1].Note == "after landing" {
+			continued = true
+			if s.builds[sha].Landed.IsZero() {
+				t.Fatal("landing left unmarked though the crashed tick continued")
+			}
+		}
+	}
+	if !continued {
+		t.Fatal("no crash continued past the landing")
 	}
 }

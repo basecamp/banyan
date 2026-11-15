@@ -1793,3 +1793,571 @@ func TestARedCandidatesFailedJobsComeOnlyFromTheConfiguredApp(t *testing.T) {
 		t.Errorf("red candidate Failed = %v, want [unit]", r.World.Builds[0].Failed)
 	}
 }
+
+func TestKeepConfig(t *testing.T) {
+	for _, value := range []string{"bad", "-1s", "0s", "3m", ""} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "queue.json")
+			if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"keep":%q}`, value)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			bad := value == "bad" || value == "-1s"
+			if bad {
+				if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "keep") {
+					t.Fatalf("Load = %v, want file and keep refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, _ := time.ParseDuration(value)
+			if c.dials().Keep != want || New(c, "", "", "").Git.Keep != (want > 0) {
+				t.Fatalf("keep %q not wired to queue and git: %+v", value, c.dials())
+			}
+		})
+	}
+}
+
+// The Keep tests exercise the forge handler in memory, without a listener or wall time.
+type keepTransport struct{ h http.Handler }
+
+func (tr keepTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	tr.h.ServeHTTP(rec, req)
+	return rec.Result(), nil
+}
+func newKeepWorld(t *testing.T, config string) *world {
+	o := gittest.New(t)
+	h := &hub{t: t, o: o, now: time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC), pulls: map[int]*pull{}, statuses: map[string][]status{}}
+	path := filepath.Join(o.Clone, "queue.json")
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Repo = "o/r"
+	w := &world{hub: h, log: &bytes.Buffer{}, red: func(string) bool { return false }}
+	w.q = New(c, o.Clone, "https://hub.example", "")
+	w.q.Hub.HTTP = &http.Client{Transport: keepTransport{h}}
+	w.q.Now, w.q.Log = func() time.Time { return h.now }, w.log
+	w.q.Hub.Wait = func(d time.Duration) { w.waited = append(w.waited, d) }
+	return w
+}
+
+func keepTick(t *testing.T, w *world) {
+	t.Helper()
+	if err := w.q.Tick(); err != nil {
+		t.Fatalf("tick: %v\n%s", err, w.log)
+	}
+}
+
+func keepRead(t *testing.T, w *world) *Read {
+	t.Helper()
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func keepStack(t *testing.T, w *world) (queue.Build, queue.Build) {
+	t.Helper()
+	w.queue(1, "a", "a\n")
+	w.queue(2, "b", "b\n")
+	keepTick(t, w)
+	r := keepRead(t, w)
+	if len(r.World.Builds) != 2 {
+		t.Fatalf("builds = %+v", r.World.Builds)
+	}
+	a, b := r.World.Builds[0], r.World.Builds[1]
+	if len(a.Chain) > len(b.Chain) {
+		a, b = b, a
+	}
+	return a, b
+}
+
+func keepLand(t *testing.T, w *world, sha string) {
+	t.Helper()
+	r := keepRead(t, w)
+	for _, a := range queue.Plan(r.World, w.q.dials()) {
+		if a.Do == "land" && a.SHA == sha {
+			if err := w.q.land(a); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Fatalf("no landing for %s", sha)
+}
+
+func TestKeepReadAndTickAfterStackedLanding(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":2,"max_batch":1}`)
+	lower, upper := keepStack(t, w)
+	for _, b := range []queue.Build{lower, upper} {
+		w.check(b.SHA, "merge-queue/build", "success", w.now, 7)
+	}
+	w.now = w.now.Add(time.Minute)
+	keepLand(t, w, upper.SHA)
+	topMark := w.now
+	if w.last(lower.SHA, w.q.Status).State != "pending" {
+		t.Fatal("landing marked the lower candidate before the next read")
+	}
+	w.now = w.now.Add(time.Minute)
+	r := keepRead(t, w)
+	lowerMark := w.now
+	if len(r.World.Builds) != 2 {
+		t.Fatalf("both branches must stand: %+v", r.World.Builds)
+	}
+	for _, b := range r.World.Builds {
+		want := topMark
+		if b.SHA == lower.SHA {
+			want = lowerMark
+			if !b.Pushed.Equal(lower.Pushed) {
+				t.Fatalf("first marked read lost push time: %+v", b)
+			}
+		}
+		if !b.Landed.Equal(want) || w.last(b.SHA, w.q.Status).Description != "landed" {
+			t.Fatalf("mark = %+v, want %s", b, want)
+		}
+	}
+	w.log.Reset()
+	keepTick(t, w)
+	if strings.Contains(w.log.String(), `"do":`) {
+		t.Fatalf("unchanged tick acted: %s", w.log)
+	}
+	w.now = topMark.Add(3*time.Minute - time.Nanosecond)
+	keepTick(t, w)
+	if len(w.o.Branches("merge-queue/")) != 2 {
+		t.Fatal("branch deleted early")
+	}
+	w.now = topMark.Add(3 * time.Minute)
+	keepTick(t, w)
+	branches := w.o.Branches("merge-queue/")
+	if len(branches) != 1 || branches["refs/heads/merge-queue/main/"+lower.SHA[:12]] != lower.SHA {
+		t.Fatalf("only lower should stand: %v", branches)
+	}
+	w.now = lowerMark.Add(3 * time.Minute)
+	keepTick(t, w)
+	keepTick(t, w)
+	if len(w.o.Branches("merge-queue/")) != 0 {
+		t.Fatal("branches outlived marks plus keep")
+	}
+	for _, b := range []queue.Build{lower, upper} {
+		if n := strings.Count(w.log.String(), `"do":"delete","sha":"`+b.SHA+`"`); n != 1 {
+			t.Fatalf("%s deleted %d times: %s", b.SHA, n, w.log)
+		}
+	}
+}
+
+func TestKeepLowerCandidateWaitsOnlyForItsVerdict(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":2,"build":["one","two"],"cancels":false}`)
+			lower, upper := keepStack(t, w)
+			w.q.Slots = 1
+			w.queue(3, "c", "c\n")
+			for _, name := range []string{"one", "two"} {
+				w.check(upper.SHA, name, "success", w.now, 7)
+				w.check(lower.SHA, name, "in_progress", w.now, 7)
+			}
+			if partial {
+				w.check(lower.SHA, "one", "failure", w.now, 7)
+			}
+			w.now = w.now.Add(time.Minute)
+			keepTick(t, w)
+			r := keepRead(t, w)
+			marked := w.now
+			if !partial {
+				if len(r.World.Builds) != 2 || w.last(lower.SHA, w.q.Status).State != "pending" {
+					t.Fatalf("running build deleted or another candidate pushed: %+v", r.World.Builds)
+				}
+				for _, b := range r.World.Builds {
+					if b.SHA == lower.SHA && (b.Verdict != queue.Pending || !b.Landed.IsZero()) {
+						t.Fatalf("running lower = %+v, want pending and unmarked", b)
+					}
+				}
+				w.now = w.now.Add(2 * time.Minute)
+				for _, name := range []string{"one", "two"} {
+					w.check(lower.SHA, name, "success", w.now, 7)
+				}
+				r = keepRead(t, w)
+				marked = w.now
+			}
+			found := false
+			for _, b := range r.World.Builds {
+				if b.SHA == lower.SHA {
+					found = true
+					if !b.Landed.Equal(marked) {
+						t.Fatalf("lower verdict did not mark at read: %+v", b)
+					}
+					if partial && b.Verdict != queue.Failure {
+						t.Fatalf("failed context lost its verdict: %+v", b)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("lower branch disappeared")
+			}
+			keepTick(t, w)
+			r = keepRead(t, w)
+			if !slices.ContainsFunc(r.World.Builds, func(b queue.Build) bool { return b.SHA != lower.SHA && b.SHA != upper.SHA }) {
+				t.Fatal("finished lower did not free its slot")
+			}
+			w.now = marked.Add(3*time.Minute - time.Nanosecond)
+			keepTick(t, w)
+			if w.o.Branches("merge-queue/")["refs/heads/merge-queue/main/"+lower.SHA[:12]] == "" {
+				t.Fatal("lower deleted before keep")
+			}
+			w.now = marked.Add(3 * time.Minute)
+			keepTick(t, w)
+			if w.o.Branches("merge-queue/")["refs/heads/merge-queue/main/"+lower.SHA[:12]] != "" {
+				t.Fatal("lower outlived keep")
+			}
+		})
+	}
+}
+
+func TestKeepCheckRunLandingDeletesOnceAfterItsMark(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7}`)
+	w.queue(1, "a", "a\n")
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var sha string
+	for _, head := range w.o.Branches("merge-queue/") {
+		sha = head
+	}
+	if sha == "" {
+		t.Fatal("no candidate")
+	}
+	started := w.now
+	w.now = w.now.Add(5 * time.Minute)
+	completed := w.now
+	w.check(sha, "merge-queue/build", "success", started, 7)
+	w.now = w.now.Add(time.Minute)
+	tick := func() {
+		t.Helper()
+		if err := w.q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tick()
+	if !w.o.Landed(w.pulls[1].heads[0]) {
+		t.Fatalf("check-run candidate did not land: %s", w.log)
+	}
+	marked := w.now
+	if !marked.After(completed) {
+		t.Fatal("the mark should come after the check run completed")
+	}
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.World.Builds) != 1 || !r.World.Builds[0].Landed.Equal(marked) {
+		t.Fatalf("landed check run = %+v", r.World.Builds)
+	}
+	w.log.Reset()
+	for _, now := range []time.Time{w.now, marked.Add(3*time.Minute - time.Nanosecond)} {
+		w.now = now
+		tick()
+		if len(w.o.Branches("merge-queue/")) != 1 {
+			t.Fatal("branch deleted before its mark plus keep")
+		}
+	}
+	w.now = marked.Add(3 * time.Minute)
+	tick()
+	if len(w.o.Branches("merge-queue/")) != 0 {
+		t.Fatal("branch survived its mark plus keep")
+	}
+	tick()
+	if got := strings.Count(w.log.String(), `"do":"delete"`); got != 1 {
+		t.Fatalf("delete count = %d, want one: %s", got, w.log)
+	}
+}
+
+func TestKeepATrunkBuildOfALandedCommitPreservesItsMark(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":1}`)
+	w.queue(1, "a", "a\n")
+	tick := func() {
+		t.Helper()
+		if err := w.q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tick()
+	var landed string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		landed = sha
+	}
+	w.check(landed, "merge-queue/build", "success", w.now, 7)
+	w.now = w.now.Add(time.Minute)
+	tick()
+	if !w.o.Landed(w.pulls[1].heads[0]) {
+		t.Fatalf("the candidate did not land: %s", w.log)
+	}
+	marked := w.now
+	w.now = w.now.Add(time.Minute)
+	w.check(landed, "merge-queue/build", "in_progress", w.now, 7)
+	w.queue(2, "b", "b\n")
+	tick()
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept, next int
+	for _, b := range r.World.Builds {
+		switch {
+		case string(b.SHA) == landed:
+			kept++
+			if b.Verdict != queue.Pending || !b.Landed.Equal(marked) {
+				t.Fatalf("the landed commit under the trunk's own build = %+v, want pending and landed at its mark %v", b, marked)
+			}
+		default:
+			next++
+		}
+	}
+	if kept != 1 || next != 1 {
+		t.Fatalf("with one slot, the trunk's build of the landed commit held it: %d kept, %d new candidates: %s", kept, next, w.log)
+	}
+	w.now = marked.Add(3 * time.Minute)
+	tick()
+	for _, sha := range w.o.Branches("merge-queue/") {
+		if sha == landed {
+			t.Fatal("the landed commit's branch outlived its mark plus keep while the trunk's build ran")
+		}
+	}
+}
+
+func TestKeepReadRepairsACrashBeforeTheLandingMark(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":2}`)
+	_, upper := keepStack(t, w)
+	w.check(upper.SHA, "merge-queue/build", "success", w.now, 7)
+	r := keepRead(t, w)
+	failed := false
+	w.intercept = func(out http.ResponseWriter, req *http.Request) bool {
+		if req.Method == "POST" && req.URL.Path == "/repos/o/r/statuses/"+upper.SHA && !failed {
+			body, _ := io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			var st struct{ Description string }
+			if err := json.Unmarshal(body, &st); err != nil {
+				t.Fatal(err)
+			}
+			if st.Description == "landed" {
+				failed = true
+				out.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprint(out, `{"message":"crash before mark"}`)
+				return true
+			}
+		}
+		return false
+	}
+	for _, a := range queue.Plan(r.World, w.q.dials()) {
+		if a.Do == "land" {
+			if err := w.q.land(a); err == nil {
+				t.Fatal("landing mark did not fail")
+			}
+		}
+	}
+	if !failed || !w.o.Landed(w.pulls[2].heads[0]) || w.last(upper.SHA, w.q.Status).State != "pending" {
+		t.Fatal("did not crash between push and mark")
+	}
+	w.now = w.now.Add(time.Minute)
+	r = keepRead(t, w)
+	for _, b := range r.World.Builds {
+		if b.SHA == upper.SHA {
+			if !b.Landed.Equal(w.now) || !b.Pushed.Equal(upper.Pushed) || w.last(b.SHA, w.q.Status).Description != "landed" {
+				t.Fatalf("crash repair = %+v", b)
+			}
+			return
+		}
+	}
+	t.Fatal("crashed landing lost its branch")
+}
+
+func TestKeepReadRepairsLandingWhileTrunksBuildRuns(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":1,"build":["one","two"]}`)
+	w.queue(1, "a", "a\n")
+	keepTick(t, w)
+	upper := keepRead(t, w).World.Builds[0]
+	for _, name := range []string{"one", "two"} {
+		w.check(upper.SHA, name, "success", w.now, 7)
+	}
+	r := keepRead(t, w)
+	failed := false
+	w.intercept = func(out http.ResponseWriter, req *http.Request) bool {
+		if req.Method == "POST" && req.URL.Path == "/repos/o/r/statuses/"+upper.SHA && !failed {
+			body, _ := io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			var st struct{ Description string }
+			if err := json.Unmarshal(body, &st); err != nil {
+				t.Fatal(err)
+			}
+			if st.Description == "landed" {
+				failed = true
+				out.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprint(out, `{"message":"crash before mark"}`)
+				return true
+			}
+		}
+		return false
+	}
+	for _, a := range queue.Plan(r.World, w.q.dials()) {
+		if a.Do == "land" {
+			if err := w.q.land(a); err == nil {
+				t.Fatal("landing mark did not fail")
+			}
+		}
+	}
+	if !failed || !w.o.Landed(w.pulls[1].heads[0]) || w.last(upper.SHA, w.q.Status).State != "pending" {
+		t.Fatal("did not crash between push and mark")
+	}
+	w.now = w.now.Add(time.Minute)
+	for _, name := range []string{"one", "two"} {
+		w.check(upper.SHA, name, "in_progress", w.now, 7)
+	}
+	r = keepRead(t, w)
+	marked := w.now
+	for _, b := range r.World.Builds {
+		if b.SHA == upper.SHA {
+			if !b.Landed.Equal(w.now) || !b.Pushed.Equal(upper.Pushed) || w.last(b.SHA, w.q.Status).Description != "landed" {
+				t.Fatalf("crash repair = %+v", b)
+			}
+			break
+		}
+	}
+	if !slices.ContainsFunc(r.World.Builds, func(b queue.Build) bool { return b.SHA == upper.SHA && b.Landed.Equal(marked) }) {
+		t.Fatal("crashed landing lost its mark")
+	}
+	w.queue(2, "b", "b\n")
+	keepTick(t, w)
+	if len(keepRead(t, w).World.Builds) != 2 {
+		t.Fatal("repaired landing held the only slot")
+	}
+	w.now = marked.Add(3*time.Minute - time.Nanosecond)
+	keepTick(t, w)
+	branch := "refs/heads/merge-queue/main/" + upper.SHA[:12]
+	if w.o.Branches("merge-queue/")[branch] != upper.SHA {
+		t.Fatal("branch deleted before mark plus keep")
+	}
+	w.now = marked.Add(3 * time.Minute)
+	keepTick(t, w)
+	keepTick(t, w)
+	if w.o.Branches("merge-queue/")[branch] != "" || strings.Count(w.log.String(), `"do":"delete","sha":"`+upper.SHA+`"`) != 1 {
+		t.Fatalf("branch must go once at mark plus keep: %s", w.log)
+	}
+}
+
+func TestKeepReadMarksOnlyCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kind  queue.Kind
+		retry bool
+	}{
+		{"probe", queue.Probe, false},
+		{"check", queue.Check, false},
+		{"round whole build", queue.Candidate, false},
+		{"retry candidate", queue.Candidate, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kind := tc.kind
+			w := newKeepWorld(t, `{"keep":"3m","app":7,"probe":"probe"}`)
+			p := w.queue(1, "a", "a\n")
+			trunk, _, err := w.q.Git.Fetch([]int{1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sha, _ := w.q.Git.Merge(trunk, queue.PR{Number: 1, Head: p.heads[0]}, "")
+			note := ""
+			if kind == queue.Candidate && !tc.retry {
+				note = "Banyan-Round: 1\nBanyan-Of: red"
+			}
+			if kind == queue.Probe {
+				note += "\nBanyan-Probe-Of: red"
+			}
+			if kind == queue.Check {
+				note += "\nBanyan-Check: whole"
+			}
+			if tc.retry {
+				sha, _ = w.q.Git.Merge(trunk, queue.PR{Number: 1, Head: p.heads[0]}, "Banyan-Try: 2")
+			} else {
+				sha = w.q.Git.Mark(sha, note)
+			}
+			if err := w.q.Git.Push(sha); err != nil {
+				t.Fatal(err)
+			}
+			w.set(sha, w.q.Status, "pending")
+			w.check(sha, "merge-queue/build", "success", w.now, 7)
+			w.check(sha, "probe", "success", w.now, 7)
+			if err := w.q.Git.Land(sha); err != nil {
+				t.Fatal(err)
+			}
+			r := keepRead(t, w)
+			if len(r.World.Builds) != 1 {
+				t.Fatalf("builds: %+v", r.World.Builds)
+			}
+			b := r.World.Builds[0]
+			if tc.retry {
+				if b.Kind != queue.Candidate || b.Round != 0 || !b.Landed.Equal(w.now) || w.last(sha, w.q.Status).State != "success" {
+					t.Fatalf("retry candidate not marked: %+v", b)
+				}
+			} else if !b.Landed.IsZero() || w.last(sha, w.q.Status).State != "pending" {
+				t.Fatalf("round build marked: %+v", b)
+			}
+		})
+	}
+}
+
+func TestKeepDryReadWritesNoLandingMark(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":2}`)
+	_, upper := keepStack(t, w)
+	w.check(upper.SHA, "merge-queue/build", "success", w.now, 7)
+	if err := w.q.Git.Land(upper.SHA); err != nil {
+		t.Fatal(err)
+	}
+	w.q.DryRun = true
+	keepTick(t, w)
+	if w.last(upper.SHA, w.q.Status).State != "pending" {
+		t.Fatal("dry run wrote landed status")
+	}
+	w.q.DryRun = false
+	r := keepRead(t, w)
+	if !slices.ContainsFunc(r.World.Builds, func(b queue.Build) bool { return b.SHA == upper.SHA && b.Landed.Equal(w.now) }) {
+		t.Fatal("real read did not mark the candidate")
+	}
+}
+
+func TestKeepReadDoesNotWaitForAnAbsentContext(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":2,"build":["one","two"]}`)
+	lower, upper := keepStack(t, w)
+	w.check(lower.SHA, "one", "failure", w.now, 7)
+	for _, name := range []string{"one", "two"} {
+		w.check(upper.SHA, name, "success", w.now, 7)
+	}
+	keepLand(t, w, upper.SHA)
+	w.now = w.now.Add(time.Minute)
+	r := keepRead(t, w)
+	for _, b := range r.World.Builds {
+		if b.SHA == lower.SHA {
+			if b.Verdict != queue.Failure || !b.Landed.Equal(w.now) {
+				t.Fatalf("absent context delayed marking: %+v", b)
+			}
+			return
+		}
+	}
+	t.Fatal("lower branch gone")
+}
+
+func TestKeepCancelsRunningLowerCandidateAtOnce(t *testing.T) {
+	w := newKeepWorld(t, `{"keep":"3m","app":7,"slots":2,"cancels":true}`)
+	lower, upper := keepStack(t, w)
+	w.check(lower.SHA, "merge-queue/build", "in_progress", w.now, 7)
+	w.check(upper.SHA, "merge-queue/build", "success", w.now, 7)
+	keepTick(t, w)
+	if w.o.Branches("merge-queue/")["refs/heads/merge-queue/main/"+lower.SHA[:12]] != "" || w.last(lower.SHA, w.q.Status).State != "pending" {
+		t.Fatal("running lower was marked or retained where CI cancels")
+	}
+}

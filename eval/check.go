@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -101,6 +102,61 @@ func checkStill(acts []queue.Action) string {
 	return ""
 }
 
+func checkKeep(w queue.World, c queue.Config, acts []queue.Action) string {
+	if c.Keep <= 0 {
+		return ""
+	}
+	without := w
+	without.Builds = nil
+	landed, due := map[queue.SHA]bool{}, map[queue.SHA]bool{}
+	for _, b := range w.Builds {
+		if b.Landed.IsZero() {
+			without.Builds = append(without.Builds, b)
+			continue
+		}
+		landed[b.SHA] = true
+		if w.Now.Sub(b.Landed) >= c.Keep {
+			due[b.SHA] = true
+		}
+	}
+	var rest []queue.Action
+	for _, a := range acts {
+		if a.Do == "delete" && landed[a.SHA] {
+			if !due[a.SHA] {
+				return fmt.Sprintf("keep inertness: unexpected delete of landed build %.12s", a.SHA)
+			}
+			delete(due, a.SHA)
+		} else {
+			rest = append(rest, a)
+		}
+	}
+	if len(due) > 0 {
+		var shas []string
+		for sha := range due {
+			shas = append(shas, sha)
+		}
+		slices.Sort(shas)
+		return fmt.Sprintf("keep inertness: missing due deletes %v", shas)
+	}
+	unset := c
+	unset.Keep = 0
+	want := queue.Plan(without, unset)
+	equal := func(a, b []queue.Action) bool {
+		return slices.EqualFunc(a, b, func(a, b queue.Action) bool { return reflect.DeepEqual(a, b) })
+	}
+	if !equal(rest, want) {
+		format := func(acts []queue.Action) []string {
+			var out []string
+			for _, a := range acts {
+				out = append(out, formatAction(a))
+			}
+			return out
+		}
+		return fmt.Sprintf("keep inertness: actions %v, want %v with marked builds removed and keep unset", format(rest), format(want))
+	}
+	return ""
+}
+
 func checkPush(seen bool, sha queue.SHA) string {
 	if seen {
 		return brokeMsg(7, "%.12s was pushed for a second build", sha)
@@ -178,6 +234,7 @@ const (
 	stepLost
 	stepRecheck
 	stepTimeout
+	stepKeep
 	stepTrunkRed
 	stepTrunkGreen
 	stepSync
@@ -202,6 +259,7 @@ var stepNames = [...]string{
 	stepLost:       "ci lost",
 	stepRecheck:    "time recheck",
 	stepTimeout:    "time timeout",
+	stepKeep:       "time keep",
 	stepTrunkRed:   "trunk red",
 	stepTrunkGreen: "trunk green",
 	stepSync:       "hub sync",
@@ -265,20 +323,22 @@ type checkCommit struct {
 }
 
 type checker struct {
-	world   checkWorld
-	plan    func(queue.World, queue.Config) []queue.Action
-	verify  func(queue.World, queue.Action) error
-	commits map[queue.SHA]checkCommit
-	settled map[string]string
+	world       checkWorld
+	plan        func(queue.World, queue.Config) []queue.Action
+	verify      func(queue.World, queue.Action) error
+	commits     map[queue.SHA]checkCommit
+	markRunning bool
+	settled     map[string]string
 }
 
 func newChecker(w checkWorld, m mutant) *checker {
 	return &checker{
-		world:   w,
-		plan:    m.plan,
-		verify:  m.verify,
-		commits: map[queue.SHA]checkCommit{"trunk0": {}},
-		settled: map[string]string{},
+		world:       w,
+		markRunning: m.markRunning,
+		plan:        m.plan,
+		verify:      m.verify,
+		commits:     map[queue.SHA]checkCommit{"trunk0": {}},
+		settled:     map[string]string{},
 	}
 }
 
@@ -424,7 +484,7 @@ type pushedBuild struct {
 	sha                                           queue.SHA
 	branch, marked, begun, flaked, lost, redTrunk bool
 	verdict                                       queue.Verdict
-	pushed, started, past                         uint16
+	pushed, started, landed, past                 uint16
 }
 
 type worldState struct {
@@ -432,7 +492,7 @@ type worldState struct {
 	outsideGen, episodes, nextOrder                                                                  uint8
 	trunkRed, flaked, crashed                                                                        bool
 	flakesLeft, lostLeft, timeoutsLeft, episodesLeft, movesLeft, outsideLeft, crashesLeft, staleLeft uint8
-	nextSeq, rechecked, timedOut                                                                     uint16
+	nextSeq, rechecked, timedOut, kept                                                               uint16
 	pulls                                                                                            []pullRequest
 	builds                                                                                           []pushedBuild
 	seen                                                                                             []queue.SHA
@@ -534,26 +594,32 @@ func cut(pushes []uint16, seq uint16) uint16 {
 	return uint16(idx)
 }
 
-func (s *worldState) clockRanks() (qRank, pRank, sRank, pushes []uint16) {
+func (s *worldState) clockRanks() (qRank, pRank, sRank, aRank, pushes, marks []uint16) {
 	qo := make([]uint16, len(s.pulls))
 	for i, p := range s.pulls {
 		if p.queued {
 			qo[i] = uint16(p.order)
 		}
 	}
-	events := make([]uint16, 2*len(s.builds))
+	events := make([]uint16, 3*len(s.builds))
 	for i, b := range s.builds {
 		if b.branch {
 			events[i] = b.pushed
 			pushes = append(pushes, b.pushed)
+			if b.landed > 0 {
+				events[2*len(s.builds)+i] = b.landed
+				marks = append(marks, b.landed)
+			}
 			if b.begun {
 				events[len(s.builds)+i] = b.started
 			}
 		}
 	}
 	slices.Sort(pushes)
+	slices.Sort(marks)
 	er := rank(events)
-	return rank(qo), er[:len(s.builds)], er[len(s.builds):], pushes
+	n := len(s.builds)
+	return rank(qo), er[:n], er[n : 2*n], er[2*n:], pushes, marks
 }
 
 func packFlags(bits ...bool) byte {
@@ -566,10 +632,11 @@ func packFlags(bits ...bool) byte {
 	return b
 }
 
-// key identifies a state up to queue order, the order of build pushes and starts, and elapsed rechecks and timeouts.
+// key identifies a state up to queue order, the order of build pushes, starts and marks,
+// and elapsed rechecks, timeouts and keeps.
 func (s *worldState) key() string {
 	s.sort()
-	qRank, pRank, sRank, pushes := s.clockRanks()
+	qRank, pRank, sRank, aRank, pushes, marks := s.clockRanks()
 	var buf []byte
 	buf = append(buf, s.trunk...)
 	buf = append(buf, 0, s.outsideGen)
@@ -577,6 +644,7 @@ func (s *worldState) key() string {
 	buf = append(buf, flags, s.episodes, s.flakesLeft, s.lostLeft, s.timeoutsLeft, s.episodesLeft, s.movesLeft, s.outsideLeft, s.crashesLeft, s.staleLeft)
 	buf = binary.AppendUvarint(buf, uint64(cut(pushes, s.rechecked)))
 	buf = binary.AppendUvarint(buf, uint64(cut(pushes, s.timedOut)))
+	buf = binary.AppendUvarint(buf, uint64(cut(marks, s.kept)))
 	buf = append(buf, byte(len(s.pulls)))
 	for i, p := range s.pulls {
 		pf := packFlags(p.queued, p.first, p.hold, p.merged, p.conflict, p.commented)
@@ -591,6 +659,7 @@ func (s *worldState) key() string {
 		buf = binary.AppendUvarint(buf, uint64(cut(pushes, b.past)))
 		buf = binary.AppendUvarint(buf, uint64(pRank[i]))
 		buf = binary.AppendUvarint(buf, uint64(sRank[i]))
+		buf = binary.AppendUvarint(buf, uint64(aRank[i]))
 		buf = append(buf, b.sha...)
 		buf = append(buf, 0)
 	}
@@ -640,6 +709,9 @@ func (c *checker) buildTimes(s *worldState, pushSeqs []uint16) (x []time.Duratio
 		if b.begun && !c.world.Silent {
 			events = append(events, b.started)
 		}
+		if b.landed > 0 {
+			events = append(events, b.landed)
+		}
 	}
 	sort.Slice(pushes, func(i, j int) bool { return pushes[i].pushed < pushes[j].pushed })
 	slices.Sort(events)
@@ -656,9 +728,9 @@ func (c *checker) buildTimes(s *worldState, pushSeqs []uint16) (x []time.Duratio
 	}
 	q[k] = m
 
-	recheck, timeout := c.world.Config.Recheck, c.world.Config.Timeout
+	recheck, timeout, keep := c.world.Config.Recheck, c.world.Config.Timeout, c.world.Config.Keep
 	step := time.Second
-	for _, d := range []time.Duration{recheck, timeout, timeout - recheck, recheck - timeout} {
+	for _, d := range []time.Duration{recheck, timeout, keep, timeout - recheck, recheck - timeout, keep - recheck, recheck - keep, keep - timeout, timeout - keep} {
 		if d > 0 && time.Duration(4*(m+2))*step > d {
 			step = max(d/time.Duration(4*(m+2)), time.Nanosecond)
 		}
@@ -683,7 +755,11 @@ func (c *checker) buildTimes(s *worldState, pushSeqs []uint16) (x []time.Duratio
 				edges = append(edges, edge{q[r], q[tc-1], -(timeout + step)})
 			}
 			if tc < r {
-				edges = append(edges, edge{q[tc], q[r], timeout})
+				for j := tc; j < r; j++ {
+					if pushes[j].verdict == queue.Pending {
+						edges = append(edges, edge{q[j], q[r], timeout})
+					}
+				}
 			}
 		}
 	}
@@ -697,13 +773,26 @@ func (c *checker) buildTimes(s *worldState, pushSeqs []uint16) (x []time.Duratio
 		}
 	}
 
+	if keep > 0 {
+		for _, b := range pushes {
+			if b.landed == 0 {
+				continue
+			}
+			a := nodeOf[b.landed]
+			if b.landed <= s.kept {
+				edges = append(edges, edge{m, a, -keep})
+			} else {
+				edges = append(edges, edge{a, m, keep - step})
+			}
+		}
+	}
 	x = make([]time.Duration, m+1)
 	for pass := 0; pass <= m+1; pass++ {
 		changed := false
 		for _, e := range edges {
 			if cand := x[e.u] + e.w; cand < x[e.v] {
 				if pass == m+1 {
-					panic("infeasible clock constraints")
+					return nil, nil, 0
 				}
 				x[e.v] = cand
 				changed = true
@@ -718,7 +807,7 @@ func (c *checker) buildTimes(s *worldState, pushSeqs []uint16) (x []time.Duratio
 
 func (c *checker) read(s *worldState) (queue.World, map[int]pullRequest) {
 	s.sort()
-	qRank, _, _, pushSeqs := s.clockRanks()
+	qRank, _, _, _, pushSeqs, _ := s.clockRanks()
 	now := checkEpoch.Add(24 * time.Hour)
 
 	pulls := map[int]pullRequest{}
@@ -743,6 +832,9 @@ func (c *checker) read(s *worldState) (queue.World, map[int]pullRequest) {
 		return w, pulls
 	}
 	x, nodeOf, nowNode := c.buildTimes(s, pushSeqs)
+	if x == nil {
+		panic("infeasible clock constraints")
+	}
 	for _, b := range s.builds {
 		if !b.branch {
 			continue
@@ -750,6 +842,9 @@ func (c *checker) read(s *worldState) (queue.World, map[int]pullRequest) {
 		qb := c.build(b.sha, s.trunk)
 		qb.Verdict = b.verdict
 		qb.Pushed = now.Add(x[nodeOf[b.pushed]] - x[nowNode])
+		if b.landed > 0 {
+			qb.Landed = now.Add(x[nodeOf[b.landed]] - x[nowNode])
+		}
 		if b.begun && !c.world.Silent {
 			qb.Started = now.Add(x[nodeOf[b.started]] - x[nowNode])
 		}
@@ -849,6 +944,9 @@ func (t *checkTick) run() tickOutcome {
 			}
 		}
 		acts := t.c.plan(w, t.c.world.Config)
+		if msg := checkKeep(w, t.c.world.Config, acts); msg != "" {
+			return tickOutcome{broken: msg, reads: append(t.reads, tickRead{world: w, actions: acts})}
+		}
 		if t.trace {
 			t.reads = append(t.reads, tickRead{world: w, actions: slices.Clone(acts)})
 		}
@@ -948,6 +1046,18 @@ func (t *checkTick) read() (queue.World, map[int]pullRequest, bool) {
 			}
 		}
 	}
+	if t.c.world.Config.Keep > 0 {
+		for i := range t.state.builds {
+			b := &t.state.builds[i]
+			cm := t.c.commits[b.sha]
+			if b.branch && b.landed == 0 && cm.kind == queue.Candidate && cm.round == 0 && t.c.holds(t.state.trunk, b.sha) && (b.verdict != queue.Pending || t.c.markRunning) {
+				b.landed = t.state.nextEvent()
+				if !t.effect("read landed", 0, b.sha) {
+					return queue.World{}, nil, false
+				}
+			}
+		}
+	}
 	w, pulls := t.c.read(t.state)
 	return w, pulls, true
 }
@@ -974,6 +1084,19 @@ func (t *checkTick) push(a queue.Action) (string, bool) {
 		t.state.begin(&b)
 	}
 	t.state.builds = append(t.state.builds, b)
+	if !t.c.world.Config.Cancels {
+		running := 0
+		underTrunk := false
+		for _, live := range t.state.builds {
+			if live.branch && live.verdict == queue.Pending && live.pushed > t.state.timedOut && t.c.commits[live.sha].kind == queue.Candidate {
+				running++
+				underTrunk = underTrunk || t.c.holds(t.state.trunk, live.sha)
+			}
+		}
+		if underTrunk && running > t.c.world.Config.Slots {
+			return fmt.Sprintf("slots: %d candidates running with %d slots", running, t.c.world.Config.Slots), false
+		}
+	}
 	if !t.effect("git push", 0, a.Build.SHA) {
 		return "", true
 	}
@@ -1052,7 +1175,7 @@ func (t *checkTick) land(a queue.Action) (string, bool) {
 		return "", false
 	}
 	t.state.trunk = a.SHA
-	if idx := t.state.findBuild(a.SHA); idx >= 0 {
+	if idx := t.state.findBuild(a.SHA); idx >= 0 && t.c.world.Config.Keep <= 0 {
 		if t.state.builds[idx].marked {
 			t.state.markSeen(a.SHA)
 		}
@@ -1070,6 +1193,9 @@ func (t *checkTick) land(a queue.Action) (string, bool) {
 		return "", true
 	}
 	t.state.markSeen(a.SHA)
+	if idx := t.state.findBuild(a.SHA); idx >= 0 && t.c.world.Config.Keep > 0 {
+		t.state.builds[idx].landed = t.state.nextEvent()
+	}
 	if !t.effect("land status", 0, a.SHA) {
 		return "", true
 	}
@@ -1143,6 +1269,13 @@ func (c *checker) drain(s *worldState, trace bool) (string, []drainTickTrace) {
 			if msg := checkDrain(c.drainPulls(d), fmt.Sprintf("%d drain ticks", maxDrainTicks)); msg != "" {
 				return finish(msg)
 			}
+			if c.world.Config.Keep > 0 {
+				for _, b := range d.builds {
+					if b.branch && b.landed != 0 && c.holds(d.trunk, b.sha) {
+						return finish(fmt.Sprintf("keep expiry: landed build %.12s still stands after drain", b.sha))
+					}
+				}
+			}
 			return finish("")
 		}
 	}
@@ -1154,6 +1287,14 @@ func (c *checker) drain(s *worldState, trace bool) (string, []drainTickTrace) {
 
 func (c *checker) drainCI(d *worldState) bool {
 	changed := false
+	expire := d.kept
+	if c.world.Config.Keep > 0 {
+		for _, b := range d.builds {
+			if b.branch && b.landed != 0 && c.holds(d.trunk, b.sha) {
+				expire = max(expire, b.landed)
+			}
+		}
+	}
 	var idxs []int
 	for i := range d.builds {
 		if b := d.builds[i]; b.branch && b.verdict == queue.Pending && !b.lost {
@@ -1180,6 +1321,9 @@ func (c *checker) drainCI(d *worldState) bool {
 		}
 		changed = true
 	}
+	if changed && c.world.Config.Keep > 0 {
+		return true
+	}
 	for _, b := range d.builds {
 		if !b.branch {
 			continue
@@ -1191,6 +1335,22 @@ func (c *checker) drainCI(d *worldState) bool {
 		if c.world.Config.Recheck > 0 && b.pushed > d.rechecked {
 			d.rechecked = b.pushed
 			changed = true
+		}
+	}
+	if expire > d.kept {
+		d.kept = expire
+		changed = true
+	}
+	if c.world.Config.Keep > 0 {
+		_, _, _, _, pushes, marks := d.clockRanks()
+		for _, mark := range marks {
+			if x, _, _ := c.buildTimes(d, pushes); x != nil {
+				break
+			}
+			if mark > d.kept {
+				d.kept = mark
+				changed = true
+			}
 		}
 	}
 	return changed
@@ -1287,6 +1447,60 @@ func (c *checker) ciMoves(s *worldState) []transition {
 }
 
 func (c *checker) clockMoves(s *worldState) []transition {
+	if c.world.Config.Keep > 0 {
+		return c.keepClockMoves(s)
+	}
+	return c.baseClockMoves(s)
+}
+
+// keepClockMoves cuts keep independently of recheck. Some cuts of one clock force cuts
+// of the other; the same difference constraints used by read discard impossible pairs.
+func (c *checker) keepClockMoves(s *worldState) []transition {
+	_, _, _, _, pushes, marks := s.clockRanks()
+	rechecks, keeps := []uint16{s.rechecked}, []uint16{s.kept}
+	if c.world.Config.Recheck > 0 {
+		for _, p := range pushes {
+			if p > s.rechecked {
+				rechecks = append(rechecks, p)
+			}
+		}
+	}
+	for _, a := range marks {
+		if a > s.kept {
+			keeps = append(keeps, a)
+		}
+	}
+	seeds := append([]transition{{step: step{kind: stepKeep}, state: s}}, c.baseClockMoves(s)...)
+	var out []transition
+	seen := map[string]bool{s.key(): true}
+	for _, seed := range seeds {
+		for _, rc := range rechecks {
+			if rc < seed.state.rechecked {
+				continue
+			}
+			for _, kc := range keeps {
+				ns := seed.state.clone()
+				ns.rechecked, ns.kept = rc, kc
+				if x, _, _ := c.buildTimes(ns, pushes); x == nil {
+					continue
+				}
+				key := ns.key()
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				st := seed.step
+				if kc == s.kept && st.kind == stepKeep {
+					st.kind = stepRecheck
+				}
+				out = append(out, transition{st, ns})
+			}
+		}
+	}
+	return out
+}
+
+func (c *checker) baseClockMoves(s *worldState) []transition {
 	var out []transition
 	oldest := func(keep func(pushedBuild) bool) int {
 		best := -1
@@ -1419,6 +1633,12 @@ func explore(w checkWorld, m mutant) checkResult {
 		return checkResult{States: len(nodes), Depth: nodes[idx].depth + 1, Broken: broken, Trace: steps}
 	}
 
+	if c.world.Config.Keep > 0 {
+		w, _ := c.read(init)
+		if msg := checkKeep(w, c.world.Config, c.plan(w, c.world.Config)); msg != "" {
+			return fail(0, step{kind: stepTick}, msg)
+		}
+	}
 	if msg, _ := c.drain(init, false); msg != "" {
 		return fail(0, step{kind: stepDrain}, msg)
 	}
@@ -1436,6 +1656,14 @@ func explore(w checkWorld, m mutant) checkResult {
 		d := nodes[from].depth + 1
 		maxDepth = max(maxDepth, d)
 		nodes = append(nodes, reached{state: ns, from: from, step: st, depth: d})
+		if c.world.Config.Keep > 0 {
+			w, _ := c.read(ns)
+			if msg := checkKeep(w, c.world.Config, c.plan(w, c.world.Config)); msg != "" {
+				res := fail(len(nodes)-1, step{kind: stepTick}, msg)
+				stopped = &res
+				return false
+			}
+		}
 		if msg, _ := c.drain(ns, false); msg != "" {
 			res := fail(len(nodes)-1, step{kind: stepDrain}, msg)
 			stopped = &res
@@ -1553,6 +1781,8 @@ func defaultWorlds() []checkWorld {
 		checkWorld{"2 PRs cancels (good+breaks)", cfg2c, pulls(good, breaks), false, false, bCrash},
 	)
 
+	worlds = append(worlds, keepWorlds()...)
+
 	specs := []func(int) pullSpec{
 		func(int) pullSpec { return good },
 		func(int) pullSpec { return breaks },
@@ -1581,6 +1811,89 @@ func defaultWorlds() []checkWorld {
 		checkWorld{"4 PRs 3x2 (breaks+good*2+clash)", cfg32, pulls(breaks, good, good, clash(2)), false, false, b4},
 		checkWorld{"4 PRs probes (good+clash+good+breaks)", dials(2, 4, true), pulls(good, clash(1), good, breaks), false, false, b4},
 	)
+}
+
+func smallKeepWorlds() []checkWorld {
+	cfg := queue.Config{Slots: 1, MaxBatch: 1, Keep: 3 * time.Minute}
+	cancels, stacked := cfg, cfg
+	cancels.Cancels = true
+	stacked.Slots = 2
+	return []checkWorld{
+		{Name: "Keep whole one PR", Config: cfg, Pulls: pulls(good), Bounds: bounds{MaxStates: 10000}},
+		{Name: "Keep whole one PR cancels", Config: cancels, Pulls: pulls(good), Bounds: bounds{MaxStates: 10000}},
+		{Name: "Keep whole two stacked", Config: stacked, Pulls: pulls(good, good), Bounds: bounds{MaxStates: 10000}},
+		{Name: "Keep whole flaky retry", Config: cfg, Pulls: pulls(good), Bounds: bounds{Flakes: 1, MaxStates: 10000}},
+		{Name: "Keep whole culprit relabelled", Config: cfg, Pulls: pulls(breaks), Bounds: bounds{Moves: 1, MaxStates: 10000}},
+	}
+}
+
+func addedKeepWorlds() []checkWorld {
+	cfg := queue.Config{Slots: 1, MaxBatch: 1, Keep: 3 * time.Minute}
+	stacked := cfg
+	stacked.Slots = 2
+	long := cfg
+	long.Timeout = time.Minute
+	longStacked := long
+	longStacked.Slots = 2
+	lost := long
+	lost.Recheck = 3 * time.Minute
+	probes := stacked
+	probes.Probes = true
+	return []checkWorld{
+		{Name: "Keep whole four PRs two slots no cancelling", Config: stacked, Pulls: pulls(good, good, good, good), Bounds: bounds{MaxStates: 100000}},
+		{Name: "Keep whole lower flakes after landing", Config: stacked, Pulls: pulls(good, good), Bounds: bounds{Flakes: 1, MaxStates: 100000}},
+		{Name: "Keep whole longer than timeout", Config: long, Pulls: pulls(good, good, good), Bounds: bounds{Timeouts: 1, MaxStates: 100000}},
+		{Name: "Keep whole stacked longer than timeout", Config: longStacked, Pulls: pulls(good, good), Bounds: bounds{Timeouts: 1, MaxStates: 100000}},
+		{Name: "Keep whole error then recheck", Config: lost, Pulls: pulls(good), Bounds: bounds{Lost: 1, MaxStates: 100000}},
+		{Name: "Keep whole stacked probes", Config: probes, Pulls: pulls(good, breaks), Bounds: bounds{MaxStates: 100000}},
+		{Name: "Keep whole crash before mark", Config: cfg, Pulls: pulls(good), Bounds: bounds{Crashes: 1, MaxStates: 100000}},
+	}
+}
+
+func keepWorlds() []checkWorld {
+	worlds := append(smallKeepWorlds(), addedKeepWorlds()...)
+	cases := []struct {
+		name         string
+		slots, batch int
+		probes       bool
+		prs          []pullSpec
+	}{
+		{"serial good+good", 1, 1, false, pulls(good, good)},
+		{"stacked good+good", 3, 1, false, pulls(good, good)},
+		{"blame whole", 2, 2, false, pulls(good, breaks)},
+		{"blame probes", 2, 2, true, pulls(good, breaks)},
+	}
+	for _, tc := range cases {
+		cfg := dials(tc.slots, tc.batch, tc.probes)
+		cfg.Keep = 3 * time.Minute
+		for _, crash := range []bool{false, true} {
+			b := bounds{Flakes: 1, Lost: 1, Timeouts: 1, Episodes: 1, MaxStates: 6000}
+			if crash {
+				b = bounds{Flakes: 1, Crashes: 1, Stale: 1, MaxStates: 5000}
+			}
+			worlds = append(worlds, checkWorld{Name: fmt.Sprintf("Keep %s crashes=%v", tc.name, crash), Config: cfg, Pulls: tc.prs, Bounds: b})
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		probes bool
+		prs    []pullSpec
+		bounds bounds
+	}{
+		{"ejection then same head relabelled", true, pulls(breaks), bounds{Moves: 1, MaxStates: 6000}},
+		{"cleared round then fresh candidate passes", false, pulls(good), bounds{Flakes: 1, MaxStates: 6000}},
+		{"round ends while probe runs", true, pulls(good, breaks), bounds{Flakes: 1, MaxStates: 6000}},
+	} {
+		cfg := dials(2, 2, tc.probes)
+		cfg.Keep = 3 * time.Minute
+		worlds = append(worlds, checkWorld{Name: "Keep " + tc.name, Config: cfg, Pulls: tc.prs, Bounds: tc.bounds})
+	}
+	for _, rc := range []time.Duration{0, time.Minute, 10 * time.Minute} {
+		cfg := dials(1, 1, false)
+		cfg.Keep, cfg.Recheck = 3*time.Minute, rc
+		worlds = append(worlds, checkWorld{Name: fmt.Sprintf("Keep removal+relabel recheck=%s", rc), Config: cfg, Pulls: pulls(good, good), Bounds: bounds{Moves: 2, Crashes: 1, Stale: 1, MaxStates: 6000}})
+	}
+	return worlds
 }
 
 func deepWorlds() []checkWorld {
@@ -1716,21 +2029,28 @@ func runCheck(name string) bool {
 
 	sum := reportCheck(deepWorlds(), real)
 	ok := sum.brokenWorlds == 0
-	worlds := mutantWorlds()
-	for _, cm := range checkerMutants() {
-		_, worldName, res := firstBroken(worlds, cm.mutant)
-		if res.Broken == "" {
-			fmt.Printf("  mutant %-46s: NOT CAUGHT\n", cm.name)
-			ok = false
-			continue
+	for _, suite := range []struct {
+		worlds  []checkWorld
+		mutants []checkMutant
+	}{
+		{mutantWorlds(), checkerMutants()},
+		{keepMutantWorlds(), keepMutants()},
+	} {
+		for _, cm := range suite.mutants {
+			_, worldName, res := firstBroken(suite.worlds, cm.mutant)
+			if res.Broken == "" {
+				fmt.Printf("  mutant %-46s: NOT CAUGHT\n", cm.name)
+				ok = false
+				continue
+			}
+			fmt.Printf("  mutant %-46s: %s (%s, %d states)\n", cm.name, res.Broken, worldName, res.States)
 		}
-		fmt.Printf("  mutant %-46s: %s (%s, %d states)\n", cm.name, res.Broken, worldName, res.States)
 	}
 	return ok
 }
 
 func findWorld(name string) (checkWorld, bool) {
-	for _, list := range [][]checkWorld{deepWorlds(), mutantWorlds()} {
+	for _, list := range [][]checkWorld{deepWorlds(), mutantWorlds(), keepMutantWorlds()} {
 		for _, w := range list {
 			if w.Name == name {
 				return w, true

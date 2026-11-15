@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -416,5 +417,98 @@ func TestADescriptionLongerThanAnArgumentMayBeIsSaidWhole(t *testing.T) {
 	merge, ok := o.Repo.Merge(trunk, a, "")
 	if got := gittest.Sh(t, o.Clone, "git", "show", "--no-patch", "--format=%B", merge); !ok || got != a.Message+"\n\nMerges #1" {
 		t.Errorf("merged %v, saying %d bytes of the %d queued", ok, len(got), len(a.Message))
+	}
+}
+
+func TestKeepLandingChecksTheBranchBeforePushAndLeavesItStanding(t *testing.T) {
+	o := newOrigin(t)
+	o.Repo.Keep = true
+	a, b := o.pr(1, "a", "a\n"), o.pr(2, "b", "b\n")
+	trunk := o.fetch()
+	one, _ := o.Repo.Merge(trunk, a, "")
+	two, _ := o.Repo.Merge(one, b, "")
+	if err := o.Repo.Push(one); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Repo.Push(two); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Repo.Delete(two); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Repo.Land(two); err == nil {
+		t.Fatal("deleted branch landed with Keep")
+	}
+	if got := o.fetch(); got != trunk {
+		t.Fatal("refused landing moved trunk")
+	}
+	if err := o.Repo.Land(one); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.fetch(); got != one {
+		t.Fatal("landing did not move trunk")
+	}
+	if got := o.Branches("merge-queue/"); len(got) != 1 {
+		t.Fatalf("landed branch is gone: %v", got)
+	}
+}
+
+func TestKeepBuildReadsLandedCandidates(t *testing.T) {
+	for _, shape := range []string{"first", "later", "later past", "past", "stacked"} {
+		t.Run(shape, func(t *testing.T) {
+			o := newOrigin(t)
+			o.Repo.Keep = true
+			a, b := o.pr(1, "a", "a\n"), o.pr(2, "b", "b\n")
+			trunk := o.fetch()
+			note := ""
+			if strings.HasPrefix(shape, "later") {
+				note = "Banyan-Try: 2"
+			}
+			one, _ := o.Repo.Merge(trunk, a, note)
+			plain, _ := o.Repo.Merge(trunk, a, "")
+			if note != "" {
+				top, err := o.Repo.read(one)
+				if err != nil || top.trailers["Banyan-Try"] != "2" {
+					t.Fatalf("retry trailer = %v, error %v", top.trailers, err)
+				}
+			}
+			tip := one
+			shas := []string{one}
+			if shape == "stacked" {
+				tip, _ = o.Repo.Merge(one, b, "")
+				shas = append(shas, tip)
+			}
+			for _, sha := range shas {
+				if err := o.Repo.Push(sha); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := o.Repo.Land(tip); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(shape, "past") {
+				o.Outside("outside", "x\n")
+			}
+			tip = o.fetch()
+			builds, err := o.Repo.Builds(tip)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(builds) != len(shas) {
+				t.Fatalf("read %d builds, want %d", len(builds), len(shas))
+			}
+			for _, build := range builds {
+				want := 0
+				if strings.HasPrefix(shape, "later") {
+					want = 1
+					if !slices.Equal(build.Chain, []queue.Member{{Number: 1, Head: a.Head, Merge: plain}}) || build.Base != trunk {
+						t.Fatalf("retry chain = %+v, base = %s", build.Chain, build.Base)
+					}
+				}
+				if len(build.Chain) != want || !o.Repo.Holds(tip, build.SHA) || !o.Repo.Holds(tip, build.Base) {
+					t.Errorf("landed build read = %+v, want chain length %d and ancestry in trunk", build, want)
+				}
+			}
+		})
 	}
 }

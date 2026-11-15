@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -146,5 +148,74 @@ func TestABreakTheRecordEjectedBeforeTheWindowIsNotPlayedAgain(t *testing.T) {
 	}
 	if one := s.prs[1]; len(s.Broken) > 0 || !one.landed || len(s.Ejected) != 0 {
 		t.Errorf("#1 landed %v with ejections %v (%v), where the record ejected it and took its fix before the window began", one.landed, s.Ejected, s.Broken)
+	}
+}
+
+func TestKeepHistoryRowsAreIdentical(t *testing.T) {
+	path := t.TempDir() + "/history.json"
+	if err := os.WriteFile(path, []byte(recordedHour), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cancels := range []bool{false, true} {
+		for _, slots := range []int{1, 2, 4} {
+			cfg := dials(slots, 1, false)
+			shape := Shape{Cancels: cancels, Flake: 0.1}
+			capture := func(keep time.Duration) string {
+				t.Helper()
+				cfg.Keep = keep
+				f, err := os.CreateTemp(t.TempDir(), "rows")
+				if err != nil {
+					t.Fatal(err)
+				}
+				old := os.Stdout
+				os.Stdout = f
+				err = replayHistory(path, []queue.Config{cfg}, 10, shape, true)
+				os.Stdout = old
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Close(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(f.Name())
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(data)
+			}
+			want, got := capture(0), capture(10*time.Minute)
+			if got != want {
+				t.Fatalf("cancels=%v slots=%d: rows differ\nkeep:\n%s\nunset:\n%s", cancels, slots, got, want)
+			}
+			var tr trace
+			if err := json.Unmarshal([]byte(recordedHour), &tr); err != nil {
+				t.Fatal(err)
+			}
+			passed, fails := tr.times()
+			shape.Build, shape.Times, shape.Fails, shape.Acts = passed[0], passed, fails, tr.acts(true)
+			cfg.Keep = 10 * time.Minute
+			s := NewSim(shape, cfg, 0)
+			marked, aside := map[queue.SHA]bool{}, map[queue.SHA]bool{}
+			for s.now < tr.Window.To.Sub(tr.Window.From) && len(s.Broken) == 0 {
+				s.Step()
+				w := s.World()
+				acts := queue.Plan(w, cfg)
+				if msg := checkKeep(w, cfg, acts); msg != "" {
+					t.Fatal(msg)
+				}
+				for _, b := range w.Builds {
+					if b.Landed.IsZero() {
+						continue
+					}
+					marked[b.SHA] = true
+					if w.Now.Sub(b.Landed) < cfg.Keep && !slices.ContainsFunc(acts, func(a queue.Action) bool { return a.SHA == b.SHA || a.Build.SHA == b.SHA }) {
+						aside[b.SHA] = true
+					}
+				}
+			}
+			if len(s.Broken) != 0 || len(marked) == 0 || len(aside) == 0 {
+				t.Fatalf("cancels=%v slots=%d: marked=%d aside=%d broken=%v", cancels, slots, len(marked), len(aside), s.Broken)
+			}
+		}
 	}
 }

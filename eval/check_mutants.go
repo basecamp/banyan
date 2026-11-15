@@ -81,3 +81,51 @@ func mutantWorlds() []checkWorld {
 		{"2 PRs (good+breaks) timeouts", dials(2, 2, false), pulls(good, breaks), false, false, bounds{Timeouts: 1, MaxStates: 2000}},
 	}
 }
+
+func keepMutants() []checkMutant {
+	return []checkMutant{
+		{name: "deletes a landed build before keep", mutant: mutant{verify: queue.Verify, plan: func(w queue.World, c queue.Config) []queue.Action {
+			c.Keep = 0
+			return queue.Plan(w, c)
+		}}},
+		{name: "never deletes a marked build", mutant: mutant{verify: queue.Verify, plan: func(w queue.World, c queue.Config) []queue.Action {
+			return slices.DeleteFunc(queue.Plan(w, c), func(a queue.Action) bool {
+				return c.Keep > 0 && a.Do == "delete" && slices.ContainsFunc(w.Builds, func(b queue.Build) bool { return !b.Landed.IsZero() && b.SHA == a.SHA })
+			})
+		}}},
+		{name: "marks a running candidate under the trunk", mutant: mutant{verify: queue.Verify, plan: queue.Plan, markRunning: true}},
+		{name: "stacks on a kept landed build", mutant: mutant{verify: queue.Verify, plan: func(w queue.World, c queue.Config) []queue.Action {
+			acts := queue.Plan(w, c)
+			for _, b := range w.Builds {
+				if c.Keep <= 0 || b.Landed.IsZero() || b.SHA == w.Trunk || w.Now.Sub(b.Landed) >= c.Keep {
+					continue
+				}
+				for i, a := range acts {
+					if a.Do != "push" || a.Build.Kind != queue.Candidate {
+						continue
+					}
+					a.Build.Base, a.Build.Chain = b.SHA, slices.Clone(a.Build.Chain)
+					parent := b.SHA
+					for j, m := range a.Build.Chain {
+						pr := w.PRs[slices.IndexFunc(w.PRs, func(pr queue.PR) bool { return pr.Number == m.Number })]
+						parent, _ = w.Repo.Merge(parent, pr, "")
+						a.Build.Chain[j].Merge = parent
+					}
+					a.Build.SHA = parent
+					acts[i] = a
+				}
+				break
+			}
+			return acts
+		}}},
+	}
+}
+
+func keepMutantWorlds() []checkWorld {
+	cfg := dials(3, 1, false)
+	cfg.Keep = 3 * time.Minute
+	return append(append(smallKeepWorlds(), addedKeepWorlds()...), []checkWorld{
+		{Name: "Keep mutants stacked", Config: cfg, Pulls: pulls(good, good), Bounds: bounds{MaxStates: 2000}},
+		{Name: "Keep mutants older ancestor", Config: cfg, Pulls: pulls(good, good, hold), Bounds: bounds{Moves: 1, MaxStates: 6000}},
+	}...)
+}

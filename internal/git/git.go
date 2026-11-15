@@ -26,6 +26,7 @@ type Repo struct {
 	Lane   string // the branches the queue pushes, <Lane>/<Trunk>/<sha12>
 	Name   string // the author and committer of the queue's commits
 	Email  string
+	Keep   bool // leave a landed candidate's branch for the planner to delete
 	// Token, where set, is what git presents to GitHub over https. The machine's own
 	// credential helpers are not read, as none of its configuration is.
 	Token string
@@ -352,8 +353,21 @@ func (r *Repo) Delete(sha queue.SHA) error {
 
 // Land moves the trunk to a candidate by fast-forward and deletes the candidate's branch, in
 // one transaction that the remote refuses when the branch no longer points at the candidate.
+// With Keep the branch stays: it is compared before the push, and the remote checks nothing
+// about it, so a removal that deletes the branch in between no longer refuses the landing.
 func (r *Repo) Land(sha queue.SHA) error {
-	_, err := r.git("push", "--quiet", "--atomic", "--force-with-lease="+r.ref(sha)+":"+sha, r.Remote,
-		sha+":refs/heads/"+r.Trunk, ":"+r.ref(sha))
+	if !r.Keep {
+		_, err := r.git("push", "--quiet", "--atomic", "--force-with-lease="+r.ref(sha)+":"+sha, r.Remote,
+			sha+":refs/heads/"+r.Trunk, ":"+r.ref(sha))
+		return err
+	}
+	out, err := r.git("ls-remote", r.Remote, r.ref(sha))
+	if err != nil {
+		return err
+	}
+	if at := strings.Fields(out); len(at) != 2 || at[0] != sha {
+		return fmt.Errorf("%.12s is no longer on its branch", sha)
+	}
+	_, err = r.git("push", "--quiet", r.Remote, sha+":refs/heads/"+r.Trunk)
 	return err
 }

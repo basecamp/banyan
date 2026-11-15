@@ -311,3 +311,155 @@ func TestLiveWrongEjectionsAcrossNewHeads(t *testing.T) {
 		t.Errorf("reading the clone modified it")
 	}
 }
+
+func TestKeepLiveOmitsBuildsFirstSeenMarked(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	recs := []queue.Recording{{World: queue.World{Now: now, Trunk: "t", Builds: []queue.Build{
+		{SHA: "built", Pushed: now.Add(-10 * time.Minute), Verdict: queue.Success},
+		{SHA: "landed1", Landed: now.Add(-time.Minute), Pushed: now.Add(-time.Minute), Verdict: queue.Success},
+		{SHA: "landed2", Landed: now.Add(-time.Minute), Pushed: now.Add(-2 * time.Minute), Verdict: queue.Failure},
+		{SHA: "landed3", Landed: now, Pushed: now.Add(-3 * time.Minute), Verdict: queue.Success},
+	}}}}
+	sc, win, _ := captureLive(t, recs, "")
+	if win.build != 10*time.Minute {
+		t.Fatalf("build duration = %s, want 10m", win.build)
+	}
+	if sc.Good != 1 || sc.Flaked != 0 {
+		t.Fatalf("pre-window builds entered tallies: good=%d flaked=%d", sc.Good, sc.Flaked)
+	}
+}
+
+func TestKeepLiveCountsTheFirstVerdictUnderALandingOnce(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	b := queue.Build{SHA: "lower", Pushed: now}
+	finished := b
+	finished.Verdict, finished.Landed = queue.Success, now.Add(20*time.Minute)
+	finished.Pushed = finished.Landed
+	later := finished
+	later.Pushed = finished.Landed
+	recs := []queue.Recording{
+		{World: queue.World{Now: now, Trunk: "t", Builds: []queue.Build{b}}},
+		{World: queue.World{Now: now.Add(20 * time.Minute), Trunk: "upper", Builds: []queue.Build{finished}}},
+		{World: queue.World{Now: now.Add(21 * time.Minute), Trunk: "upper", Builds: []queue.Build{later}}},
+	}
+	sc, win, _ := captureLive(t, recs, "")
+	if win.build != 20*time.Minute || sc.Good != 1 {
+		t.Fatalf("first verdict duration=%s good=%d, want 20m and one", win.build, sc.Good)
+	}
+}
+
+func TestKeepLiveIgnoresVerdictsAfterAnUnrecordedMark(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	b := queue.Build{SHA: "b", Pushed: now}
+	recs := []queue.Recording{{World: queue.World{Now: now, Trunk: "t", Builds: []queue.Build{
+		{SHA: "reference", Pushed: now.Add(-5 * time.Minute), Verdict: queue.Success},
+	}}, Actions: []queue.Action{{Do: "push", Build: b}}}}
+	b.Landed = now.Add(20 * time.Minute)
+	b.Pushed = b.Landed
+	for minute := 21; minute <= 28; minute++ {
+		if minute == 28 {
+			b.Verdict = queue.Failure
+		}
+		recs = append(recs, queue.Recording{World: queue.World{Now: now.Add(time.Duration(minute) * time.Minute), Trunk: "b", Builds: []queue.Build{b}}})
+	}
+	sc, win, _ := captureLive(t, recs, "")
+	if win.build != 5*time.Minute || sc.Good != 1 || sc.Flaked != 0 {
+		t.Fatalf("post-mark verdict counted: duration=%s good=%d flaked=%d", win.build, sc.Good, sc.Flaked)
+	}
+	recs = append(recs, queue.Recording{World: queue.World{Now: now.Add(29 * time.Minute), Trunk: "newer", Builds: []queue.Build{b}}})
+	sc, win, _ = captureLive(t, recs, "")
+	if win.build != 5*time.Minute || sc.Good != 1 || sc.Flaked != 0 {
+		t.Fatalf("former tip verdict counted: duration=%s good=%d flaked=%d", win.build, sc.Good, sc.Flaked)
+	}
+}
+
+func TestKeepLiveCountsAnUnrecordedLowerMark(t *testing.T) {
+	for _, source := range []string{"world", "push"} {
+		t.Run(source, func(t *testing.T) {
+			now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+			at := func(m int) time.Time { return now.Add(time.Duration(m) * time.Minute) }
+			members := []queue.Member{{Number: 1, Head: "ha", Merge: "a"}, {Number: 2, Head: "hb", Merge: "b"}}
+			a := queue.Build{SHA: "a", Chain: members[:1], Pushed: now}
+			b := queue.Build{SHA: "b", Chain: members, Pushed: now, Verdict: queue.Success}
+			c := queue.Build{SHA: "c", Chain: []queue.Member{{Number: 3, Head: "hc", Merge: "c"}}, Pushed: at(6), Verdict: queue.Success}
+			first := queue.Recording{World: queue.World{Now: now, Trunk: "t"}, Actions: []queue.Action{{Do: "push", Build: b}}}
+			if source == "world" {
+				first.World.Builds = []queue.Build{a}
+			} else {
+				first.Actions = append(first.Actions, queue.Action{Do: "push", Build: a})
+			}
+			recs := []queue.Recording{
+				first,
+				{World: queue.World{Now: at(5), Trunk: "t", Builds: []queue.Build{a, b}}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: members}}},
+				{World: queue.World{Now: at(6), Trunk: "b", Builds: []queue.Build{a}}, Actions: []queue.Action{{Do: "push", Build: c}}},
+				{World: queue.World{Now: at(16), Trunk: "b", Builds: []queue.Build{a, c}}, Actions: []queue.Action{{Do: "land", SHA: "c", Members: c.Chain}}},
+			}
+			a.Verdict, a.Landed, a.Pushed = queue.Failure, at(17), at(17)
+			recs = append(recs,
+				queue.Recording{World: queue.World{Now: at(18), Trunk: "c", Builds: []queue.Build{a}}},
+				queue.Recording{World: queue.World{Now: at(19), Trunk: "c", Builds: []queue.Build{a}}},
+			)
+			if source == "push" {
+				for i := range recs {
+					recs[i].World.Builds = slices.DeleteFunc(recs[i].World.Builds, func(b queue.Build) bool {
+						return b.SHA == a.SHA && b.Landed.IsZero()
+					})
+				}
+			}
+			sc, _, _ := captureLive(t, recs, "")
+			if sc.Good != 3 || sc.Flaked != 1 {
+				t.Errorf("lower mark: good=%d flaked=%d, want 3 and 1", sc.Good, sc.Flaked)
+			}
+			durationRecs := make([]queue.Recording, len(recs))
+			for i, rec := range recs {
+				durationRecs[i].World = queue.World{Now: rec.World.Now, Trunk: rec.World.Trunk}
+				for _, build := range rec.World.Builds {
+					if build.SHA == a.SHA {
+						durationRecs[i].World.Builds = append(durationRecs[i].World.Builds, build)
+					}
+				}
+				for _, action := range rec.Actions {
+					if action.Do == "push" && action.Build.SHA == a.SHA {
+						durationRecs[i].Actions = append(durationRecs[i].Actions, action)
+					}
+				}
+			}
+			durationRecs[0].World.Builds = append(durationRecs[0].World.Builds, queue.Build{SHA: "reference", Kind: queue.Check, Of: "a", Pushed: at(-1), Verdict: queue.Success})
+			_, win, _ := captureLive(t, durationRecs, "")
+			if win.build != 17*time.Minute {
+				t.Errorf("lower mark duration=%s, want 17m from first push to mark", win.build)
+			}
+			trunk := queue.SHA("c")
+			for n := 4; n <= 50; n++ {
+				build := queue.Build{SHA: fmt.Sprintf("m%d", n), Chain: []queue.Member{{Number: n, Head: fmt.Sprintf("h%d", n), Merge: fmt.Sprintf("m%d", n)}}, Pushed: at(n * 20)}
+				recs = append(recs, queue.Recording{World: queue.World{Now: build.Pushed, Trunk: trunk}, Actions: []queue.Action{{Do: "push", Build: build}}})
+				build.Verdict = queue.Success
+				recs = append(recs, queue.Recording{World: queue.World{Now: build.Pushed.Add(10 * time.Minute), Trunk: trunk, Builds: []queue.Build{build}}, Actions: []queue.Action{{Do: "land", SHA: build.SHA, Members: build.Chain}}})
+				trunk = build.SHA
+			}
+			recs = append(recs, queue.Recording{World: queue.World{Now: at(1011), Trunk: trunk}})
+			sc, _, _ = captureLive(t, recs, "")
+			if sc.Landed != 50 || sc.Good != 50 || sc.Flaked != 1 {
+				t.Errorf("fifty landings: landed=%d good=%d flaked=%d, want 50, 50, 1", sc.Landed, sc.Good, sc.Flaked)
+			}
+		})
+	}
+}
+
+func TestKeepLiveCountsTheTopBeforeLandingOnce(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	b := queue.Build{SHA: "top", Pushed: now, Verdict: queue.Success}
+	recs := []queue.Recording{
+		{World: queue.World{Now: now, Trunk: "t"}, Actions: []queue.Action{{Do: "push", Build: b}}},
+		{World: queue.World{Now: now.Add(10 * time.Minute), Trunk: "t", Builds: []queue.Build{b}}, Actions: []queue.Action{{Do: "land", SHA: "top"}}},
+	}
+	b.Landed, b.Pushed, b.Verdict = now.Add(11*time.Minute), now.Add(11*time.Minute), queue.Failure
+	recs = append(recs,
+		queue.Recording{World: queue.World{Now: b.Landed, Trunk: "top", Builds: []queue.Build{b}}},
+		queue.Recording{World: queue.World{Now: now.Add(12 * time.Minute), Trunk: "newer", Builds: []queue.Build{b}}},
+	)
+	sc, win, _ := captureLive(t, recs, "")
+	if sc.Good != 1 || sc.Flaked != 0 || win.build != 10*time.Minute {
+		t.Fatalf("top counted again: good=%d flaked=%d duration=%s, want 1, 0, 10m", sc.Good, sc.Flaked, win.build)
+	}
+}

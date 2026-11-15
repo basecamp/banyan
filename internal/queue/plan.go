@@ -144,17 +144,27 @@ func (p *plan) drop(builds ...Build) {
 	}
 }
 
-// read sorts the builds into the red candidates set aside with their rounds, and the
-// candidates stacked on the trunk, whose longest is the chain. It deletes every branch that
-// is neither. A red candidate and its rounds stand wherever the trunk has moved to since.
+// read sets marked builds aside, then sorts the rest into red candidates with their
+// rounds and candidates stacked on the trunk, whose longest is the chain. It drops builds
+// that are neither. A red candidate and its rounds stand wherever the trunk has moved to since.
 func (p *plan) read() {
+	var builds []Build
+	for _, b := range p.w.Builds {
+		if p.c.Keep > 0 && !b.Landed.IsZero() {
+			if p.w.Now.Sub(b.Landed) >= p.c.Keep {
+				p.act(Action{Do: "delete", SHA: b.SHA})
+			}
+			continue
+		}
+		builds = append(builds, b)
+	}
 	trunk := p.w.Trunk
 	byOf := map[SHA]*red{}
 	var reds []*red
 	late := func(b Build) bool {
 		return b.Verdict == Pending && p.c.Timeout > 0 && p.w.Now.Sub(b.Pushed) > p.c.Timeout
 	}
-	for _, b := range p.w.Builds {
+	for _, b := range builds {
 		if late(b) {
 			b.Verdict, b.late = Error, true
 		}
@@ -167,7 +177,7 @@ func (p *plan) read() {
 		}
 	}
 	var stacked []Build
-	for _, b := range p.w.Builds {
+	for _, b := range builds {
 		if b.Round > 0 {
 			continue
 		}
@@ -691,7 +701,7 @@ func Verify(w World, a Action) error {
 			continue
 		}
 		rest, ok := b.above(w.Trunk)
-		if !ok || b.Kind != Candidate || b.Verdict != Success {
+		if !ok || len(rest) == 0 || b.Kind != Candidate || b.Verdict != Success {
 			return fmt.Errorf("%.12s is no passed candidate on the trunk", a.SHA)
 		}
 		for _, m := range rest {

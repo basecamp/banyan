@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -399,5 +400,694 @@ func TestCheckerMoveHead(t *testing.T) {
 	nsHeld := findMove2(sTrunkHolds1)
 	if p2 := nsHeld.pulls[1]; p2.checks != queue.Pending || p2.conflict || p2.ahead != 0 {
 		t.Fatalf("unexpected pull #2 state when trunk holds #1: %+v", p2)
+	}
+}
+
+func TestKeepCheckerRecordsMarksAndRetainsLandedBranches(t *testing.T) {
+	cfg := dials(3, 1, false)
+	cfg.Keep = 3 * time.Minute
+	c := newChecker(checkWorld{Config: cfg, Pulls: pulls(good, good)}, mutant{plan: queue.Plan, verify: queue.Verify})
+	out := (&checkTick{c: c, state: c.initState()}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	s := out.final
+	for i := range s.builds {
+		s.begin(&s.builds[i])
+		s.builds[i].verdict = queue.Success
+	}
+	w, _ := c.read(s)
+	for _, b := range w.Builds {
+		if !b.Landed.IsZero() {
+			t.Fatalf("CI wrote a landed mark: %+v", b)
+		}
+	}
+	out = (&checkTick{c: c, state: s}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	if len(out.final.builds) != 2 {
+		t.Fatalf("landing removed builds the planner did not delete: %d", len(out.final.builds))
+	}
+	final, _ := c.read(out.final)
+	for _, b := range final.Builds {
+		if b.Landed.IsZero() || !b.Landed.After(b.Pushed) {
+			t.Fatalf("landing or read did not mark: %+v", b)
+		}
+	}
+	if acts := queue.Plan(final, cfg); len(acts) != 0 {
+		t.Fatalf("kept landing acted again: %+v", acts)
+	}
+}
+
+func TestKeepCheckerCutsKeepAndRecheckIndependently(t *testing.T) {
+	for _, rc := range []time.Duration{0, time.Minute, 10 * time.Minute} {
+		t.Run(rc.String(), func(t *testing.T) {
+			cfg := dials(1, 1, false)
+			cfg.Keep, cfg.Recheck = 3*time.Minute, rc
+			c := newChecker(checkWorld{Config: cfg, Pulls: pulls(good)}, mutant{plan: queue.Plan, verify: queue.Verify})
+			s := c.initState()
+			sha := c.addCommit(s.trunk, "head1", 1, "")
+			s.builds = []pushedBuild{{sha: sha, branch: true, marked: true, pushed: s.nextEvent(), verdict: queue.Success}}
+			s.begin(&s.builds[0])
+			s.builds[0].landed = s.nextEvent()
+			s.pulls[0].queued = false
+			s.trunk = sha
+			var expired, unexpired bool
+			for _, tr := range c.clockMoves(s) {
+				w, _ := c.read(tr.state)
+				b := w.Builds[0]
+				old := w.Now.Sub(b.Landed) >= cfg.Keep
+				acts := queue.Plan(w, cfg)
+				if old {
+					expired = true
+					if len(acts) != 1 || acts[0].Do != "delete" {
+						t.Fatalf("expired cut: %+v", acts)
+					}
+				} else {
+					unexpired = true
+					if len(acts) != 0 {
+						t.Fatalf("young cut: %+v", acts)
+					}
+				}
+				unlanded := tr.state.clone()
+				unlanded.trunk = "trunk0"
+				unlanded.builds[0].landed = 0
+				u, _ := c.read(unlanded)
+				if acts := queue.Plan(u, cfg); len(acts) != 1 || acts[0].Do != "delete" {
+					t.Fatalf("unlanded build waited for keep or recheck: %+v", acts)
+				}
+				if rc > 0 && tr.state.rechecked > 0 && w.Now.Sub(b.Pushed) < rc {
+					t.Fatal("recheck cut was not honoured")
+				}
+			}
+			if !expired || rc > 0 && !unexpired {
+				t.Fatalf("missing independent cuts: expired=%v unexpired=%v", expired, unexpired)
+			}
+		})
+	}
+}
+
+func TestKeepCheckerReadMarksAndKeys(t *testing.T) {
+	cfg := dials(1, 1, false)
+	cfg.Keep = time.Minute
+	c := newChecker(checkWorld{Config: cfg, Pulls: pulls(good)}, mutant{plan: queue.Plan, verify: queue.Verify})
+	s := c.initState()
+	sha := c.addCommit(s.trunk, "head1", 1, "")
+	s.builds = []pushedBuild{{sha: sha, branch: true, marked: true, pushed: s.nextEvent()}}
+	for _, tr := range c.ciMoves(s) {
+		if tr.step.kind == stepPass {
+			tr.state.trunk = sha
+			out := (&checkTick{c: c, state: tr.state}).run()
+			if out.broken != "" || out.final.builds[0].landed == 0 {
+				t.Fatalf("read did not mark: %+v", out)
+			}
+			tr.state = out.final
+			other := tr.state.clone()
+			other.kept = other.builds[0].landed
+			if other.key() == tr.state.key() {
+				t.Fatal("keep cut missing from state key")
+			}
+			return
+		}
+	}
+	t.Fatal("no CI pass")
+}
+
+func TestKeepCheckerMutants(t *testing.T) {
+	for _, cm := range keepMutants() {
+		t.Run(cm.name, func(t *testing.T) {
+			_, name, res := firstBroken(keepMutantWorlds(), cm.mutant)
+			if !strings.HasPrefix(res.Broken, "keep inertness:") && !strings.HasPrefix(res.Broken, "slots:") {
+				t.Fatalf("mutant escaped inertness in %s: %+v", name, res)
+			}
+			t.Logf("%s: %s (%d states, %d steps)", name, res.Broken, res.States, len(res.Trace))
+		})
+	}
+}
+
+func TestKeepCheckerUnlandedLifecycles(t *testing.T) {
+	for _, event := range []string{"ejection then same head relabelled", "cleared round then fresh pass", "round ended while probe runs"} {
+		t.Run(event, func(t *testing.T) {
+			cfg := dials(1, 1, true)
+			cfg.Keep = 3 * time.Minute
+			c := newChecker(checkWorld{Config: cfg, Pulls: pulls(breaks), Bounds: bounds{Moves: 1}}, mutant{plan: queue.Plan, verify: queue.Verify})
+			if event == "cleared round then fresh pass" {
+				c.world.Pulls = pulls(good)
+			}
+			s := c.initState()
+			red := c.addCommit(s.trunk, "head1", 1, "")
+			add := func(sha string, v queue.Verdict) {
+				b := pushedBuild{sha: sha, branch: true, marked: true, pushed: s.nextEvent(), verdict: v}
+				s.begin(&b)
+				s.builds = append(s.builds, b)
+			}
+			add(red, queue.Failure)
+			for round := 1; round <= 3; round++ {
+				parent, v := red, queue.Failure
+				if round == 2 {
+					parent, v = s.trunk, queue.Success
+				}
+				note := fmt.Sprintf("Banyan-Probe-Of: %s\nBanyan-Round: %d\nBanyan-Of: %s", red, round, red)
+				if event == "cleared round then fresh pass" && round == 1 {
+					v = queue.Success
+					note = fmt.Sprintf("Banyan-Check: whole\nBanyan-Round: 1\nBanyan-Of: %s", red)
+				}
+				add(c.addCommit(parent, "", 0, note), v)
+			}
+			if event == "round ended while probe runs" {
+				add(c.addCommit(red, "", 0, fmt.Sprintf("Banyan-Probe-Of: %s\nBanyan-Round: 4\nBanyan-Of: %s", red, red)), queue.Pending)
+			}
+			c.plan = func(w queue.World, cfg queue.Config) []queue.Action {
+				acts := queue.Plan(w, cfg)
+				if !slices.ContainsFunc(w.Builds, func(b queue.Build) bool { return !b.Landed.IsZero() }) {
+					unset := cfg
+					unset.Keep = 0
+					if want := queue.Plan(w, unset); !reflect.DeepEqual(acts, want) {
+						t.Fatalf("unlanded world differs with keep: got %v want %v", acts, want)
+					}
+				}
+				return acts
+			}
+			run := func(st *worldState) tickOutcome {
+				t.Helper()
+				out := (&checkTick{c: c, state: st, trace: true}).run()
+				if out.broken != "" {
+					t.Fatal(out.broken)
+				}
+				return out
+			}
+			out := run(s)
+			s = out.final
+			for _, b := range s.builds {
+				if b.sha == red || c.commits[b.sha].round > 0 {
+					t.Fatalf("ended evidence survived: %+v", b)
+				}
+			}
+			if event != "cleared round then fresh pass" {
+				if s.pulls[0].queued {
+					t.Fatal("culprit not ejected")
+				}
+				if len(s.builds) != 0 {
+					t.Fatalf("ejected builds survived: %+v", s.builds)
+				}
+				if event == "ejection then same head relabelled" {
+					s = moveState(c.pullMoves(s), step{kind: stepRelabel, pull: 1})
+					out = run(s)
+					for _, r := range out.reads {
+						for _, a := range r.actions {
+							if a.Do == "eject" {
+								t.Fatal("old evidence ejected relabelled head")
+							}
+						}
+					}
+					if !out.final.pulls[0].queued {
+						t.Fatal("relabelled head lost its label")
+					}
+				}
+			} else {
+				if len(s.builds) != 1 {
+					t.Fatalf("missing fresh candidate: %+v", s.builds)
+				}
+				fresh := s.builds[0].sha
+				if fresh == red {
+					t.Fatal("reused old candidate")
+				}
+				s = moveState(c.ciMoves(s), step{kind: stepPass, sha: fresh})
+				out = run(s)
+				if out.final.trunk != fresh {
+					t.Fatal("fresh passed candidate did not land")
+				}
+			}
+		})
+	}
+}
+
+func TestKeepCheckerWorlds(t *testing.T) {
+	sum := checkSuite(keepWorlds(), mutant{plan: queue.Plan, verify: queue.Verify})
+	t.Logf("keep worlds: %d whole, %d capped, %d states, %d broken", sum.whole, sum.capped, sum.states, sum.brokenWorlds)
+	for _, rule := range sum.brokenInvs {
+		sample := sum.bestByInv[rule]
+		t.Errorf("%s in %s:\n%s", rule, sample.world.Name, formatTrace(sample.result))
+	}
+}
+
+func TestKeepCheckerSmallWorldsExploreWhole(t *testing.T) {
+	seen := map[string]bool{}
+	for _, w := range append(smallKeepWorlds(), addedKeepWorlds()...) {
+		seen[w.Name] = true
+		t.Run(w.Name, func(t *testing.T) {
+			res := explore(w, mutant{plan: queue.Plan, verify: queue.Verify})
+			t.Logf("%s: whole=%v states=%d depth=%d broken=%s", w.Name, !res.Capped, res.States, res.Depth, res.Broken)
+			if res.Capped || res.Broken != "" {
+				t.Fatalf("did not explore whole: %+v", res)
+			}
+		})
+	}
+	for _, name := range []string{"Keep whole longer than timeout", "Keep whole stacked longer than timeout"} {
+		if !seen[name] {
+			t.Errorf("missing timeout world %q", name)
+		}
+	}
+}
+
+func TestKeepCheckerDrainSeesLandedBuildStandThenExpire(t *testing.T) {
+	w := smallKeepWorlds()[0]
+	c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	msg, trace := c.drain(c.initState(), true)
+	if msg != "" {
+		t.Fatal(msg)
+	}
+	stood, deleted := false, false
+	for _, tick := range trace {
+		for _, r := range tick.reads {
+			for _, b := range r.world.Builds {
+				if b.Landed.IsZero() {
+					continue
+				}
+				due := r.world.Now.Sub(b.Landed) >= w.Config.Keep
+				if !due {
+					stood = true
+				}
+				for _, a := range r.actions {
+					if a.Do == "delete" && a.SHA == b.SHA {
+						if !stood || !due {
+							t.Fatalf("delete before standing through keep: %+v", r)
+						}
+						deleted = true
+					}
+				}
+			}
+		}
+	}
+	if !stood || !deleted {
+		t.Fatalf("drain stood=%v deleted=%v", stood, deleted)
+	}
+}
+
+func TestKeepCheckerSmallWorldHistories(t *testing.T) {
+	for _, w := range smallKeepWorlds() {
+		t.Run(w.Name, func(t *testing.T) {
+			c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+			s := c.initState()
+			var actions []queue.Action
+			var reads []tickRead
+			run := func() {
+				t.Helper()
+				out := (&checkTick{c: c, state: s, trace: true}).run()
+				if out.broken != "" {
+					t.Fatal(out.broken)
+				}
+				reads = append(reads, out.reads...)
+				for _, r := range out.reads {
+					actions = append(actions, r.actions...)
+				}
+				s = out.final
+			}
+			answer := func(kind stepKind, sha queue.SHA) {
+				t.Helper()
+				moves := c.ciMoves(s)
+				idx := slices.IndexFunc(moves, func(tr transition) bool { return tr.step.kind == kind && tr.step.sha == sha })
+				if idx < 0 {
+					t.Fatalf("no %v for %s", kind, sha)
+				}
+				s = moves[idx].state
+			}
+			run()
+			first := s.builds[0].sha
+			switch w.Name {
+			case "Keep whole culprit relabelled":
+				head := s.pulls[0].head(1, s.pulls[0].githubHead)
+				for n := 0; s.pulls[0].queued && n < maxDrainTicks; n++ {
+					c.drainCI(s)
+					run()
+				}
+				if s.pulls[0].queued || !slices.ContainsFunc(actions, func(a queue.Action) bool { return a.Do == "eject" && a.Cause == "culprit" }) {
+					t.Fatal("no culprit ejection")
+				}
+				s = moveState(c.pullMoves(s), step{kind: stepRelabel, pull: 1})
+				run()
+				if !s.pulls[0].queued || s.pulls[0].head(1, s.pulls[0].githubHead) != head {
+					t.Fatal("culprit was not relabelled at the same head")
+				}
+				return
+			case "Keep whole flaky retry":
+				answer(stepFlake, first)
+				run()
+				idx := slices.IndexFunc(s.builds, func(b pushedBuild) bool { return c.commits[b.sha].kind == queue.Check })
+				if idx < 0 {
+					t.Fatal("no whole check after flake")
+				}
+				answer(stepPass, s.builds[idx].sha)
+				run()
+				if len(s.builds) != 1 || s.builds[0].sha == first || c.commits[s.builds[0].sha].plain != first {
+					t.Fatalf("no fresh retry after clearing: %+v", s.builds)
+				}
+				answer(stepPass, s.builds[0].sha)
+			case "Keep whole two stacked":
+				if len(s.builds) != 2 {
+					t.Fatal("did not push two candidates")
+				}
+				idx := slices.IndexFunc(s.builds, func(b pushedBuild) bool { return c.holds(b.sha, first) && b.sha != first })
+				if idx < 0 {
+					t.Fatal("candidates did not stack")
+				}
+				answer(stepBegin, first)
+				answer(stepPass, s.builds[idx].sha)
+			default:
+				answer(stepPass, first)
+			}
+			run()
+			lands := 0
+			for _, a := range actions {
+				if a.Do == "land" {
+					lands++
+					if len(a.Members) != len(w.Pulls) {
+						t.Fatalf("landing has %d members, want %d", len(a.Members), len(w.Pulls))
+					}
+				}
+			}
+			if lands != 1 {
+				t.Fatalf("land pushes = %d, want one", lands)
+			}
+			landed := s.trunk
+			idx := s.findBuild(landed)
+			if idx < 0 || !s.builds[idx].branch || s.builds[idx].landed == 0 {
+				t.Fatal("landed build was not marked and standing")
+			}
+			mark := s.builds[idx].landed
+			run()
+			if idx = s.findBuild(landed); idx < 0 || !s.builds[idx].branch {
+				t.Fatal("landed branch disappeared before keep")
+			}
+			moves := c.clockMoves(s)
+			idx = slices.IndexFunc(moves, func(tr transition) bool { return tr.step.kind == stepKeep && tr.state.kept >= mark })
+			if idx < 0 {
+				t.Fatal("no landing expiry")
+			}
+			s = moves[idx].state
+			run()
+			run()
+			stood, deleted := false, 0
+			for _, r := range reads {
+				for _, b := range r.world.Builds {
+					if b.SHA == landed && !b.Landed.IsZero() && r.world.Now.Sub(b.Landed) < w.Config.Keep {
+						stood = true
+					}
+				}
+				for _, a := range r.actions {
+					if a.Do == "delete" && a.SHA == landed {
+						b := r.world.Builds[slices.IndexFunc(r.world.Builds, func(b queue.Build) bool { return b.SHA == landed })]
+						if !stood || r.world.Now.Sub(b.Landed) < w.Config.Keep {
+							t.Fatal("landing deleted before mark plus keep")
+						}
+						deleted++
+					}
+				}
+			}
+			if idx = s.findBuild(landed); !stood || deleted != 1 || idx >= 0 && s.builds[idx].branch {
+				t.Fatalf("landed branch stood=%v deletes=%d", stood, deleted)
+			}
+		})
+	}
+}
+
+func TestKeepCheckerLandedPendingCandidateUsesOrdinarySlot(t *testing.T) {
+	for _, cancels := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancels), func(t *testing.T) {
+			cfg := queue.Config{Slots: 2, MaxBatch: 1, Keep: 3 * time.Minute, Cancels: cancels}
+			c := newChecker(checkWorld{Config: cfg, Pulls: pulls(good, good, good, good)}, mutant{plan: queue.Plan, verify: queue.Verify})
+			out := (&checkTick{c: c, state: c.initState()}).run()
+			if out.broken != "" || len(out.final.builds) != 2 {
+				t.Fatalf("initial candidates: %+v", out)
+			}
+			s := out.final
+			lower, upper := s.builds[0].sha, s.builds[1].sha
+			if !c.holds(upper, lower) || lower == upper {
+				t.Fatal("candidates did not stack")
+			}
+			s = moveState(c.ciMoves(s), step{kind: stepBegin, sha: lower})
+			s = moveState(c.ciMoves(s), step{kind: stepPass, sha: upper})
+			witnessed := false
+			c.plan = func(w queue.World, cfg queue.Config) []queue.Action {
+				acts := queue.Plan(w, cfg)
+				if cfg.Keep <= 0 || !slices.ContainsFunc(w.Builds, func(b queue.Build) bool {
+					return b.SHA == lower && b.Landed.IsZero() && b.Verdict == queue.Pending && !b.Started.IsZero()
+				}) {
+					return acts
+				}
+				witnessed = true
+				without := w
+				without.Builds = slices.DeleteFunc(slices.Clone(w.Builds), func(b queue.Build) bool { return !b.Landed.IsZero() })
+				unset := cfg
+				unset.Keep = 0
+				if want := queue.Plan(without, unset); !reflect.DeepEqual(acts, want) {
+					t.Fatalf("got %+v, want keep unset %+v", acts, want)
+				}
+
+				return acts
+			}
+			out = (&checkTick{c: c, state: s}).run()
+			if out.broken != "" {
+				t.Fatal(out.broken)
+			}
+			if !witnessed {
+				t.Fatal("never read the running lower candidate after the upper landed")
+			}
+			w, _ := c.read(out.final)
+			running := 0
+			for _, b := range w.Builds {
+				if b.Kind == queue.Candidate && b.Verdict == queue.Pending {
+					running++
+				}
+			}
+			if running != cfg.Slots {
+				t.Fatalf("pending candidates = %d, want %d", running, cfg.Slots)
+			}
+			if held := slices.ContainsFunc(w.Builds, func(b queue.Build) bool { return b.SHA == lower }); held == cancels {
+				t.Fatalf("cancels=%v: lower candidate held=%v", cancels, held)
+			}
+		})
+	}
+}
+
+func TestKeepCheckerDrainAllowsLandedPendingBuild(t *testing.T) {
+	for _, keep := range []time.Duration{0, 3 * time.Minute} {
+		t.Run(keep.String(), func(t *testing.T) {
+			cfg := queue.Config{Slots: 2, MaxBatch: 1, Keep: keep}
+			c := newChecker(checkWorld{Config: cfg, Pulls: pulls(good, good), Bounds: bounds{Lost: 1}}, mutant{plan: queue.Plan, verify: queue.Verify})
+			out := (&checkTick{c: c, state: c.initState()}).run()
+			if out.broken != "" || len(out.final.builds) != 2 {
+				t.Fatalf("initial candidates: %+v", out)
+			}
+			s := out.final
+			lower, upper := s.builds[0].sha, s.builds[1].sha
+			s = moveState(c.ciMoves(s), step{kind: stepBegin, sha: lower})
+			s = moveState(c.ciMoves(s), step{kind: stepLost, sha: lower})
+			s = moveState(c.ciMoves(s), step{kind: stepPass, sha: upper})
+			out = (&checkTick{c: c, state: s}).run()
+			if out.broken != "" || out.final.trunk != upper {
+				t.Fatalf("stacked landing: %+v", out)
+			}
+			msg, trace := c.drain(out.final, true)
+			if msg != "" {
+				t.Fatal(msg)
+			}
+			pending := false
+			for _, tick := range trace {
+				for _, r := range tick.reads {
+					for _, b := range r.world.Builds {
+						if b.SHA == lower && b.Verdict == queue.Pending && b.Landed.IsZero() {
+							pending = true
+						}
+					}
+					for _, a := range r.actions {
+						if a.Do == "delete" && a.SHA == lower {
+							t.Fatal("drain deleted the landed pending build without a timeout")
+						}
+					}
+				}
+			}
+			if !pending {
+				t.Fatal("drain never read the pending ancestor")
+			}
+		})
+	}
+}
+
+func TestKeepCheckerLowerCanFailAfterTheStackLands(t *testing.T) {
+	w, ok := findWorld("Keep whole lower flakes after landing")
+	if !ok {
+		t.Fatal("missing world")
+	}
+	c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	out := (&checkTick{c: c, state: c.initState()}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	s := out.final
+	lower, upper := s.builds[0].sha, s.builds[1].sha
+	s = moveState(c.ciMoves(s), step{kind: stepBegin, sha: lower})
+	s = moveState(c.ciMoves(s), step{kind: stepPass, sha: upper})
+	out = (&checkTick{c: c, state: s}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	s = out.final
+	if s.trunk != upper || s.builds[s.findBuild(lower)].landed != 0 {
+		t.Fatal("lower was marked while running")
+	}
+	s = moveState(c.ciMoves(s), step{kind: stepFlake, sha: lower})
+	out = (&checkTick{c: c, state: s}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	b := out.final.builds[out.final.findBuild(lower)]
+	if b.verdict != queue.Failure || b.landed == 0 {
+		t.Fatalf("finished lower was not marked: %+v", b)
+	}
+	if msg, _ := c.drain(out.final, false); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+func TestKeepCheckerCrashBeforeMarkIsRepaired(t *testing.T) {
+	w, ok := findWorld("Keep whole crash before mark")
+	if !ok {
+		t.Fatal("missing world")
+	}
+	c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	out := (&checkTick{c: c, state: c.initState()}).run()
+	s := out.final
+	sha := s.builds[0].sha
+	s = moveState(c.ciMoves(s), step{kind: stepPass, sha: sha})
+	out = (&checkTick{c: c, state: s, crash: true}).run()
+	for _, crash := range out.crashes {
+		if crash.step.after != "git land" {
+			continue
+		}
+		b := crash.state.builds[crash.state.findBuild(sha)]
+		if b.landed != 0 {
+			t.Fatal("landing push already marked")
+		}
+		recovered := (&checkTick{c: c, state: crash.state}).run()
+		if recovered.broken != "" || recovered.final.builds[recovered.final.findBuild(sha)].landed == 0 {
+			t.Fatalf("read failed to repair: %+v", recovered)
+		}
+		if msg, _ := c.drain(recovered.final, false); msg != "" {
+			t.Fatal(msg)
+		}
+		return
+	}
+	t.Fatal("no crash between landing push and mark")
+}
+
+func TestCheckerAnsweredBuildDoesNotBoundLaterPush(t *testing.T) {
+	for _, keep := range []time.Duration{0, 3 * time.Minute} {
+		t.Run(keep.String(), func(t *testing.T) {
+			w := checkWorld{Config: queue.Config{Slots: 1, MaxBatch: 1, Keep: keep, Timeout: time.Minute, Recheck: 3 * time.Minute}, Pulls: pulls(good), Bounds: bounds{Lost: 1}}
+			c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+			s := c.initState()
+			run := func() {
+				t.Helper()
+				out := (&checkTick{c: c, state: s}).run()
+				if out.broken != "" {
+					t.Fatal(out.broken)
+				}
+				s = out.final
+			}
+			run()
+			s = moveState(c.ciMoves(s), step{kind: stepError, sha: s.builds[0].sha})
+			s = moveState(c.clockMoves(s), step{kind: stepRecheck})
+			run()
+		})
+	}
+}
+
+func TestKeepCheckerSerialExpiryWhileNextBuildRuns(t *testing.T) {
+	w := checkWorld{Config: queue.Config{Slots: 1, MaxBatch: 1, Keep: 3 * time.Minute, Timeout: time.Minute}, Pulls: pulls(good, good, good)}
+	c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	s := c.initState()
+	run := func() {
+		t.Helper()
+		out := (&checkTick{c: c, state: s}).run()
+		if out.broken != "" {
+			t.Fatal(out.broken)
+		}
+		s = out.final
+	}
+	run()
+	first := s.builds[0].sha
+	for range 2 {
+		idx := slices.IndexFunc(s.builds, func(b pushedBuild) bool { return b.verdict == queue.Pending })
+		if idx < 0 {
+			t.Fatal("no pending serial candidate")
+		}
+		s = moveState(c.ciMoves(s), step{kind: stepPass, sha: s.builds[idx].sha})
+		run()
+	}
+	mark := s.builds[s.findBuild(first)].landed
+	if mark == 0 || len(s.builds) != 3 {
+		t.Fatalf("serial landings did not retain builds: %+v", s.builds)
+	}
+	for _, tr := range c.clockMoves(s) {
+		if tr.step.kind == stepKeep && tr.state.kept >= mark {
+			return
+		}
+	}
+	t.Fatal("first landing's expiry was discarded while the third build ran")
+}
+
+func TestKeepCheckerUsesRealPlannerForComparison(t *testing.T) {
+	w := smallKeepWorlds()[0]
+	c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	world, _ := c.read(c.initState())
+	if msg := checkKeep(world, w.Config, nil); msg == "" {
+		t.Fatal("comparison accepted a planner that omitted every action")
+	}
+}
+
+func TestKeepCheckerLowerTimesOutWhileTheTipIsKept(t *testing.T) {
+	w, ok := findWorld("Keep whole stacked longer than timeout")
+	if !ok {
+		t.Fatal("missing world")
+	}
+	c := newChecker(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	out := (&checkTick{c: c, state: c.initState()}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	s := out.final
+	if len(s.builds) != 2 {
+		t.Fatalf("pushed %d builds, want two", len(s.builds))
+	}
+	lower, upper := s.builds[0].sha, s.builds[1].sha
+	s = moveState(c.ciMoves(s), step{kind: stepBegin, sha: lower})
+	s = moveState(c.ciMoves(s), step{kind: stepPass, sha: upper})
+	out = (&checkTick{c: c, state: s, trace: true}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	s = out.final
+	if s.trunk != upper || s.builds[s.findBuild(lower)].landed != 0 {
+		t.Fatal("upper did not land over the pending lower")
+	}
+	s = moveState(c.clockMoves(s), step{kind: stepTimeout})
+	world, _ := c.read(s)
+	if !slices.ContainsFunc(world.Builds, func(b queue.Build) bool {
+		return b.SHA == upper && !b.Landed.IsZero() && world.Now.Sub(b.Landed) < w.Config.Keep
+	}) {
+		t.Fatal("upper was not kept at the lower's timeout")
+	}
+	out = (&checkTick{c: c, state: s, trace: true}).run()
+	if out.broken != "" {
+		t.Fatal(out.broken)
+	}
+	if !slices.ContainsFunc(out.reads, func(r tickRead) bool {
+		return slices.ContainsFunc(r.world.Builds, func(b queue.Build) bool {
+			return b.SHA == lower && b.Verdict == queue.Pending && r.world.Now.Sub(b.Pushed) > w.Config.Timeout
+		})
+	}) {
+		t.Fatal("no timed-out lower reading")
 	}
 }

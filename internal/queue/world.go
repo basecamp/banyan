@@ -66,6 +66,8 @@ type Member struct {
 type Build struct {
 	SHA  SHA
 	Kind Kind
+	// Landed is when the queue marked this candidate landed, zero until it has.
+	Landed time.Time `json:",omitzero"`
 	// Base is the trunk commit the chain stands on, and Chain the prefix this build tests.
 	Base  SHA
 	Chain []Member
@@ -77,6 +79,7 @@ type Build struct {
 	// Failed names the contexts that failed on the commit beside its verdict's own: the jobs
 	// of its build, where the repository's CI reports each as a context.
 	Failed []string
+	// Pushed is the time of the queue's latest status on this commit.
 	Pushed time.Time
 	// Started is when CI began running the build: zero until it has, and always zero where
 	// the repository's CI does not say.
@@ -148,6 +151,8 @@ type Config struct {
 	Timeout time.Duration
 	// Recheck is the wait before a red trunk, or a CI that errored, is tried again.
 	Recheck time.Duration
+	// Keep is how long a candidate's branch stands after the queue marks it landed.
+	Keep time.Duration `json:",omitzero"`
 }
 
 // Action is one thing a tick does. The executor applies them in order.

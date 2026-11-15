@@ -44,6 +44,7 @@ type Config struct {
 	MaxBatch int      `json:"max_batch"`
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
 	Timeout  string   `json:"timeout"`
+	Keep     string   `json:"keep,omitzero"`
 	Recheck  string   `json:"recheck"`
 	Author   struct {
 		Name  string `json:"name"`
@@ -98,6 +99,14 @@ func Load(path string) (Config, error) {
 	if err == nil && (c.Status == c.Probe || c.Status == c.Begins || slices.Contains(c.Build, c.Status) || slices.Contains(c.Admit, c.Status)) {
 		err = fmt.Errorf("%s: status %q may not also be a build, probe, admit or begins context", path, c.Status)
 	}
+	if err == nil && c.Keep != "" {
+		d, bad := time.ParseDuration(c.Keep)
+		if bad != nil {
+			err = fmt.Errorf("%s: keep: %w", path, bad)
+		} else if d < 0 {
+			err = fmt.Errorf("%s: keep is %q, and may not be negative", path, c.Keep)
+		}
+	}
 	return c, err
 }
 
@@ -113,7 +122,8 @@ func (c Config) names() github.Names {
 func (c Config) dials() queue.Config {
 	timeout, _ := time.ParseDuration(c.Timeout)
 	recheck, _ := time.ParseDuration(c.Recheck)
-	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Gather: c.Gather, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck}
+	keep, _ := time.ParseDuration(c.Keep)
+	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Gather: c.Gather, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck, Keep: keep}
 }
 
 // Queue is one repository's queue, ready to tick.
@@ -137,7 +147,7 @@ type Queue struct {
 func New(c Config, dir, api, token string) *Queue {
 	q := &Queue{Config: c, Now: time.Now, Log: os.Stdout,
 		Hub: &github.Client{API: api, Repo: c.Repo, Token: token},
-		Git: &git.Repo{Dir: dir, Remote: c.Remote, Trunk: c.Trunk, Lane: c.Branches, Name: c.Author.Name, Email: c.Author.Email, Token: token}}
+		Git: &git.Repo{Dir: dir, Remote: c.Remote, Trunk: c.Trunk, Lane: c.Branches, Keep: c.dials().Keep > 0, Name: c.Author.Name, Email: c.Author.Email, Token: token}}
 	q.Git.Pushed = func(sha queue.SHA) bool {
 		seen, err := q.Hub.Pushed(sha, c.Status)
 		if err != nil {
@@ -227,6 +237,18 @@ func (q *Queue) Read() (*Read, error) {
 				if err := q.Hub.SetStatus(b.SHA, q.Status, queue.Pending, describe(b), ""); err != nil {
 					return nil, err
 				}
+			}
+		}
+		if q.dials().Keep > 0 && b.Kind == queue.Candidate && b.Round == 0 && q.Git.Holds(trunk, b.SHA) {
+			if st[q.Status].State == queue.Success {
+				b.Landed = st[q.Status].At
+			} else if b.SHA == trunk || b.Verdict != queue.Pending {
+				if !q.DryRun {
+					if err := q.Hub.SetStatus(b.SHA, q.Status, queue.Success, "landed", ""); err != nil {
+						return nil, err
+					}
+				}
+				b.Landed = r.World.Now
 			}
 		}
 		r.World.Builds = append(r.World.Builds, b)

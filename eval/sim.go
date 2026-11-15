@@ -144,6 +144,8 @@ type Sim struct {
 	pool    *pool // the CI's agents, nil where they are unlimited
 	alone   *pool // the same pool and the same other builds, with no queue
 
+	crashAfterPush bool
+
 	Trace    io.Writer
 	Broken   []string      // invariants broken, each with what happened
 	Stopped  time.Duration // when a queue that did not keep up was stopped
@@ -451,6 +453,13 @@ func (s *Sim) Step() {
 		}
 	}
 	s.tick()
+	if s.cfg.Keep > 0 {
+		for _, b := range s.builds {
+			if !b.Landed.IsZero() && s.epoch.Add(s.now).Sub(b.Landed) > s.cfg.Keep+10*tick {
+				s.Broken = append(s.Broken, fmt.Sprintf("keep expiry: landed build %.12s still stands past keep", b.SHA))
+			}
+		}
+	}
 }
 
 func (s *Sim) numbers() []int {
@@ -527,6 +536,9 @@ func (s *Sim) World() queue.World {
 	}
 	for _, sha := range s.shas() {
 		sb := s.builds[sha]
+		if s.cfg.Keep > 0 && sb.Landed.IsZero() && sb.Kind == queue.Candidate && sb.Round == 0 && s.trunks[sha] && sb.Verdict != queue.Pending {
+			sb.Landed = w.Now
+		}
 		b := s.read(sb.Build)
 		if sb.end != never && sb.start <= s.now && !s.shape.Silent {
 			b.Started = s.epoch.Add(sb.start)
@@ -552,8 +564,12 @@ func (s *Sim) tick() {
 		if crashed {
 			acts = acts[:s.rng.Intn(len(acts)+1)]
 		}
-		for _, a := range acts {
+		for i, a := range acts {
+			s.crashAfterPush = crashed && i == len(acts)-1
 			s.apply(a)
+			if len(s.Broken) > 0 {
+				return
+			}
 		}
 		if crashed {
 			return
@@ -583,6 +599,10 @@ func (s *Sim) apply(a queue.Action) {
 	case "note":
 		s.prs[a.PR].Note = a.Text
 	case "delete":
+		if b := s.builds[a.SHA]; b != nil && s.cfg.Keep > 0 && !b.Landed.IsZero() && s.epoch.Add(s.now).Sub(b.Landed) < s.cfg.Keep {
+			s.Broken = append(s.Broken, fmt.Sprintf("keep retention: landed build %.12s deleted before keep", b.SHA))
+			return
+		}
 		if b := s.builds[a.SHA]; b != nil && s.pool != nil && s.shape.Cancels {
 			s.pool.cancel(b, s.now)
 		}
@@ -705,7 +725,11 @@ func (s *Sim) land(a queue.Action) {
 	}
 	s.advance(a.SHA)
 	s.LastLand = s.now
-	delete(s.builds, a.SHA)
+	if s.cfg.Keep <= 0 {
+		delete(s.builds, a.SHA)
+	} else if !s.crashAfterPush {
+		s.builds[a.SHA].Landed = s.epoch.Add(s.now)
+	}
 }
 
 // Run plays the shape to its end: until the arrivals have stopped and the queue is empty, or
@@ -715,9 +739,12 @@ func (s *Sim) Run() {
 	for _, e := range s.shape.Episodes {
 		limit += e.For + e.Fix
 	}
+	if s.cfg.Keep > 0 {
+		limit += s.cfg.Keep + 11*tick
+	}
 	for s.now < limit && len(s.Broken) == 0 {
 		s.Step()
-		if s.now.Hours() >= s.shape.Hours && s.idle() {
+		if s.now.Hours() >= s.shape.Hours && s.idle() && !s.kept() {
 			return
 		}
 		if len(s.Broken) == 0 && s.overloaded() {
@@ -738,9 +765,13 @@ func (s *Sim) Run() {
 // twelve builds, over what it began with. A queue with nothing building is left to run, so a
 // planner that has stalled still breaks invariant 4.
 func (s *Sim) overloaded() bool {
-	building, queued := false, 0
+	building, queued, live := false, 0, 0
 	for _, b := range s.builds {
+		if s.cfg.Keep > 0 && !b.Landed.IsZero() {
+			continue
+		}
 		building = building || (b.Verdict == queue.Pending && !b.lost)
+		live++
 	}
 	for _, p := range s.prs {
 		if p.queued {
@@ -748,10 +779,21 @@ func (s *Sim) overloaded() bool {
 		}
 	}
 	behind := s.shape.Arrivals > 0 && building && queued > max(80, s.shape.Backlog+int(12*s.shape.Arrivals*s.shape.Build.Hours()))
-	return behind || len(s.builds) > max(300, 10*s.cfg.Slots*s.cfg.MaxBatch)
+	return behind || live > max(300, 10*s.cfg.Slots*s.cfg.MaxBatch)
 }
 
-// idle says nothing is queued or coming back, and no episode is still to come.
+func (s *Sim) kept() bool {
+	if s.cfg.Keep > 0 {
+		for _, b := range s.builds {
+			if !b.Landed.IsZero() || s.trunks[b.SHA] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// idle says no pull request or episode remains.
 func (s *Sim) idle() bool {
 	for _, p := range s.prs {
 		if p.queued || (p.back > 0 && !p.gone && !p.landed) {

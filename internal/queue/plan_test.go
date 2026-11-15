@@ -1,7 +1,9 @@
 package queue
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -457,5 +459,268 @@ func TestAProbeNamesTheContextsThatFailedOnTheRedBuild(t *testing.T) {
 	}
 	if probes == 0 || whole == 0 {
 		t.Errorf("pushed %d probes and %d whole builds of a red candidate, where each plan pushes a round", probes, whole)
+	}
+}
+
+func TestKeepLandedExpiryUsesOnlyTheMark(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	for _, kind := range []Kind{Candidate, Check, Probe} {
+		for _, verdict := range []Verdict{Pending, Success, Failure, Error} {
+			for _, tc := range []struct {
+				name string
+				mark time.Time
+				due  bool
+			}{
+				{"recent", now.Add(-time.Minute), false}, {"boundary", now.Add(-3 * time.Minute), true},
+				{"old", now.Add(-time.Hour), true}, {"future", now.Add(time.Minute), false},
+			} {
+				t.Run(fmt.Sprintf("%d/%d/%s", kind, verdict, tc.name), func(t *testing.T) {
+					b := Build{SHA: "landed", Kind: kind, Landed: tc.mark, Verdict: verdict, Pushed: now.Add(-24 * time.Hour)}
+					w := World{Now: now, Trunk: "trunk", Repo: commits{}, Builds: []Build{b}}
+					acts := Plan(w, Config{Keep: 3 * time.Minute, Timeout: time.Minute})
+					var want []Action
+					if tc.due {
+						want = []Action{{Do: "delete", SHA: b.SHA}}
+					}
+					if !reflect.DeepEqual(acts, want) {
+						t.Fatalf("got %+v, want %+v", acts, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestKeepLandedPendingCandidateKeepsSlotWithoutCancellation(t *testing.T) {
+	now := time.Now()
+	for _, cancels := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancels), func(t *testing.T) {
+			w := World{Now: now, Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1), Builds: []Build{{SHA: "landed", Base: "landed", Verdict: Pending, Started: now}}}
+			c := Config{Cancels: cancels, Slots: 1, MaxBatch: 1}
+			want := Plan(w, c)
+			c.Keep = time.Minute
+			acts := Plan(w, c)
+			if !reflect.DeepEqual(acts, want) {
+				t.Fatalf("got %+v, want keep unset %+v", acts, want)
+			}
+			pushed := slices.ContainsFunc(acts, func(a Action) bool { return a.Do == "push" && a.Build.Kind == Candidate })
+			deleted := slices.ContainsFunc(acts, func(a Action) bool { return a.Do == "delete" && a.SHA == "landed" })
+			if pushed != cancels || deleted != cancels {
+				t.Fatalf("cancels=%v: pushed=%v deleted=%v: %+v", cancels, pushed, deleted, acts)
+			}
+		})
+	}
+}
+
+func TestKeepUnmarkedBuildMatchesWithoutKeep(t *testing.T) {
+	now := time.Now()
+	for _, kind := range []Kind{Candidate, Check, Probe} {
+		for _, verdict := range []Verdict{Pending, Success, Failure, Error} {
+			for _, cancels := range []bool{false, true} {
+				for _, timeout := range []time.Duration{0, time.Minute} {
+					t.Run(fmt.Sprintf("%d/%d/%v/%s", kind, verdict, cancels, timeout), func(t *testing.T) {
+						b := Build{SHA: "landed", Base: "landed", Kind: kind, Verdict: verdict, Pushed: now.Add(-time.Hour)}
+						w := World{Now: now, Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1), Builds: []Build{b}}
+						c := Config{Slots: 1, MaxBatch: 1, Cancels: cancels, Timeout: timeout}
+						want := Plan(w, c)
+						c.Keep = time.Hour
+						if got := Plan(w, c); !reflect.DeepEqual(got, want) {
+							t.Fatalf("got %+v, want keep unset %+v", got, want)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestKeepLandedBuildJoinsNoRedGroupOrRound(t *testing.T) {
+	now := time.Now()
+	chain := []Member{member(1, "m1")}
+	for _, round := range []int{0, 1} {
+		w := World{Now: now, Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1), Builds: []Build{
+			{SHA: "m1", Base: "trunk", Chain: chain, Verdict: Failure},
+			{SHA: "round", Kind: Check, Base: "trunk", Chain: chain, Round: 1, Of: "m1", Verdict: Pending, Pushed: now},
+		}}
+		if round == 0 {
+			w.Builds[0].Landed = now
+		} else {
+			w.Builds[1].Landed = now
+			w.Builds[1].Verdict = Success
+		}
+		c := Config{Keep: time.Minute, Slots: 1, MaxBatch: 1}
+		p := &plan{w: w, c: c, open: map[int]PR{}, waits: map[int]string{}}
+		p.admit()
+		p.read()
+		if round == 0 && len(p.reds) != 0 {
+			t.Fatalf("landed candidate joined red group: %+v", p.reds)
+		}
+		for _, r := range p.reds {
+			for _, b := range append(r.built, r.builds...) {
+				if !b.Landed.IsZero() {
+					t.Fatalf("landed build read as round: %+v", b)
+				}
+			}
+		}
+		without := w
+		without.Builds = slices.DeleteFunc(slices.Clone(w.Builds), func(b Build) bool { return !b.Landed.IsZero() })
+		if got, want := Plan(w, c), Plan(without, c); !reflect.DeepEqual(got, want) {
+			t.Fatalf("round=%d got %+v, want %+v", round, got, want)
+		}
+	}
+}
+
+func TestKeepLandedBuildIsNeverStackedOnLandedOrPushedAgain(t *testing.T) {
+	now := time.Now()
+	for _, verdict := range []Verdict{Pending, Success, Failure} {
+		w := World{Now: now, Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2), Builds: []Build{{SHA: "landed", Base: "trunk", Chain: []Member{member(1, "m1")}, Landed: now, Verdict: verdict}}}
+		c := Config{Keep: time.Minute, Slots: 2, MaxBatch: 1}
+		acts := Plan(w, c)
+		w.Builds = nil
+		if want := Plan(w, c); !reflect.DeepEqual(acts, want) {
+			t.Fatalf("verdict=%d got %+v, want %+v", verdict, acts, want)
+		}
+		for _, a := range acts {
+			if a.Do == "land" || a.Do == "push" && strings.Contains(a.Build.SHA, "landed") {
+				t.Fatalf("reused landed commit: %+v", acts)
+			}
+		}
+	}
+}
+
+func TestKeepVerifyRefusesAnAlreadyLandedCandidate(t *testing.T) {
+	w := World{Trunk: "m", Builds: []Build{{SHA: "m", Base: "m", Verdict: Success}}}
+	if err := Verify(w, Action{Do: "land", SHA: "m"}); err == nil {
+		t.Fatal("already landed candidate was approved")
+	}
+}
+
+func TestKeepUnlandedDroppedBuildsGoImmediately(t *testing.T) {
+	now := time.Now()
+	for _, kind := range []Kind{Candidate, Check, Probe} {
+		for _, verdict := range []Verdict{Pending, Success, Failure, Error} {
+			for _, cancels := range []bool{false, true} {
+				b := Build{SHA: "old", Kind: kind, Base: "trunk", Chain: []Member{member(1, "m1")}, Verdict: verdict}
+				w := World{Now: now, Trunk: "trunk", Repo: commits{}, Builds: []Build{b}}
+				c := Config{Cancels: cancels}
+				want := Plan(w, c)
+				c.Keep = time.Hour
+				got := Plan(w, c)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("kind=%d verdict=%d cancels=%v got %+v want %+v", kind, verdict, cancels, got, want)
+				}
+				retained := kind == Candidate && verdict == Pending && !cancels
+				if !retained && (len(got) != 1 || got[0].Do != "delete") {
+					t.Fatalf("unlanded discarded build survived: %+v", got)
+				}
+			}
+		}
+	}
+}
+
+func TestKeepUnlandedLifecyclesMatchWithoutKeep(t *testing.T) {
+	now := time.Now()
+	for _, kind := range []Kind{Check, Probe} {
+		for _, event := range []string{"eject and relabel", "clear then pass", "end with running probe"} {
+			t.Run(fmt.Sprintf("%d/%s", kind, event), func(t *testing.T) {
+				red := Build{SHA: "m1", Base: "trunk", Chain: []Member{member(1, "m1")}, Verdict: Failure}
+				w := World{Now: now, Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1), Builds: []Build{red}}
+				for round := 1; round <= 3; round++ {
+					chain, v := red.Chain, Failure
+					if round == 2 {
+						chain, v = nil, Success
+					}
+					w.Builds = append(w.Builds, Build{SHA: fmt.Sprint("round", round), Kind: kind, Base: "trunk", Chain: chain, Round: round, Of: "m1", Verdict: v})
+				}
+				if event != "eject and relabel" {
+					w.Builds[1].Verdict = Success
+					if kind == Probe {
+						w.Builds[1].Kind = Check
+					}
+				}
+				if event == "end with running probe" {
+					w.Builds[3].Kind = Probe
+					w.Builds[3].Verdict = Pending
+				}
+				c := Config{Slots: 1, MaxBatch: 1, Probes: kind == Probe}
+				compare := func() []Action {
+					t.Helper()
+					want := Plan(w, c)
+					kept := c
+					kept.Keep = time.Hour
+					got := Plan(w, kept)
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("got %+v want %+v", got, want)
+					}
+					return got
+				}
+				apply := func(acts []Action) {
+					t.Helper()
+					for _, a := range acts {
+						switch a.Do {
+						case "delete":
+							w.Builds = slices.DeleteFunc(w.Builds, func(b Build) bool { return b.SHA == a.SHA })
+						case "eject":
+							w.PRs = nil
+						case "push":
+							w.Builds = append(w.Builds, a.Build)
+						case "note":
+							for i := range w.PRs {
+								w.PRs[i].Note = a.Text
+							}
+						}
+					}
+				}
+				first := compare()
+				if event == "eject and relabel" {
+					ns, _ := ejections(first)
+					if len(ns) != 1 {
+						t.Fatalf("no first ejection: %+v", first)
+					}
+					apply(first)
+					apply(compare())
+					if len(w.Builds) != 0 {
+						t.Fatalf("ended evidence survived: %+v", w.Builds)
+					}
+					w.PRs = queuedAt(now, 1)
+					if ns, _ := ejections(compare()); len(ns) > 0 {
+						t.Fatal("old evidence ejected relabelled head")
+					}
+				} else {
+					for _, b := range w.Builds {
+						if !slices.ContainsFunc(first, func(a Action) bool { return a.Do == "delete" && a.SHA == b.SHA }) {
+							t.Fatalf("ended build %s survived: %+v", b.SHA, first)
+						}
+					}
+					apply(first)
+					for i := range w.Builds {
+						w.Builds[i].Verdict = Success
+					}
+					acts := compare()
+					if !slices.ContainsFunc(acts, func(a Action) bool { return a.Do == "land" }) {
+						t.Fatalf("fresh candidate did not land: %+v", acts)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestKeepZeroAddsNothingToARecording(t *testing.T) {
+	b, err := json.Marshal(Build{SHA: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"SHA":"m","Kind":0,"Base":"","Chain":null,"Round":0,"Of":"","Verdict":0,"Failed":null,"Pushed":"0001-01-01T00:00:00Z","Started":"0001-01-01T00:00:00Z"}`
+	if string(b) != want {
+		t.Fatalf("zero build JSON = %s, want %s", b, want)
+	}
+	c, err := json.Marshal(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"Slots":0,"MaxBatch":0,"Gather":0,"Probes":false,"Cancels":false,"Timeout":0,"Recheck":0}`
+	if string(c) != want {
+		t.Fatalf("zero config JSON = %s, want %s", c, want)
 	}
 }

@@ -22,7 +22,11 @@ A candidate is a whole build of a prefix. A new candidate stacks on the last whe
 
 The highest prefix whose whole build passed lands, with everything under it. A red below a green was a flake, or a break that a later pull request fixed, and the tree that lands is the one that was built.
 
-The landing is one atomic push: the trunk moves to the candidate, and the candidate's branch is deleted on the condition that it still points there. Just before the push the queue is read again, and the landing is dropped unless every pull request in it is still queued at the head that was merged. A push the remote refuses is planned again, since the trunk may have moved under it. One it refuses twice in a tick lost no race: the queue stops, and says the remote's reason on every pull request it holds.
+Without `keep`, the landing is one atomic push: the trunk moves to the candidate, and the candidate's branch is deleted on the condition that it still points there. Just before the push the queue is read again, and the landing is dropped unless every pull request in it is still queued at the head that was merged. A push the remote refuses is planned again, since the trunk may have moved under it. One it refuses twice in a tick lost no race: the queue stops, and says the remote's reason on every pull request it holds.
+
+A landed candidate's branch stands for at least `keep` after the queue marks it landed. The candidate at the trunk's tip is marked at the landing, or by the next read if that tick died first. A candidate beneath it is marked once its verdict is in. One failed or errored context is a verdict, so another still running, or one that appears later, does not hold the branch longer. Where `cancels` is set, a lower candidate still running is deleted at once, as without `keep`. A retry the trunk holds is a candidate like any other. A probe, a check and a round's build are never marked. A second mark from ticks run beside each other only lengthens the stand; ticks must run one at a time.
+
+The queue uses its own mark because the trunk's own builds report on the same commit under the same check names. Without `keep`, the landing push has the remote compare and delete the candidate's branch, so whatever deletes that branch first stops the landing. With `keep`, the queue compares the branch just before pushing the trunk alone, so deleting the branch between that comparison and the push does not stop the landing.
 
 ## Blame
 
@@ -102,6 +106,7 @@ The queue never calls a CI provider's API and never reads a log.
 | Context | On | Says |
 |---|---|---|
 | `merge-queue` | a pull request's head | It pins the head that was queued, shows its place, and ends as landed or ejected with the cause. |
+| `merge-queue` | a candidate commit | `pending` while it builds; `success` saying `landed` is the queue's mark. |
 | `merge-queue/build` | a candidate | CI's whole-build verdict. The trunk's rule requires it. |
 | `merge-queue/probe` | a probe | CI's verdict on what the red build failed. |
 

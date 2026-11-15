@@ -55,6 +55,9 @@ func live(dir, clone string) (Score, window, error) {
 		Queued time.Time
 	}
 	var (
+		before       = map[queue.SHA]bool{}
+		observed     = map[queue.SHA]bool{}
+		firstPush    = map[queue.SHA]time.Time{}
 		pushed       = map[queue.SHA]queue.Build{}
 		answered     = map[queue.SHA]time.Time{}
 		ready        = map[head]time.Time{}
@@ -98,11 +101,26 @@ func live(dir, clone string) (Score, window, error) {
 			seen[h] = true
 		}
 		for _, b := range rec.World.Builds {
-			if _, seen := answered[b.SHA]; b.Verdict == queue.Pending || seen {
+			_, counted := answered[b.SHA]
+			if !b.Landed.IsZero() && (!observed[b.SHA] || b.SHA == rec.World.Trunk && !counted) {
+				before[b.SHA] = true
+			}
+			observed[b.SHA] = true
+			if _, seen := firstPush[b.SHA]; !seen {
+				firstPush[b.SHA] = b.Pushed
+			}
+			if before[b.SHA] {
 				continue
 			}
-			answered[b.SHA] = now
-			took[b.Kind] = append(took[b.Kind], now.Sub(b.Pushed).Minutes())
+			if b.Verdict == queue.Pending || counted {
+				continue
+			}
+			answerAt, pushedAt := now, b.Pushed
+			if !b.Landed.IsZero() {
+				answerAt, pushedAt = b.Landed, firstPush[b.SHA]
+			}
+			answered[b.SHA] = answerAt
+			took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
 			if b.Kind != queue.Probe {
 				verdicts[b.Tests()] = append(verdicts[b.Tests()], b.Verdict)
 				for _, m := range b.Chain {
@@ -112,9 +130,16 @@ func live(dir, clone string) (Score, window, error) {
 			}
 		}
 		for _, a := range rec.Actions {
+			if before[a.SHA] || before[a.Build.SHA] {
+				continue
+			}
 			switch {
 			case a.Do == "push":
 				pushed[a.Build.SHA] = a.Build
+				if _, seen := firstPush[a.Build.SHA]; !seen {
+					firstPush[a.Build.SHA] = now
+				}
+				observed[a.Build.SHA] = true
 			case a.Do == "eject" && a.Cause == "culprit":
 				if h, ok := at[a.PR]; ok {
 					ejected[[2]any{h.Number, h.Head}] = true
