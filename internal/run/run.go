@@ -39,6 +39,7 @@ type Config struct {
 	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
 	Started  string   `json:"started"`  // a word CI's pending status carries once the build runs; a check run says so itself
 	Begins   string   `json:"begins"`   // a context that answers once CI has queued the build's jobs, where nothing says the build runs
+	App      int      `json:"app"`      // the GitHub App database ID whose check runs answer for the contexts the config names
 	Slots    int      `json:"slots"`
 	MaxBatch int      `json:"max_batch"`
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
@@ -95,7 +96,8 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) names() github.Names {
-	n := github.Names{Trunk: c.Trunk, Label: c.Label, First: c.First, Hold: c.Hold, Status: c.Status, Admit: c.Admit, Threads: c.Threads,
+	n := github.Names{Trunk: c.Trunk, Label: c.Label, First: c.First, Hold: c.Hold, Status: c.Status,
+		Build: c.Build, Probe: c.Probe, Admit: c.Admit, Begins: c.Begins, App: c.App, Threads: c.Threads,
 		Message: c.Message == "description"}
 	if c.Reword != "" {
 		n.Reword = regexp.MustCompile(c.Reword)
@@ -187,7 +189,7 @@ func (q *Queue) Read() (*Read, error) {
 	for _, b := range builds {
 		shas = append(shas, b.SHA)
 	}
-	if r.Statuses, err = q.Hub.Commits(shas); err != nil {
+	if r.Statuses, err = q.Hub.Commits(q.names(), shas); err != nil {
 		return nil, err
 	}
 	for _, b := range builds {

@@ -71,6 +71,7 @@ type status struct {
 	Context, State, Description, URL string
 	At                               time.Time
 	Check                            bool
+	App                              int
 }
 
 func (h *hub) open(n int, file, content string) *pull {
@@ -83,8 +84,12 @@ func (h *hub) set(sha, context, state string) {
 	h.statuses[sha] = append(h.statuses[sha], status{Context: context, State: state, URL: "https://ci.example/" + sha[:12], At: h.now})
 }
 
-func (h *hub) check(sha, name, state string, at time.Time) {
-	h.statuses[sha] = append(h.statuses[sha], status{Context: name, State: state, URL: "https://ci.example/" + sha[:12], At: at, Check: true})
+func (h *hub) check(sha, name, state string, at time.Time, app ...int) {
+	var id int
+	if len(app) > 0 {
+		id = app[0]
+	}
+	h.statuses[sha] = append(h.statuses[sha], status{Context: name, State: state, URL: "https://ci.example/" + sha[:12], At: at, Check: true, App: id})
 }
 
 // last is the newest status of a context on a commit.
@@ -145,13 +150,19 @@ func (h *hub) timeline(p *pull, last int, before string) map[string]any {
 }
 
 func (h *hub) rollup(sha, after string, first int) any {
-	var order []string
-	newest := map[string]status{}
+	type key struct {
+		context string
+		check   bool
+		app     int
+	}
+	var order []key
+	newest := map[key]status{}
 	for _, s := range h.statuses[sha] {
-		if _, seen := newest[s.Context]; !seen {
-			order = append(order, s.Context)
+		k := key{s.Context, s.Check, s.App}
+		if _, seen := newest[k]; !seen {
+			order = append(order, k)
 		}
-		newest[s.Context] = s
+		newest[k] = s
 	}
 	if len(order) == 0 {
 		return nil
@@ -159,10 +170,11 @@ func (h *hub) rollup(sha, after string, first int) any {
 	start, _ := strconv.Atoi(after)
 	end := min(start+first, len(order))
 	var nodes []any
-	for _, ctx := range order[start:end] {
-		s := newest[ctx]
+	for _, k := range order[start:end] {
+		s := newest[k]
 		if s.Check {
-			node := map[string]any{"__typename": "CheckRun", "name": s.Context, "status": strings.ToUpper(s.State), "detailsUrl": s.URL, "startedAt": s.At}
+			node := map[string]any{"__typename": "CheckRun", "name": s.Context, "status": strings.ToUpper(s.State), "detailsUrl": s.URL, "startedAt": s.At,
+				"checkSuite": map[string]any{"app": map[string]any{"databaseId": s.App}}}
 			if s.State != "queued" && s.State != "in_progress" {
 				node["status"], node["conclusion"] = "COMPLETED", strings.ToUpper(s.State)
 			}
@@ -1570,5 +1582,163 @@ func TestASettingTheQueueCannotReadStopsItBeforeItTicks(t *testing.T) {
 		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s loads with %v, and should be refused for its %s", config, err, want)
 		}
+	}
+}
+
+func TestOnlyTheConfiguredAppsCheckRunsJudgeHeadsBuildsAndProbes(t *testing.T) {
+	w := newWorld(t, `{"app": 7, "admit": ["signoff"]}`)
+	statusOnly, shadowed, otherApp := w.open(1, "a", "1\n"), w.open(2, "b", "2\n"), w.open(3, "c", "3\n")
+	w.set(statusOnly.heads[0], "signoff", "success")
+	w.check(shadowed.heads[0], "signoff", "failure", w.now, 7)
+	w.now = w.now.Add(time.Second)
+	w.set(shadowed.heads[0], "signoff", "success")
+	w.check(shadowed.heads[0], "signoff", "success", w.now, 8)
+	w.check(otherApp.heads[0], "signoff", "success", w.now, 8)
+	for n := 1; n <= 3; n++ {
+		w.label(n)
+	}
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[*pull]string{
+		statusOnly: "waits: signoff has not passed",
+		shadowed:   "waits: signoff failed",
+		otherApp:   "waits: signoff has not passed",
+	} {
+		if s := w.last(p.heads[0], "merge-queue"); s.State != "pending" || s.Description != want {
+			t.Errorf("#%d says %q %q, want pending %q", p.number, s.State, s.Description, want)
+		}
+	}
+	if branches := w.o.Branches("merge-queue/"); len(branches) != 0 {
+		t.Errorf("pushed %v before any head had a green check run from the App", branches)
+	}
+	w.check(otherApp.heads[0], "signoff", "success", w.now.Add(time.Second), 7)
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if s := w.last(otherApp.heads[0], "merge-queue"); s.Description != "in the queue, 0 ahead of it" || len(w.o.Branches("merge-queue/")) != 1 {
+		t.Errorf("#3 after the App's green check run says %q with branches %v, want admitted as 0 ahead", s.Description, w.o.Branches("merge-queue/"))
+	}
+
+	wb := newWorld(t, `{"app": 7}`)
+	wb.queue(1, "a", "1\n")
+	wb.now = wb.now.Add(time.Minute)
+	if err := wb.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range wb.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	pushedAt := wb.now
+	wb.set(cand, "merge-queue/build", "success")
+	wb.check(cand, "merge-queue/build", "success", wb.now, 8)
+	wb.now = wb.now.Add(time.Minute)
+	if err := wb.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if wb.landed(1) || wb.o.Trunk() == cand {
+		t.Errorf("candidate landed on a commit status and another App's check run")
+	}
+	rb, err := wb.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rb.World.Builds) != 1 || rb.World.Builds[0].Verdict != queue.Pending || !rb.World.Builds[0].Pushed.Equal(pushedAt) {
+		t.Errorf("candidate = %+v, want pending pushed at %v (the queue's own status read back)", rb.World.Builds, pushedAt)
+	}
+	wb.check(cand, "merge-queue/build", "failure", wb.now, 7)
+	wb.now = wb.now.Add(time.Second)
+	wb.set(cand, "merge-queue/build", "success")
+	wb.check(cand, "merge-queue/build", "success", wb.now, 8)
+	if rb, err = wb.q.Read(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rb.World.Builds) != 1 || rb.World.Builds[0].Verdict != queue.Failure {
+		t.Errorf("candidate with failed App check run and newer green status = %+v, want failure", rb.World.Builds)
+	}
+	wb.check(cand, "merge-queue/build", "success", wb.now.Add(time.Second), 7)
+	wb.now = wb.now.Add(time.Minute)
+	if err := wb.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if wb.o.Trunk() != cand {
+		t.Errorf("candidate did not land on the App's green check run; trunk is %s, want %s", wb.o.Trunk(), cand)
+	}
+
+	wp := newWorld(t, `{"app": 7, "slots": 3, "max_batch": 2, "probe": "merge-queue/probe", "begins": "changes"}`)
+	wp.queue(1, "a", "1\n")
+	wp.queue(2, "broken", "2\n")
+	wp.now = wp.now.Add(time.Minute)
+	if err := wp.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var redCand string
+	for _, sha := range wp.o.Branches("merge-queue/") {
+		redCand = sha
+	}
+	wp.check(redCand, "merge-queue/build", "failure", wp.now, 7)
+	wp.now = wp.now.Add(time.Minute)
+	if err := wp.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var probes []string
+	for _, sha := range wp.o.Branches("merge-queue/") {
+		if sha != redCand {
+			probes = append(probes, sha)
+			wp.set(sha, "changes", "success")
+			wp.check(sha, "changes", "success", wp.now, 8)
+			wp.set(sha, "merge-queue/probe", "success")
+			wp.check(sha, "merge-queue/probe", "success", wp.now, 8)
+		}
+	}
+	rp, err := wp.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range rp.World.Builds {
+		if b.Kind == queue.Probe && (b.Verdict != queue.Pending || !b.Started.IsZero()) {
+			t.Errorf("probe %s = verdict %v started %v on commit status and another App's check run, want pending with zero start", b.SHA, b.Verdict, b.Started)
+		}
+	}
+	for _, sha := range probes {
+		wp.check(sha, "merge-queue/probe", "failure", wp.now, 7)
+	}
+	wp.now = wp.now.Add(time.Second)
+	for _, sha := range probes {
+		wp.set(sha, "merge-queue/probe", "success")
+		wp.check(sha, "merge-queue/probe", "success", wp.now, 8)
+	}
+	if rp, err = wp.q.Read(); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range rp.World.Builds {
+		if b.Kind == queue.Probe && b.Verdict != queue.Failure {
+			t.Errorf("probe %s with failed App check run and newer green status = %v, want failure", b.SHA, b.Verdict)
+		}
+	}
+	began := wp.now.Add(time.Second)
+	for _, sha := range probes {
+		wp.check(sha, "changes", "success", began, 7)
+		wp.check(sha, "merge-queue/probe", "success", began, 7)
+	}
+	if rp, err = wp.q.Read(); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range rp.World.Builds {
+		if b.Kind == queue.Probe && (b.Verdict != queue.Success || !b.Started.Equal(began)) {
+			t.Errorf("probe %s after App check runs = verdict %v started %v, want success started at %v", b.SHA, b.Verdict, b.Started, began)
+		}
+	}
+
+	u := newWorld(t, `{"admit": ["signoff"]}`)
+	p := u.open(1, "a", "1\n")
+	u.set(p.heads[0], "signoff", "success")
+	u.label(1)
+	u.rounds(2)
+	if !u.landed(1) {
+		t.Errorf("with app unset, #1 did not land on commit statuses\n%s", u.log)
 	}
 }

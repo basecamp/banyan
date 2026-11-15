@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -174,6 +175,11 @@ type contextNode struct {
 	Conclusion  string
 	DetailsURL  string `json:"detailsUrl"`
 	StartedAt   time.Time
+	CheckSuite  struct {
+		App struct {
+			DatabaseID int `json:"databaseId"`
+		}
+	}
 }
 
 // rollup is a commit's statuses and check runs, as GraphQL gives them.
@@ -189,13 +195,13 @@ type rollup struct {
 
 const contextFields = `pageInfo { hasNextPage endCursor } nodes { __typename
 	... on StatusContext { context state description targetUrl createdAt }
-	... on CheckRun { name status conclusion detailsUrl startedAt } }`
+	... on CheckRun { name status conclusion detailsUrl startedAt checkSuite { app { databaseId } } } }`
 
 const rollupFields = `statusCheckRollup { contexts(first: 100) { ` + contextFields + ` } }`
 
 // statuses is the newest report of each context: a commit status by its context, a check
 // run by its name.
-func (r *rollup) statuses() map[string]Status {
+func (r *rollup) statuses(names Names) map[string]Status {
 	out := map[string]Status{}
 	if r == nil {
 		return out
@@ -223,6 +229,9 @@ func (r *rollup) statuses() map[string]Status {
 			case "ERROR":
 				s.State = queue.Error
 			}
+		}
+		if names.appOnly(name) && (n.Typename != "CheckRun" || n.CheckSuite.App.DatabaseID != names.App) {
+			continue
 		}
 		if old, ok := out[name]; !ok || !s.At.Before(old.At) {
 			out[name] = s
@@ -260,12 +269,21 @@ type Names struct {
 	First   string   // puts it first
 	Hold    string   // keeps it out
 	Status  string   // the queue's own context
+	Build   []string // the contexts that judge a whole build
+	Probe   string   // the context that judges a probe
 	Admit   []string // the contexts a head must pass before it joins the chain
+	Begins  string   // the context that says CI has queued a build's jobs
+	App     int      // the GitHub App database ID that must post the contexts above, other than Status
 	Threads bool     // whether an unresolved review thread keeps it out
 	// Message says a merge carries the pull request's title and description, and Reword is
 	// what neither may then hold.
 	Message bool
 	Reword  *regexp.Regexp
+}
+
+func (n Names) appOnly(name string) bool {
+	return n.App != 0 && name != "" && name != n.Status &&
+		(name == n.Probe || name == n.Begins || slices.Contains(n.Build, name) || slices.Contains(n.Admit, name))
 }
 
 // skips is what a commit message tells GitHub Actions, Buildkite and their like to build
@@ -383,7 +401,7 @@ func (n Names) pull(node pullNode) Pull {
 	p.Queued = queuedAt(node.Timeline.Nodes, n.Label)
 	for _, c := range node.Commits.Nodes {
 		if c.Commit.Oid == p.Head {
-			p.Statuses = c.Commit.Rollup.statuses()
+			p.Statuses = c.Commit.Rollup.statuses(n)
 		}
 	}
 	// An ejection ends the queue's status, so only a pending one says where the head stands.
@@ -550,7 +568,7 @@ func (c *Client) moreContexts(pages []rollupPage) error {
 }
 
 // Commits is the statuses of each commit named, by SHA and context.
-func (c *Client) Commits(shas []queue.SHA) (map[queue.SHA]map[string]Status, error) {
+func (c *Client) Commits(n Names, shas []queue.SHA) (map[queue.SHA]map[string]Status, error) {
 	out := map[queue.SHA]map[string]Status{}
 	for len(shas) > 0 {
 		page := shas[:min(len(shas), 40)]
@@ -581,7 +599,7 @@ func (c *Client) Commits(shas []queue.SHA) (map[queue.SHA]map[string]Status, err
 			return nil, err
 		}
 		for i, sha := range page {
-			out[sha] = nodes[i].statuses()
+			out[sha] = nodes[i].statuses(n)
 		}
 	}
 	return out, nil

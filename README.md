@@ -27,13 +27,14 @@ A pull request joins the queue when it's labelled `merge-queue` and leaves when 
   "trunk": "main",
   "label": "merge-queue",
   "admit": ["ci"],
+  "app": 15368,
   "threads": true,
   "slots": 4,
   "max_batch": 1
 }
 ```
 
-`admit` names the statuses or check runs a pull request's own head must pass before it joins the queue, and `threads` keeps one out while a review thread is unresolved (the queue reads its first hundred, and one with more waits). `slots` is how many candidates build at once, and `max_batch` how many pull requests each adds. Where builds cost more than a short wait does, `gather` holds a candidate back while another is building until it would add that many. The builds that find a failure's cause run beside them: three for each pull request the red build added, all at once where `started` or `begins` is set. Set `started` to a word your CI's pending status carries once a build is running (Buildkite's says "started"), so the queue can find a failure's cause in one build time, not three; check runs need no setting. Where the context that judges a build appears only at its end, set `begins` to a context that answers once your CI has queued the build's jobs, such as a pipeline's first step. Set `cancels` where your CI stops a build whose branch is deleted; otherwise a build the queue no longer wants keeps its slot until it reports. `run.Config` in `internal/run/run.go` lists every setting.
+`admit` names the statuses or check runs a pull request's own head must pass before it joins the queue, and `threads` keeps one out while a review thread is unresolved (the queue reads its first hundred, and one with more waits). `slots` is how many candidates build at once, and `max_batch` how many pull requests each adds. Where builds cost more than a short wait does, `gather` holds a candidate back while another is building until it would add that many. The builds that find a failure's cause run beside them: three for each pull request the red build added, all at once where `started` or `begins` is set. Set `started` to a word your CI's pending status carries once a build is running (Buildkite's says "started"), so the queue can find a failure's cause in one build time, not three; check runs need no setting. Where the context that judges a build appears only at its end, set `begins` to a context that answers once your CI has queued the build's jobs, such as a pipeline's first step. Set `app` to your CI's GitHub App database ID for `build`, `probe`, `admit` and `begins` to be read only from that App's check runs. Set `cancels` where your CI stops a build whose branch is deleted; otherwise a build the queue no longer wants keeps its slot until it reports. `run.Config` in `internal/run/run.go` lists every setting.
 
 A merge says GitHub's own first line. Set `message` to `description` for it to say the pull request's title and description instead; a pull request whose words would make CI skip the commit waits until it is reworded, and so does one that matches the pattern in `reword`.
 
