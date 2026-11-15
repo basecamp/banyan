@@ -574,6 +574,35 @@ func TestAPushToAQueuedPullRequestLandsItsNewHeadOnceThatHeadIsAdmitted(t *testi
 	}
 }
 
+func TestAPushedHeadWaitsForEveryAdmittingCheckOfItsOwn(t *testing.T) {
+	w := newWorld(t, `{"admit": ["signoff", "review"]}`)
+	p := w.open(1, "a", "1\n")
+	w.set(p.heads[0], "signoff", "success")
+	w.set(p.heads[0], "review", "success")
+	w.label(1)
+	w.round()
+	before := w.o.Trunk()
+	p.heads = append(p.heads, w.o.Amend(1, "a", "1 again\n"))
+	w.set(p.heads[1], "signoff", "success")
+	w.rounds(3)
+	if !w.queued(1) || w.o.Trunk() != before {
+		t.Fatalf("#1's pushed head, signed off and unreviewed: queued %v, trunk moved %v\n%s", w.queued(1), w.o.Trunk() != before, w.log)
+	}
+	if s := w.last(p.heads[1], "merge-queue"); s.State != "pending" || s.Description != "waits: review has not passed" {
+		t.Errorf("the status on #1's new head says %q, %q", s.State, s.Description)
+	}
+	w.set(p.heads[1], "review", "failure")
+	w.rounds(3)
+	if s := w.last(p.heads[1], "merge-queue"); w.o.Trunk() != before || s.Description != "waits: review failed" {
+		t.Errorf("with its review failed, trunk moved %v and the status says %q", w.o.Trunk() != before, s.Description)
+	}
+	w.set(p.heads[1], "review", "success")
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Errorf("#1 did not land at its new head once that head was reviewed\n%s", w.log)
+	}
+}
+
 func TestAForcePushToAQueuedPullRequestLandsItsNewHead(t *testing.T) {
 	w := newWorld(t, `{}`)
 	p := w.queue(1, "a", "1\n")
