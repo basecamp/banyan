@@ -229,7 +229,7 @@ func (r *rollup) statuses(names Names) map[string]Status {
 				s.State = queue.Error
 			}
 		}
-		if name == names.Status && n.Typename == "CheckRun" {
+		if name == "" || name == names.Status && n.Typename == "CheckRun" {
 			continue
 		}
 		if names.appOnly(name) && (n.Typename != "CheckRun" || n.CheckSuite.App.DatabaseID != names.App) {
