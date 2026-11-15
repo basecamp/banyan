@@ -1585,6 +1585,26 @@ func TestASettingTheQueueCannotReadStopsItBeforeItTicks(t *testing.T) {
 	}
 }
 
+func TestLoadRefusesNegativeAppAndStatusSharedWithAnotherContext(t *testing.T) {
+	for _, tc := range []struct {
+		config string
+		want   string
+	}{
+		{`{"app": -1}`, "app"},
+		{`{"probe": "merge-queue"}`, "status"},
+		{`{"begins": "merge-queue"}`, "status"},
+		{`{"build": ["ci", "merge-queue"]}`, "status"},
+		{`{"admit": ["signoff", "merge-queue"]}`, "status"},
+		{`{"status": "ci", "admit": ["ci"]}`, "status"},
+	} {
+		path := t.TempDir() + "/merge-queue.json"
+		os.WriteFile(path, []byte(tc.config), 0o644)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s loads with %v, and should be refused naming %s and %s", tc.config, err, path, tc.want)
+		}
+	}
+}
+
 func TestOnlyTheConfiguredAppsCheckRunsJudgeHeadsBuildsAndProbes(t *testing.T) {
 	w := newWorld(t, `{"app": 7, "admit": ["signoff"]}`)
 	statusOnly, shadowed, otherApp := w.open(1, "a", "1\n"), w.open(2, "b", "2\n"), w.open(3, "c", "3\n")
@@ -1724,6 +1744,11 @@ func TestOnlyTheConfiguredAppsCheckRunsJudgeHeadsBuildsAndProbes(t *testing.T) {
 		wp.check(sha, "changes", "success", began, 7)
 		wp.check(sha, "merge-queue/probe", "success", began, 7)
 	}
+	wp.now = wp.now.Add(time.Minute)
+	for _, sha := range probes {
+		wp.set(sha, "changes", "pending")
+		wp.check(sha, "changes", "queued", wp.now, 8)
+	}
 	if rp, err = wp.q.Read(); err != nil {
 		t.Fatal(err)
 	}
@@ -1740,5 +1765,31 @@ func TestOnlyTheConfiguredAppsCheckRunsJudgeHeadsBuildsAndProbes(t *testing.T) {
 	u.rounds(2)
 	if !u.landed(1) {
 		t.Errorf("with app unset, #1 did not land on commit statuses\n%s", u.log)
+	}
+}
+
+func TestARedCandidatesFailedJobsComeOnlyFromTheConfiguredApp(t *testing.T) {
+	w := newWorld(t, `{"app": 7}`)
+	w.queue(1, "a", "1\n")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	w.check(cand, "merge-queue/build", "failure", w.now, 7)
+	w.check(cand, "unit", "failure", w.now, 7)
+	w.check(cand, "cover", "failure", w.now, 8)
+	w.now = w.now.Add(time.Second)
+	w.set(cand, "unit", "success")
+	w.set(cand, "lint", "failure")
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.World.Builds) != 1 || !slices.Equal(r.World.Builds[0].Failed, []string{"unit"}) {
+		t.Errorf("red candidate Failed = %v, want [unit]", r.World.Builds[0].Failed)
 	}
 }

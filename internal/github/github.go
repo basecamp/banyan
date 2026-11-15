@@ -12,7 +12,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -230,6 +229,9 @@ func (r *rollup) statuses(names Names) map[string]Status {
 				s.State = queue.Error
 			}
 		}
+		if name == names.Status && n.Typename == "CheckRun" {
+			continue
+		}
 		if names.appOnly(name) && (n.Typename != "CheckRun" || n.CheckSuite.App.DatabaseID != names.App) {
 			continue
 		}
@@ -269,11 +271,8 @@ type Names struct {
 	First   string   // puts it first
 	Hold    string   // keeps it out
 	Status  string   // the queue's own context
-	Build   []string // the contexts that judge a whole build
-	Probe   string   // the context that judges a probe
 	Admit   []string // the contexts a head must pass before it joins the chain
-	Begins  string   // the context that says CI has queued a build's jobs
-	App     int      // the GitHub App database ID that must post the contexts above, other than Status
+	App     int      // the GitHub App whose check runs alone answer for every context but the queue's own status
 	Threads bool     // whether an unresolved review thread keeps it out
 	// Message says a merge carries the pull request's title and description, and Reword is
 	// what neither may then hold.
@@ -281,10 +280,7 @@ type Names struct {
 	Reword  *regexp.Regexp
 }
 
-func (n Names) appOnly(name string) bool {
-	return n.App != 0 && name != "" && name != n.Status &&
-		(name == n.Probe || name == n.Begins || slices.Contains(n.Build, name) || slices.Contains(n.Admit, name))
-}
+func (n Names) appOnly(name string) bool { return n.App != 0 && name != n.Status }
 
 // skips is what a commit message tells GitHub Actions, Buildkite and their like to build
 // nothing for: a candidate that said it would wait for a verdict that never comes.

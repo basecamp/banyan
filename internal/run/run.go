@@ -39,7 +39,7 @@ type Config struct {
 	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
 	Started  string   `json:"started"`  // a word CI's pending status carries once the build runs; a check run says so itself
 	Begins   string   `json:"begins"`   // a context that answers once CI has queued the build's jobs, where nothing says the build runs
-	App      int      `json:"app"`      // the GitHub App database ID whose check runs answer for the contexts the config names
+	App      int      `json:"app"`      // the GitHub App whose check runs alone answer for every context but the queue's own status
 	Slots    int      `json:"slots"`
 	MaxBatch int      `json:"max_batch"`
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
@@ -92,13 +92,18 @@ func Load(path string) (Config, error) {
 	if _, bad := regexp.Compile(c.Reword); err == nil && bad != nil {
 		err = fmt.Errorf("%s: reword: %w", path, bad)
 	}
+	if err == nil && c.App < 0 {
+		err = fmt.Errorf("%s: app is %d, and may not be negative", path, c.App)
+	}
+	if err == nil && (c.Status == c.Probe || c.Status == c.Begins || slices.Contains(c.Build, c.Status) || slices.Contains(c.Admit, c.Status)) {
+		err = fmt.Errorf("%s: status %q may not also be a build, probe, admit or begins context", path, c.Status)
+	}
 	return c, err
 }
 
 func (c Config) names() github.Names {
 	n := github.Names{Trunk: c.Trunk, Label: c.Label, First: c.First, Hold: c.Hold, Status: c.Status,
-		Build: c.Build, Probe: c.Probe, Admit: c.Admit, Begins: c.Begins, App: c.App, Threads: c.Threads,
-		Message: c.Message == "description"}
+		Admit: c.Admit, App: c.App, Threads: c.Threads, Message: c.Message == "description"}
 	if c.Reword != "" {
 		n.Reword = regexp.MustCompile(c.Reword)
 	}
