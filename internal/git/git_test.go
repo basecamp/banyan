@@ -44,6 +44,55 @@ func (o *origin) fetch() queue.SHA {
 	return trunk
 }
 
+func TestFetchBranchReadsTheRemoteTipPastThePullRef(t *testing.T) {
+	o := newOrigin(t)
+	parent := o.pr(1, "a", "one\n").Head
+	head := o.Amend(1, "a", "two\n")
+	gittest.Sh(t, o.Work, "git", "push", "--quiet", "origin", head+":refs/heads/topic/change")
+	gittest.Sh(t, o.Bare, "git", "update-ref", "refs/pull/1/head", parent)
+	_, heads, err := o.Repo.Fetch([]int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if heads[1] != parent {
+		t.Fatalf("pull ref = %s, want parent %s", heads[1], parent)
+	}
+	if _, err := o.Repo.read(head); err == nil {
+		t.Fatal("the branch's tip was already present before fetching it")
+	}
+	if tip, err := o.Repo.FetchBranch("topic/change"); err != nil || tip != head {
+		t.Fatalf("branch tip = %s, %v; want %s", tip, err, head)
+	}
+	if _, err := o.Repo.read(head); err != nil {
+		t.Fatalf("the branch's fetched tip is unreadable: %v", err)
+	}
+	head = o.PR(1, "a", "other\n")
+	gittest.Sh(t, o.Work, "git", "push", "--quiet", "--force", "origin", head+":refs/heads/topic/change")
+	if tip, err := o.Repo.FetchBranch("topic/change"); err != nil || tip != head {
+		t.Fatalf("force-pushed branch tip = %s, %v; want %s", tip, err, head)
+	}
+	gittest.Sh(t, o.Work, "git", "push", "--quiet", "origin", ":refs/heads/topic/change")
+	if tip, err := o.Repo.FetchBranch("topic/change"); err != nil || tip != "" {
+		t.Fatalf("deleted branch tip = %s, %v; want an empty tip and no error", tip, err)
+	}
+	o.Repo.Remote = o.Bare + "/unreachable"
+	if tip, err := o.Repo.FetchBranch("topic/change"); err == nil || tip != "" {
+		t.Fatalf("unreachable branch tip = %s, %v; want a fetch error", tip, err)
+	}
+}
+
+func TestHoldsAnswersFalseForACommitNotPresent(t *testing.T) {
+	o := newOrigin(t)
+	trunk := o.fetch()
+	head := o.pr(1, "a", "one\n").Head
+	if _, err := o.Repo.read(head); err == nil {
+		t.Fatal("the pull request's head was already present before fetching it")
+	}
+	if o.Repo.Holds(trunk, head) {
+		t.Fatal("the trunk holds a commit that is not present locally")
+	}
+}
+
 func TestTheSameQueueBuildsTheSameCommits(t *testing.T) {
 	o := newOrigin(t)
 	a, b := o.pr(1, "a", "a\n"), o.pr(2, "b", "b\n")

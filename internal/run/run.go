@@ -182,10 +182,18 @@ func (q *Queue) Read() (*Read, error) {
 	}
 	r := &Read{World: queue.World{Now: q.Now(), Trunk: trunk, Repo: q.Git}, Pulls: map[int]github.Pull{}}
 	for _, p := range pulls {
-		if q.ejected[p.Number] || q.Git.Holds(trunk, heads[p.Number]) {
+		if q.ejected[p.Number] || q.Git.Holds(trunk, p.Head) {
 			continue // it has left the queue or landed, and GitHub has yet to say so
 		}
-		if heads[p.Number] != p.Head {
+		matches := heads[p.Number] == p.Head
+		if !matches && p.HeadBranch != "" {
+			head, err := q.Git.FetchBranch(p.HeadBranch)
+			if err != nil {
+				return nil, err
+			}
+			matches = head == p.Head
+		}
+		if !matches {
 			p.Wait = "its newest push is still arriving"
 		}
 		r.Pulls[p.Number] = p

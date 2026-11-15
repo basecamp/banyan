@@ -10,6 +10,8 @@ A tick is `queue.Plan`: a pure function from the world it reads to the actions i
 
 The world is the trunk's tip, the labelled pull requests, and the builds: every commit Banyan pushed whose branch still stands, with CI's verdict on it. Everything a later tick needs is in git and in GitHub's statuses, so a tick can run anywhere, and a recorded world replays exactly.
 
+When a pull ref differs from the API's head, the queue also fetches the pull request's head branch if it is in this repository. It goes on with the API's head only if that branch's tip agrees with it, and otherwise waits. This trusts the branch as git serves it: a push lands there first, and the pull ref and the API follow it. Before landing, the queue reads the pull requests again and drops the landing if that read no longer admits the head the build merged; a push GitHub has not shown by then is not caught.
+
 Commits are deterministic. A merge is built from its parents, the head it merges and a note, with fixed author and dates, so the same queue always gives the same SHAs and a later tick finds the builds an earlier one pushed.
 
 ## The chain

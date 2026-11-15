@@ -41,16 +41,17 @@ type hub struct {
 }
 
 type pull struct {
-	number   int
-	title    string
-	body     string
-	heads    []string
-	labels   map[string]time.Time
-	events   []labelEvent
-	draft    bool
-	base     string
-	comments []comment
-	merged   bool
+	number    int
+	title     string
+	body      string
+	heads     []string
+	labels    map[string]time.Time
+	events    []labelEvent
+	draft     bool
+	base      string
+	comments  []comment
+	merged    bool
+	crossRepo bool
 	// threads is its review threads, true where resolved, and unread is how many more GitHub
 	// holds past the page it returns.
 	threads []bool
@@ -115,7 +116,7 @@ func (h *hub) node(p *pull) map[string]any {
 	for _, sha := range p.heads {
 		commits = append(commits, map[string]any{"commit": map[string]any{"oid": sha, "statusCheckRollup": h.rollup(sha, "", 100)}})
 	}
-	return map[string]any{"number": p.number, "title": p.title, "body": p.body, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base,
+	return map[string]any{"number": p.number, "title": p.title, "body": p.body, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base, "isCrossRepository": p.crossRepo,
 		"headRefName": fmt.Sprintf("pr%d", p.number), "headRepositoryOwner": map[string]any{"login": "o"},
 		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": h.timeline(p, 50, ""),
 		"reviewThreads": map[string]any{"totalCount": len(p.threads) + p.unread, "nodes": threads}, "commits": map[string]any{"nodes": commits}}
@@ -571,6 +572,118 @@ func TestAPushToAQueuedPullRequestLandsItsNewHeadOnceThatHeadIsAdmitted(t *testi
 	w.rounds(3)
 	if s := w.last(p.heads[1], "merge-queue"); !w.landed(1) || s.State != "success" || !strings.HasPrefix(s.Description, "landed as ") {
 		t.Errorf("#1 did not land at its new head once that head was signed off\n%s", w.log)
+	}
+}
+
+func TestReadWhenThePullRefDisagreesWithTheAPIHead(t *testing.T) {
+	for _, shape := range []string{"behind", "behind landed parent", "beside", "push arriving", "force-push arriving", "three different heads", "branch gone", "another repository", "heads agree branch gone", "heads agree another repository", "branch unreachable"} {
+		t.Run(shape, func(t *testing.T) {
+			w := newWorld(t, `{"admit": ["signoff"]}`)
+			p := w.queue(1, "a", "one\n")
+			parent := p.heads[0]
+			head := w.o.Amend(1, "a", "two\n")
+			branch := head
+			wait := ""
+			switch shape {
+			case "behind", "behind landed parent":
+				gittest.Sh(t, w.o.Bare, "git", "update-ref", "refs/pull/1/head", parent)
+				if shape == "behind landed parent" {
+					gittest.Sh(t, w.o.Bare, "git", "update-ref", "refs/heads/main", parent)
+				}
+			case "beside":
+				head = w.o.PR(1, "a", "other\n")
+				branch = head
+				gittest.Sh(t, w.o.Bare, "git", "update-ref", "refs/pull/1/head", parent)
+			case "push arriving":
+				head = parent
+				wait = "its newest push is still arriving"
+			case "force-push arriving":
+				branch = w.o.PR(1, "a", "other\n")
+				head = parent
+				wait = "its newest push is still arriving"
+			case "three different heads":
+				branch = w.o.PR(1, "a", "other\n")
+				gittest.Sh(t, w.o.Bare, "git", "update-ref", "refs/pull/1/head", parent)
+				wait = "its newest push is still arriving"
+			case "branch gone", "another repository":
+				gittest.Sh(t, w.o.Bare, "git", "update-ref", "refs/pull/1/head", parent)
+				p.crossRepo = shape == "another repository"
+				wait = "its newest push is still arriving"
+			case "heads agree another repository":
+				p.crossRepo = true
+			case "branch unreachable":
+				gittest.Sh(t, w.o.Bare, "git", "update-ref", "refs/pull/1/head", parent)
+			}
+			gittest.Sh(t, w.o.Work, "git", "push", "--quiet", "--force", "origin", branch+":refs/heads/pr1")
+			if shape == "branch gone" || shape == "heads agree branch gone" || shape == "heads agree another repository" {
+				gittest.Sh(t, w.o.Work, "git", "push", "--quiet", "origin", ":refs/heads/pr1")
+			}
+			p.heads = []string{head}
+			w.set(head, "signoff", "success")
+			if shape == "branch unreachable" {
+				// The pull refs arrive, then the remote is unreachable for the branch's fetch.
+				hook := filepath.Join(w.o.Clone, ".git", "hooks", "reference-transaction")
+				if err := os.WriteFile(hook, []byte("#!/bin/sh\nif test \"$1\" = committed; then\n  git config remote.origin.url ../unreachable.git\nfi\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r, err := w.q.Read()
+			if shape == "branch unreachable" {
+				if err == nil || !strings.Contains(err.Error(), "+refs/heads/pr1:refs/banyan/head") {
+					t.Fatalf("read error = %v, want the head branch's fetch error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(r.World.PRs) != 1 {
+				t.Fatalf("read %d pull requests, want one at the API head", len(r.World.PRs))
+			}
+			if pr := r.World.PRs[0]; pr.Wait != wait || pr.Head != head {
+				t.Fatalf("read head %s, wait %q; want head %s, wait %q", pr.Head, pr.Wait, head, wait)
+			}
+			if err := w.q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			branches := w.o.Branches("merge-queue/")
+			if wait != "" {
+				if len(branches) != 0 || w.last(head, "merge-queue").Description != "waits: "+wait {
+					t.Fatalf("waiting pull request: branches %v, status %+v", branches, w.last(head, "merge-queue"))
+				}
+				return
+			}
+			if len(branches) != 1 {
+				t.Fatalf("got %d candidates, want one", len(branches))
+			}
+			for _, sha := range branches {
+				if !w.q.Git.Holds(sha, head) {
+					t.Fatalf("candidate %s does not hold the API head %s", sha, head)
+				}
+			}
+			if shape == "behind" {
+				w.ci()
+				if err := w.q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				landed := w.last(head, "merge-queue")
+				if !w.o.Landed(head) || p.merged || landed.State != "success" || !strings.HasPrefix(landed.Description, "landed as ") {
+					t.Fatalf("landing with the pull request still open: landed %v, merged %v, status %+v\n%s", w.o.Landed(head), p.merged, landed, w.log)
+				}
+				gittest.Sh(t, w.o.Work, "git", "push", "--quiet", "origin", ":refs/heads/pr1")
+				trunk := w.o.Trunk()
+				pushed := strings.Count(w.log.String(), `"do":"push"`)
+				if err := w.q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				if got := w.last(head, "merge-queue"); got != landed {
+					t.Errorf("after the head branch was deleted, status %+v, want %+v", got, landed)
+				}
+				if left := w.o.Branches("merge-queue/"); len(left) != 0 || w.o.Trunk() != trunk || strings.Count(w.log.String(), `"do":"push"`) != pushed {
+					t.Errorf("after the head branch was deleted, new work was pushed: branches %v\n%s", left, w.log)
+				}
+			}
+		})
 	}
 }
 

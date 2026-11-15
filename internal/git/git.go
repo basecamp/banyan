@@ -109,6 +109,18 @@ func (r *Repo) Fetch(prs []int) (trunk queue.SHA, heads map[int]queue.SHA, err e
 	return trunk, heads, nil
 }
 
+// FetchBranch brings a branch from the remote and returns its tip, empty if it is gone.
+func (r *Repo) FetchBranch(branch string) (queue.SHA, error) {
+	ref := "refs/banyan/head"
+	if _, err := r.git("fetch", "--quiet", "--no-tags", r.Remote, "+refs/heads/"+branch+":"+ref); err != nil {
+		if out, gone := r.git("ls-remote", r.Remote, "refs/heads/"+branch); gone == nil && out == "" {
+			return "", nil
+		}
+		return "", err
+	}
+	return r.git("rev-parse", ref)
+}
+
 func (r *Repo) read(sha string) (commit, error) {
 	if c, ok := r.commits[sha]; ok {
 		return c, nil
@@ -326,6 +338,9 @@ func (r *Repo) keep(c commit) {
 
 // Holds says whether the trunk at this tip already holds the commit.
 func (r *Repo) Holds(trunk, sha queue.SHA) bool {
+	if _, err := r.git("cat-file", "-e", sha+"^{commit}"); err != nil {
+		return false
+	}
 	_, err := r.git("merge-base", "--is-ancestor", sha, trunk)
 	var exit *exec.ExitError
 	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {

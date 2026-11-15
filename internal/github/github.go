@@ -320,7 +320,8 @@ func message(title, description string) string {
 // Pull is a pull request the queue knows, open or merged.
 type Pull struct {
 	queue.PR
-	Merged bool
+	Merged     bool
+	HeadBranch string // the head branch's name, only when it is in this repository
 	// Statuses are those of its head.
 	Statuses map[string]Status
 }
@@ -344,6 +345,7 @@ type pullNode struct {
 	Body          string
 	IsDraft       bool
 	Merged        bool
+	CrossRepo     bool `json:"isCrossRepository"`
 	BaseRefName   string
 	HeadRefOid    string
 	HeadRefName   string
@@ -367,7 +369,7 @@ type pullNode struct {
 const timelineFields = `pageInfo { hasPreviousPage startCursor } nodes {
 	... on LabeledEvent { createdAt label { name } } }`
 
-const pullFields = `number title body isDraft merged baseRefName headRefOid headRefName headRepositoryOwner { login }
+const pullFields = `number title body isDraft merged isCrossRepository baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 100) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { ` + timelineFields + ` }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
@@ -386,6 +388,9 @@ func queuedAt(events []labelEvent, label string) time.Time {
 func (n Names) pull(node pullNode) Pull {
 	p := Pull{Merged: node.Merged}
 	p.Number, p.Head = node.Number, node.HeadRefOid
+	if !node.CrossRepo {
+		p.HeadBranch = node.HeadRefName
+	}
 	if node.Owner.Login != "" && node.HeadRefName != "" {
 		p.Branch = node.Owner.Login + "/" + node.HeadRefName
 	}
