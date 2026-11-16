@@ -93,6 +93,17 @@ func TestHoldsAnswersFalseForACommitNotPresent(t *testing.T) {
 	}
 }
 
+func TestHoldsStopsOnAGitFailureThatIsNotAnAbsentCommit(t *testing.T) {
+	o := newOrigin(t)
+	trunk := o.fetch()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a name git cannot read was answered as a commit the trunk does not hold")
+		}
+	}()
+	o.Repo.Holds(trunk, "no such commit")
+}
+
 func TestTheSameQueueBuildsTheSameCommits(t *testing.T) {
 	o := newOrigin(t)
 	a, b := o.pr(1, "a", "a\n"), o.pr(2, "b", "b\n")
