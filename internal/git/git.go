@@ -338,10 +338,12 @@ func (r *Repo) keep(c commit) {
 
 // Holds says whether the trunk at this tip already holds the commit.
 func (r *Repo) Holds(trunk, sha queue.SHA) bool {
-	if _, err := r.git("cat-file", "-e", sha+"^{commit}"); err != nil {
-		return false
-	}
-	_, err := r.git("merge-base", "--is-ancestor", sha, trunk)
+	return r.answers("cat-file", "-e", sha) && r.answers("merge-base", "--is-ancestor", sha, trunk)
+}
+
+// answers asks git a question it answers no to by exiting 1.
+func (r *Repo) answers(args ...string) bool {
+	_, err := r.git(args...)
 	var exit *exec.ExitError
 	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
 		panic(err)

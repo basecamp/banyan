@@ -661,7 +661,7 @@ func TestReadWhenThePullRefDisagreesWithTheAPIHead(t *testing.T) {
 					t.Fatalf("candidate %s does not hold the API head %s", sha, head)
 				}
 			}
-			if shape == "behind" {
+			if shape == "behind" || shape == "beside" {
 				w.ci()
 				if err := w.q.Tick(); err != nil {
 					t.Fatal(err)
