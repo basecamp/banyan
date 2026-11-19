@@ -49,6 +49,8 @@ type takeoutReport struct {
 	ByClass      map[string]takeoutCounts `json:"by_class"`
 	Twice        []takeoutHead            `json:"twice"`
 	Unread       int                      `json:"unread"`
+	ReadsFailed  int                      `json:"reads_failed"`
+	StillOut     []takeout                `json:"still_out"`
 }
 
 type takeoutComment struct {
@@ -62,15 +64,50 @@ type takeoutComment struct {
 }
 
 type takeoutCheck struct {
-	Name        string    `json:"name"`
+	Name string `json:"name"`
+	App  struct {
+		ID int64 `json:"id"`
+	} `json:"app"`
 	Status      string    `json:"status"`
 	Conclusion  string    `json:"conclusion"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"`
 }
 
-var takeoutMarker = regexp.MustCompile(`(?m)^<!-- \S+ eject (\S+) attributed=(\S+) -->`)
+var takeoutMarker = regexp.MustCompile(`^<!-- [^\r\n]+ eject (\S+) attributed=(\S+) -->$`)
 var takeoutRepo = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+// findTakeoutMarker returns the first marker outside fenced code blocks.
+func findTakeoutMarker(body string) []string {
+	var fence byte
+	length := 0
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		trimmed := strings.TrimLeft(line, " ")
+		if len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
+			n := 0
+			for n < len(trimmed) && trimmed[n] == trimmed[0] {
+				n++
+			}
+			if n >= 3 {
+				if fence == 0 {
+					if trimmed[0] != '`' || !strings.ContainsRune(trimmed[n:], '`') {
+						fence, length = trimmed[0], n
+					}
+				} else if trimmed[0] == fence && n >= length && strings.TrimSpace(trimmed[n:]) == "" {
+					fence, length = 0, 0
+				}
+				continue
+			}
+		}
+		if fence == 0 {
+			if marker := takeoutMarker.FindStringSubmatch(line); marker != nil {
+				return marker
+			}
+		}
+	}
+	return nil
+}
 
 func takeoutClass(attributed string) string {
 	switch attributed {
@@ -109,7 +146,7 @@ func runTakeouts(repo, from, to string) error {
 
 // readTakeouts keeps every marked take-out in the window, with unknown outcomes left null.
 func readTakeouts(repo, from, to string, read func(string) ([]byte, error)) (takeoutReport, error) {
-	report := takeoutReport{Repo: repo, EvalCommit: evalRevision(), Takeouts: []takeout{}, Twice: []takeoutHead{}, ByClass: map[string]takeoutCounts{}}
+	report := takeoutReport{Repo: repo, EvalCommit: evalRevision(), Takeouts: []takeout{}, Twice: []takeoutHead{}, StillOut: []takeout{}, ByClass: map[string]takeoutCounts{}}
 	if !takeoutRepo.MatchString(repo) {
 		return report, fmt.Errorf("-takeouts requires owner/repo")
 	}
@@ -125,7 +162,7 @@ func readTakeouts(repo, from, to string, read func(string) ([]byte, error)) (tak
 		report.ByClass[class] = takeoutCounts{}
 	}
 	for page := 1; ; page++ {
-		path := fmt.Sprintf("repos/%s/issues/comments?since=%s&sort=created&direction=asc&per_page=100&page=%d", repo, url.QueryEscape(from), page)
+		path := fmt.Sprintf("repos/%s/issues/comments?since=%s&sort=created&direction=asc&per_page=100&page=%d", repo, url.QueryEscape(report.From.Add(-time.Second).Format(time.RFC3339Nano)), page)
 		body, err := read(path)
 		if err != nil {
 			return report, err
@@ -142,7 +179,7 @@ func readTakeouts(repo, from, to string, read func(string) ([]byte, error)) (tak
 			if comment.CreatedAt.Before(report.From) || !comment.CreatedAt.Before(report.To) || comment.User.Type != "Bot" {
 				continue
 			}
-			marker := takeoutMarker.FindStringSubmatch(comment.Body)
+			marker := findTakeoutMarker(comment.Body)
 			if marker == nil {
 				continue
 			}
@@ -159,11 +196,17 @@ func readTakeouts(repo, from, to string, read func(string) ([]byte, error)) (tak
 	heads := map[takeoutHead]int{}
 	for i := range report.Takeouts {
 		out := &report.Takeouts[i]
+		failed := 0
 		if err := out.readPull(repo, read); err != nil {
+			failed++
+		}
+		failed += out.readChecks(repo, read)
+		if failed > 0 {
 			report.Unread++
 		}
-		if err := out.readChecks(repo, read); err != nil {
-			report.Unread++
+		report.ReadsFailed += failed
+		if out.Open != nil && *out.Open && !*out.Merged && !*out.HeadMoved {
+			report.StillOut = append(report.StillOut, *out)
 		}
 		class := out.Class
 		switch out.Attributed {
@@ -209,37 +252,88 @@ func (out *takeout) readPull(repo string, read func(string) ([]byte, error)) err
 	return nil
 }
 
-func (out *takeout) readChecks(repo string, read func(string) ([]byte, error)) error {
+type takeoutStatus struct {
+	Context   string    `json:"context"`
+	State     string    `json:"state"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func readTakeoutChecks(repo, head string, read func(string) ([]byte, error)) ([]takeoutCheck, error) {
 	var runs []takeoutCheck
 	for page := 1; ; page++ {
-		body, err := read(fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100&page=%d&filter=all", repo, out.Head, page))
+		body, err := read(fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100&page=%d&filter=all", repo, head, page))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var checks struct {
 			Runs []takeoutCheck `json:"check_runs"`
 		}
 		if err := json.Unmarshal(body, &checks); err != nil {
-			return err
+			return nil, err
 		}
 		runs = append(runs, checks.Runs...)
 		if len(checks.Runs) < 100 {
-			break
+			return runs, nil
 		}
 	}
-	failed := map[string]bool{}
+}
+
+func readTakeoutStatuses(repo, head string, read func(string) ([]byte, error)) ([]takeoutStatus, error) {
+	var statuses []takeoutStatus
+	for page := 1; ; page++ {
+		body, err := read(fmt.Sprintf("repos/%s/commits/%s/statuses?per_page=100&page=%d", repo, head, page))
+		if err != nil {
+			return nil, err
+		}
+		var pageStatuses []takeoutStatus
+		if err := json.Unmarshal(body, &pageStatuses); err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, pageStatuses...)
+		if len(pageStatuses) < 100 {
+			return statuses, nil
+		}
+	}
+}
+
+// readChecks leaves both lists unknown if either source cannot be read.
+func (out *takeout) readChecks(repo string, read func(string) ([]byte, error)) int {
+	runs, checksErr := readTakeoutChecks(repo, out.Head, read)
+	statuses, statusesErr := readTakeoutStatuses(repo, out.Head, read)
+	failures := 0
+	if checksErr != nil {
+		failures++
+	}
+	if statusesErr != nil {
+		failures++
+	}
+	if failures > 0 {
+		return failures
+	}
+	failed, passed := map[string]bool{}, map[string]bool{}
 	for _, run := range runs {
-		if run.Status == "completed" && !run.CompletedAt.IsZero() && !run.CompletedAt.After(out.At) {
-			switch run.Conclusion {
-			case "failure", "timed_out", "cancelled":
-				failed[run.Name] = true
+		if run.Status != "completed" || run.CompletedAt.IsZero() || run.CompletedAt.After(out.At) {
+			continue
+		}
+		switch run.Conclusion {
+		case "failure", "timed_out", "cancelled":
+			failed[run.Name] = true
+			for _, next := range runs {
+				if next.App.ID == run.App.ID && next.Name == run.Name && next.Status == "completed" && next.Conclusion == "success" && !run.StartedAt.IsZero() && next.StartedAt.After(run.StartedAt) && !next.CompletedAt.IsZero() && !next.CompletedAt.Before(next.StartedAt) {
+					passed[run.Name] = true
+				}
 			}
 		}
 	}
-	passed := map[string]bool{}
-	for _, run := range runs {
-		if failed[run.Name] && run.Status == "completed" && run.Conclusion == "success" && run.StartedAt.After(out.At) && !run.CompletedAt.IsZero() && !run.CompletedAt.Before(run.StartedAt) {
-			passed[run.Name] = true
+	for _, status := range statuses {
+		if (status.State != "failure" && status.State != "error") || status.CreatedAt.IsZero() || status.CreatedAt.After(out.At) {
+			continue
+		}
+		failed[status.Context] = true
+		for _, next := range statuses {
+			if next.Context == status.Context && next.State == "success" && next.CreatedAt.After(status.CreatedAt) {
+				passed[status.Context] = true
+			}
 		}
 	}
 	out.Failed, out.FailedThenPassed = []string{}, []string{}
@@ -251,5 +345,5 @@ func (out *takeout) readChecks(repo string, read func(string) ([]byte, error)) e
 	}
 	slices.Sort(out.Failed)
 	slices.Sort(out.FailedThenPassed)
-	return nil
+	return 0
 }

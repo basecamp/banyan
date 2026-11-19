@@ -12,7 +12,7 @@ import (
 
 const takeoutFrom = "2026-11-18T00:00:00Z"
 const takeoutTo = "2026-11-19T00:00:00Z"
-const takeoutCommentsPath = "repos/owner/repo/issues/comments?since=2026-11-18T00%3A00%3A00Z&sort=created&direction=asc&per_page=100&page=1"
+const takeoutCommentsPath = "repos/owner/repo/issues/comments?since=2026-11-17T23%3A59%3A59Z&sort=created&direction=asc&per_page=100&page=1"
 const takeoutPullPath = "repos/owner/repo/pulls/7"
 const takeoutChecksPath = "repos/owner/repo/commits/judged/check-runs?per_page=100&page=1&filter=all"
 const takeoutCommentJSON = `{"created_at":"2026-11-18T12:00:00Z","issue_url":"https://api.github.com/repos/owner/repo/issues/7","user":{"type":"Bot","login":"queue[bot]"},"body":"Taken out.\n<!-- banyan eject judged attributed=checks -->"}`
@@ -40,6 +40,7 @@ func takeoutBodies() map[string]string {
 		takeoutCommentsPath: "[" + takeoutCommentJSON + "]",
 		takeoutPullPath:     takeoutOpenJSON,
 		takeoutChecksPath:   takeoutEmptyChecksJSON,
+		takeoutStatusesPath: "[]",
 	}
 }
 
@@ -131,7 +132,7 @@ func TestTakeoutReadsASecondCommentPage(t *testing.T) {
 	bodies[second] = "[" + takeoutCommentJSON + "]"
 	read, paths := takeoutAPI(t, bodies)
 	report, err := readTakeouts("owner/repo", takeoutFrom, takeoutTo, read)
-	want := []string{takeoutCommentsPath, second, takeoutPullPath, takeoutChecksPath}
+	want := []string{takeoutCommentsPath, second, takeoutPullPath, takeoutChecksPath, takeoutStatusesPath}
 	if err != nil || report.CommentsRead != 101 || len(report.Takeouts) != 1 || !reflect.DeepEqual(*paths, want) {
 		t.Fatalf("report=%+v paths=%v err=%v", report, *paths, err)
 	}
@@ -192,7 +193,7 @@ func TestTakeoutChecksFailedByTheComment(t *testing.T) {
 func TestTakeoutChecksThatFailedLaterAreExcluded(t *testing.T) {
 	bodies := takeoutBodies()
 	bodies[takeoutChecksPath] = `{"check_runs":[
-		{"name":"late","status":"completed","conclusion":"failure","completed_at":"2026-11-18T12:00:01Z"},
+		{"name":"late","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T12:00:01Z"},
 		{"name":"late","status":"completed","conclusion":"success","started_at":"2026-11-18T13:00:00Z","completed_at":"2026-11-18T14:00:00Z"}
 	]}`
 	out := takeoutRead(t, bodies).Takeouts[0]
@@ -204,7 +205,7 @@ func TestTakeoutChecksThatFailedLaterAreExcluded(t *testing.T) {
 func TestTakeoutChecksASecondFailureIsNotAPass(t *testing.T) {
 	bodies := takeoutBodies()
 	bodies[takeoutChecksPath] = `{"check_runs":[
-		{"name":"build","status":"completed","conclusion":"failure","completed_at":"2026-11-18T11:00:00Z"},
+		{"name":"build","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T11:00:00Z"},
 		{"name":"build","status":"completed","conclusion":"failure","started_at":"2026-11-18T13:00:00Z","completed_at":"2026-11-18T14:00:00Z"}
 	]}`
 	out := takeoutRead(t, bodies).Takeouts[0]
@@ -215,7 +216,7 @@ func TestTakeoutChecksASecondFailureIsNotAPass(t *testing.T) {
 
 func TestTakeoutChecksASecondPageCanPassAnEarlierFailure(t *testing.T) {
 	bodies := takeoutBodies()
-	failed := `{"name":"build","status":"completed","conclusion":"failure","completed_at":"2026-11-18T11:00:00Z"}`
+	failed := `{"name":"build","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T11:00:00Z"}`
 	bodies[takeoutChecksPath] = `{"total_count":101,"check_runs":[` + strings.TrimSuffix(strings.Repeat(failed+",", 100), ",") + "]}"
 	second := strings.ReplaceAll(takeoutChecksPath, "&page=1", "&page=2")
 	bodies[second] = `{"total_count":101,"check_runs":[{"name":"build","status":"completed","conclusion":"success","started_at":"2026-11-18T13:00:00Z","completed_at":"2026-11-18T14:00:00Z"}]}`
@@ -225,20 +226,20 @@ func TestTakeoutChecksASecondPageCanPassAnEarlierFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := report.Takeouts[0]
-	if !reflect.DeepEqual(out.Failed, []string{"build"}) || !reflect.DeepEqual(out.FailedThenPassed, []string{"build"}) || report.ByClass["own check"] != (takeoutCounts{Count: 1, FailedThenPassed: 1}) || !reflect.DeepEqual(*paths, []string{takeoutCommentsPath, takeoutPullPath, takeoutChecksPath, second}) {
+	if !reflect.DeepEqual(out.Failed, []string{"build"}) || !reflect.DeepEqual(out.FailedThenPassed, []string{"build"}) || report.ByClass["own check"] != (takeoutCounts{Count: 1, FailedThenPassed: 1}) || !reflect.DeepEqual(*paths, []string{takeoutCommentsPath, takeoutPullPath, takeoutChecksPath, second, takeoutStatusesPath}) {
 		t.Fatalf("outcome=%+v counts=%+v paths=%v", out, report.ByClass, *paths)
 	}
 }
 
-func TestTakeoutChecksOnlyRerunsStartedAfterTheCommentCount(t *testing.T) {
+func TestTakeoutChecksRerunsStartedBeforeTheCommentCount(t *testing.T) {
 	for _, started := range []string{"2026-11-18T11:30:00Z", "2026-11-18T12:00:00Z"} {
 		bodies := takeoutBodies()
 		bodies[takeoutChecksPath] = fmt.Sprintf(`{"check_runs":[
-			{"name":"build","status":"completed","conclusion":"failure","completed_at":"2026-11-18T11:00:00Z"},
+			{"name":"build","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T11:00:00Z"},
 			{"name":"build","status":"completed","conclusion":"success","started_at":%q,"completed_at":"2026-11-18T13:00:00Z"}
 		]}`, started)
 		out := takeoutRead(t, bodies).Takeouts[0]
-		if !reflect.DeepEqual(out.FailedThenPassed, []string{}) {
+		if !reflect.DeepEqual(out.FailedThenPassed, []string{"build"}) {
 			t.Fatalf("started=%s outcome=%+v", started, out)
 		}
 	}
@@ -249,9 +250,9 @@ func TestTakeoutChecksNamesAreSortedAndCountedOnce(t *testing.T) {
 	bodies[takeoutChecksPath] = `{"check_runs":[
 		{"name":"z","status":"completed","conclusion":"success","started_at":"2026-11-18T13:00:00Z","completed_at":"2026-11-18T14:00:00Z"},
 		{"name":"a","status":"completed","conclusion":"success","started_at":"2026-11-18T13:00:00Z","completed_at":"2026-11-18T14:00:00Z"},
-		{"name":"z","status":"completed","conclusion":"failure","completed_at":"2026-11-18T11:00:00Z"},
-		{"name":"a","status":"completed","conclusion":"failure","completed_at":"2026-11-18T11:00:00Z"},
-		{"name":"z","status":"completed","conclusion":"failure","completed_at":"2026-11-18T15:00:00Z"}
+		{"name":"z","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T11:00:00Z"},
+		{"name":"a","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T11:00:00Z"},
+		{"name":"z","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T15:00:00Z"}
 	]}`
 	report := takeoutRead(t, bodies)
 	out := report.Takeouts[0]
@@ -283,7 +284,7 @@ func TestTakeoutUnreadPullLeavesItsFieldsNull(t *testing.T) {
 
 func TestTakeoutUnreadCheckPageLeavesAllChecksNull(t *testing.T) {
 	bodies := takeoutBodies()
-	failed := `{"name":"build","status":"completed","conclusion":"failure","completed_at":"2026-11-18T11:00:00Z"}`
+	failed := `{"name":"build","status":"completed","conclusion":"failure","started_at":"2026-11-18T10:00:00Z","completed_at":"2026-11-18T11:00:00Z"}`
 	bodies[takeoutChecksPath] = `{"check_runs":[` + strings.TrimSuffix(strings.Repeat(failed+",", 100), ",") + "]}"
 	bodies[strings.ReplaceAll(takeoutChecksPath, "&page=1", "&page=2")] = ""
 	report := takeoutRead(t, bodies)
@@ -300,7 +301,7 @@ func TestTakeoutCountsBothUnreadSources(t *testing.T) {
 	bodies := takeoutBodies()
 	bodies[takeoutPullPath], bodies[takeoutChecksPath] = "", ""
 	report := takeoutRead(t, bodies)
-	if report.Unread != 2 || len(report.Takeouts) != 1 || report.ByClass["own check"] != (takeoutCounts{Count: 1}) {
+	if report.Unread != 1 || report.ReadsFailed != 2 || len(report.Takeouts) != 1 || report.ByClass["own check"] != (takeoutCounts{Count: 1}) {
 		t.Fatalf("report: %+v", report)
 	}
 }
@@ -312,9 +313,10 @@ func TestTakeoutTwiceUsesBothNumberAndHead(t *testing.T) {
 	bodies[takeoutCommentsPath] = "[" + strings.Join([]string{takeoutCommentJSON, takeoutCommentJSON, takeoutCommentJSON, newHead, newNumber}, ",") + "]"
 	bodies["repos/owner/repo/pulls/8"] = takeoutOpenJSON
 	bodies[strings.ReplaceAll(takeoutChecksPath, "commits/judged", "commits/changed")] = takeoutEmptyChecksJSON
+	bodies[strings.ReplaceAll(takeoutStatusesPath, "commits/judged", "commits/changed")] = "[]"
 	read, paths := takeoutAPI(t, bodies)
 	report, err := readTakeouts("owner/repo", takeoutFrom, takeoutTo, read)
-	if err != nil || !reflect.DeepEqual(report.Twice, []takeoutHead{{Number: 7, Head: "judged"}}) || len(report.Takeouts) != 5 || len(*paths) != 11 || report.ByClass["own check"] != (takeoutCounts{Count: 5}) {
+	if err != nil || !reflect.DeepEqual(report.Twice, []takeoutHead{{Number: 7, Head: "judged"}}) || len(report.Takeouts) != 5 || len(*paths) != 16 || report.ByClass["own check"] != (takeoutCounts{Count: 5}) {
 		t.Fatalf("report=%+v paths=%v err=%v", report, *paths, err)
 	}
 }
@@ -347,7 +349,7 @@ func TestTakeoutRejectsInvalidArgumentsBeforeReading(t *testing.T) {
 
 func TestTakeoutSinceEscapesTimezoneOffsets(t *testing.T) {
 	from := "2026-11-18T00:00:00+08:00"
-	path := strings.ReplaceAll(takeoutCommentsPath, "2026-11-18T00%3A00%3A00Z", "2026-11-18T00%3A00%3A00%2B08%3A00")
+	path := strings.ReplaceAll(takeoutCommentsPath, "2026-11-17T23%3A59%3A59Z", "2026-11-17T23%3A59%3A59%2B08%3A00")
 	read, paths := takeoutAPI(t, map[string]string{path: "[]"})
 	report, err := readTakeouts("owner/repo", from, takeoutTo, read)
 	if err != nil || report.From.Format("2006-01-02T15:04:05Z07:00") != from || !reflect.DeepEqual(*paths, []string{path}) {
@@ -403,7 +405,7 @@ func TestTakeoutRunPrintsOneJSONLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"repo":"owner/repo","from":"2026-11-18T00:00:00Z","to":"2026-11-19T00:00:00Z","eval_commit":` + strconv.Quote(evalRevision()) + `,"comments_read":0,"takeouts":[],"by_class":{"blamed in a candidate":{"count":0,"landed_same_head":0,"failed_then_passed":0},"conflict":{"count":0,"landed_same_head":0,"failed_then_passed":0},"no gate":{"count":0,"landed_same_head":0,"failed_then_passed":0},"own check":{"count":0,"landed_same_head":0,"failed_then_passed":0}},"twice":[],"unread":0}` + "\n"
+	want := `{"repo":"owner/repo","from":"2026-11-18T00:00:00Z","to":"2026-11-19T00:00:00Z","eval_commit":` + strconv.Quote(evalRevision()) + `,"comments_read":0,"takeouts":[],"by_class":{"blamed in a candidate":{"count":0,"landed_same_head":0,"failed_then_passed":0},"conflict":{"count":0,"landed_same_head":0,"failed_then_passed":0},"no gate":{"count":0,"landed_same_head":0,"failed_then_passed":0},"own check":{"count":0,"landed_same_head":0,"failed_then_passed":0}},"twice":[],"unread":0,"reads_failed":0,"still_out":[]}` + "\n"
 	if string(data) != want {
 		t.Fatalf("row = %s, want %s", data, want)
 	}

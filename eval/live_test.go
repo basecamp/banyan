@@ -496,23 +496,25 @@ func captureLiveRun(t *testing.T, dir, like, from, to string, row bool) (string,
 func TestLiveSplitsALanding(t *testing.T) {
 	noon := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	at := func(m int) time.Time { return noon.Add(time.Duration(m) * time.Minute) }
-	pr := queue.PR{Number: 1, Head: "h", Queued: at(-10), Checks: queue.Success, Wait: "hold"}
+	pr := queue.PR{Number: 1, Head: "h", Queued: at(-10), Checks: queue.Success}
 	chain := []queue.Member{{Number: 1, Head: "h", Merge: "m"}}
 	first := queue.Build{SHA: "first", Chain: chain, Pushed: at(5)}
 	last := queue.Build{SHA: "last", Chain: chain, Pushed: at(20)}
 	passed := last
 	passed.Verdict = queue.Success
+	confirmed := passed
+	confirmed.Landed = at(32)
 	recs := []queue.Recording{
 		{World: queue.World{Now: at(2), Trunk: "t", PRs: []queue.PR{pr}}},
 		{World: queue.World{Now: at(5), Trunk: "t", PRs: []queue.PR{pr}}, Actions: []queue.Action{{Do: "push", Build: first}}},
 		{World: queue.World{Now: at(20), Trunk: "t", PRs: []queue.PR{pr}}, Actions: []queue.Action{{Do: "push", Build: last}}},
 		{World: queue.World{Now: at(30), Trunk: "t", PRs: []queue.PR{pr}, Builds: []queue.Build{passed}}},
 		{World: queue.World{Now: at(32), Trunk: "t", PRs: []queue.PR{pr}}, Actions: []queue.Action{{Do: "land", SHA: "last", Members: chain}}},
-		{World: queue.World{Now: at(33), Trunk: "last"}},
+		{World: queue.World{Now: at(33), Trunk: "last", Builds: []queue.Build{confirmed}}},
 	}
 	dir := writeLive(t, recs)
-	parts, skipped := splitLive(recs)
-	want := []landingParts{{first: 3, again: 15, build: 10, toLand: 2, total: 30}}
+	parts, skipped := splitLive(recs, []liveLanding{{at: at(32), ready: at(-10), sha: "last"}}, liveOptions{})
+	want := []landingParts{{added: 30, build: 10, toLand: 2, total: 42}}
 	if !reflect.DeepEqual(parts, want) || skipped != 0 {
 		t.Fatalf("parts=%+v skipped=%d, want %+v and zero", parts, skipped, want)
 	}
@@ -520,7 +522,7 @@ func TestLiveSplitsALanding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.SplitLandings != 1 || row.UnsplitLandings != 0 || *row.QueueAddedP50Minutes != 18 || *row.QueueAddedSumMinutes != 18 || *row.LandingBuildMedianMinutes != 10 || *row.SplitReadyToLandedP50Minutes != 30 {
+	if row.SplitLandings != 1 || row.UnsplitLandings != 0 || *row.QueueAddedP50Minutes != 30 || *row.QueueAddedSumMinutes != 30 || *row.LandingBuildMedianMinutes != 10 || *row.SplitReadyToLandedP50Minutes != 42 {
 		t.Fatalf("split measures: %+v", row.liveMeasures)
 	}
 }
@@ -531,22 +533,21 @@ func TestLiveCountsLandingsItCannotSplit(t *testing.T) {
 	b := queue.Build{SHA: "b", Chain: []queue.Member{{Number: 1, Head: "h", Merge: "m"}}, Pushed: noon}
 	passed := b
 	passed.Verdict = queue.Success
-	for _, missing := range []string{"ready", "candidate", "verdict", "order"} {
+	for _, missing := range []string{"ready", "candidate", "order"} {
 		t.Run(missing, func(t *testing.T) {
 			recs := []queue.Recording{
 				{World: queue.World{Now: noon, Trunk: "t", PRs: []queue.PR{pr}}, Actions: []queue.Action{{Do: "push", Build: b}}},
 				{World: queue.World{Now: noon.Add(10 * time.Minute), Trunk: "t", PRs: []queue.PR{pr}, Builds: []queue.Build{passed}}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: b.Chain}}},
-				{World: queue.World{Now: noon.Add(11 * time.Minute), Trunk: "b"}},
+				{World: queue.World{Now: noon.Add(11 * time.Minute), Trunk: "b", Builds: []queue.Build{{SHA: "b", Landed: noon.Add(10 * time.Minute)}}}},
 			}
 			switch missing {
 			case "ready":
 				recs[0].World.PRs, recs[1].World.PRs = nil, nil
 			case "candidate":
 				recs[0].Actions = nil
-			case "verdict":
-				recs[1].World.Builds = nil
+				recs[1].World.Builds[0].Pushed = time.Time{}
 			case "order":
-				recs[0].World.PRs = nil
+				recs[0].World.PRs[0].Checks = queue.Pending
 			}
 			_, _, row, err := scoreLive(writeLive(t, recs), "", liveOptions{row: true})
 			if err != nil {
@@ -569,7 +570,7 @@ func TestLiveWindowIncludesFromAndExcludesTo(t *testing.T) {
 		{World: queue.World{Now: start.Add(time.Minute)}},
 		{World: queue.World{Now: end}},
 	})
-	for _, name := range []string{"20261118T115959Z-0.json", "20261118T121000Z-0.json"} {
+	for _, name := range []string{"20261117T115959Z-0.json", "20261118T131000Z-0.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("unreadable JSON outside window"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -613,30 +614,36 @@ func TestLiveRejectsInvalidWindowFlags(t *testing.T) {
 	}
 }
 
-func TestLiveGapsRequireAReadyHeadBetweenTrunkMoves(t *testing.T) {
+func TestLiveGapsRequireReadyTicksStrictlyBetweenLandings(t *testing.T) {
 	noon := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	ready := []queue.PR{{Number: 1, Queued: noon, Note: "in the queue, waiting"}}
-	for _, empty := range []bool{false, true} {
-		t.Run(fmt.Sprint(empty), func(t *testing.T) {
+	ready := []queue.PR{{Number: 1, Queued: noon, Checks: queue.Success}}
+	for _, state := range []string{"ready", "empty", "held", "pending", "empty then ready", "no ticks"} {
+		t.Run(state, func(t *testing.T) {
 			recs := []queue.Recording{
-				{World: queue.World{Now: noon, Trunk: "a", PRs: ready}},
-				{World: queue.World{Now: noon.Add(time.Minute), Trunk: "b"}},
-				{World: queue.World{Now: noon.Add(50 * time.Minute), Trunk: "b", PRs: ready}},
-				{World: queue.World{Now: noon.Add(101 * time.Minute), Trunk: "c"}},
+				{World: queue.World{Now: noon, Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "a", Members: []queue.Member{{Number: 1}}}}},
+				{World: queue.World{Now: noon.Add(50 * time.Minute), Trunk: "a", PRs: ready}},
+				{World: queue.World{Now: noon.Add(100 * time.Minute), Trunk: "a"}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: []queue.Member{{Number: 2}}}}},
+				{World: queue.World{Now: noon.Add(101 * time.Minute), Trunk: "b"}},
 			}
-			if empty {
-				recs[2].World.PRs = nil
+			switch state {
+			case "empty":
+				recs[1].World.PRs = nil
+			case "held":
+				recs[1].World.PRs = []queue.PR{{Number: 1, Checks: queue.Success, Wait: "hold"}}
+			case "pending":
+				recs[1].World.PRs = []queue.PR{{Number: 1, Checks: queue.Pending}}
+			case "empty then ready":
+				recs = append(recs[:1], append([]queue.Recording{{World: queue.World{Now: noon.Add(time.Minute), Trunk: "a"}}}, recs[1:]...)...)
+			case "no ticks":
+				recs = append(recs[:1], recs[2:]...)
 			}
-			_, _, row, err := scoreLive(writeLive(t, recs), "", liveOptions{row: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if empty {
-				if row.ReadyGaps != 0 || row.LongestReadyGapMinutes != nil || row.ReadyGapsOver90 != 0 {
-					t.Fatalf("gap across empty queue: %+v", row.liveMeasures)
+			row := windowRow(t, recs, noon, noon.Add(101*time.Minute))
+			if state == "ready" {
+				if row.ReadyGaps != 1 || row.LongestReadyGapMinutes == nil || *row.LongestReadyGapMinutes != 100 || row.ReadyGapsOver90 != 1 {
+					t.Fatalf("ready gap: %+v", row.liveMeasures)
 				}
-			} else if row.ReadyGaps != 1 || *row.LongestReadyGapMinutes != 100 || row.ReadyGapsOver90 != 1 || !row.LongestReadyGapFrom.Equal(recs[1].World.Now) || !row.LongestReadyGapTo.Equal(recs[3].World.Now) {
-				t.Fatalf("ready gap: %+v", row.liveMeasures)
+			} else if row.ReadyGaps != 0 || row.LongestReadyGapMinutes != nil || row.ReadyGapsOver90 != 0 {
+				t.Fatalf("gap with %s: %+v", state, row.liveMeasures)
 			}
 		})
 	}
@@ -805,10 +812,12 @@ func TestLiveKeepsEveryExistingOutputLine(t *testing.T) {
 	b := queue.Build{SHA: "b", Pushed: noon, Chain: []queue.Member{{Number: 1, Head: "h", Merge: "b"}}}
 	passed := b
 	passed.Verdict = queue.Success
+	confirmed := passed
+	confirmed.Landed = noon.Add(12 * time.Minute)
 	dir := writeLive(t, []queue.Recording{
 		{World: queue.World{Now: noon, Trunk: "t", PRs: []queue.PR{pr}}, Actions: []queue.Action{{Do: "push", Build: b}}},
 		{World: queue.World{Now: noon.Add(10 * time.Minute), Trunk: "t", PRs: []queue.PR{pr}, Builds: []queue.Build{passed}}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: b.Chain}}},
-		{World: queue.World{Now: noon.Add(11 * time.Minute), Trunk: "b"}},
+		{World: queue.World{Now: noon.Add(13 * time.Minute), Trunk: "b", Builds: []queue.Build{confirmed}}},
 	})
 	out, err := captureLiveRun(t, dir, "", "", "", false)
 	if err != nil {
@@ -816,13 +825,13 @@ func TestLiveKeepsEveryExistingOutputLine(t *testing.T) {
 	}
 	lines := strings.SplitAfter(out, "\n")
 	got := strings.Join(append(slices.Clone(lines[:5]), lines[11:]...), "")
-	legacy := "3 ticks over 11m0s with something queued; a whole build took 10.0 min at the median, as the ticks saw it\n" +
+	legacy := "3 ticks over 13m0s with something queued; a whole build took 10.0 min at the median, as the ticks saw it\n" +
 		"ready to landed: 10 min at the median, 10 at p90\n" +
 		"labelled to landed: 10 min at the median, 10 at p90, 10 at the mean of the slowest twentieth\n" +
 		"wrong ejections: 0 in 1 landings (0.00 per 1,000)\n" +
 		"of 1 whole builds of trees that passed, alone or under more, 0 did not pass\n" +
 		"shape            config         landed  wrong/1k   wait50   wait90  label50  label90  slow20th   eject90  builds/pr per hour\n" +
-		fmt.Sprintf("%-16s live                1      0.00     1.00     1.00     1.00     1.00      1.00      0.00       1.00      5.5\n", filepath.Base(dir))
+		fmt.Sprintf("%-16s live                1      0.00     1.00     1.00     1.00     1.00      1.00      0.00       1.00      4.6\n", filepath.Base(dir))
 	if got != legacy {
 		t.Fatalf("existing output changed:\ngot:\n%swant:\n%s", got, legacy)
 	}

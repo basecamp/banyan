@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -34,11 +33,12 @@ func live(dir, clone string) (Score, window, error) {
 
 func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, error) {
 	names, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	sort.Strings(names)
+	bounded := opts.from != nil || opts.to != nil
+	context := opts.context()
 	var recs []queue.Recording
 	for _, name := range names {
-		if tick, err := time.Parse("20060102T150405Z", strings.SplitN(filepath.Base(name), "-", 2)[0]); err == nil {
-			if opts.to != nil && !tick.Before(*opts.to) || opts.from != nil && !tick.Add(time.Second).After(*opts.from) {
+		if tick, err := time.Parse("20060102T150405Z", strings.SplitN(strings.TrimSuffix(filepath.Base(name), ".json"), "-", 2)[0]); err == nil {
+			if context.to != nil && !tick.Before(*context.to) || context.from != nil && !tick.Add(time.Second).After(*context.from) {
 				continue
 			}
 		}
@@ -50,10 +50,17 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		if err := json.Unmarshal(data, &rec); err != nil {
 			return Score{}, window{}, liveRow{}, fmt.Errorf("%s: %w", name, err)
 		}
-		if opts.from != nil && rec.World.Now.Before(*opts.from) || opts.to != nil && !rec.World.Now.Before(*opts.to) {
+		if !context.contains(rec.World.Now) {
 			continue
 		}
 		recs = append(recs, rec)
+	}
+	slices.SortStableFunc(recs, func(a, b queue.Recording) int { return a.World.Now.Compare(b.World.Now) })
+	var ticks []queue.Recording
+	for _, rec := range recs {
+		if opts.contains(rec.World.Now) {
+			ticks = append(ticks, rec)
+		}
 	}
 	if len(recs) == 0 {
 		return Score{}, window{}, liveRow{}, fmt.Errorf("%s holds no recorded ticks", dir)
@@ -64,21 +71,15 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		}
 	}
 
-	// Ready to landed belongs to one queueing of one head: a new head or a new label starts it
-	// again.
-	type head struct {
-		Number int
-		Head   queue.SHA
-		Queued time.Time
-	}
 	var (
 		before       = map[queue.SHA]bool{}
 		observed     = map[queue.SHA]bool{}
 		firstPush    = map[queue.SHA]time.Time{}
 		pushed       = map[queue.SHA]queue.Build{}
+		pushTimes    = map[queue.SHA]time.Time{}
 		answered     = map[queue.SHA]time.Time{}
-		ready        = map[head]time.Time{}
-		seen         = map[head]bool{}
+		ready        = map[recordedHead]time.Time{}
+		seen         = map[recordedHead]bool{}
 		labelled     = map[int]time.Time{}
 		ejected      = map[[2]any]bool{}    // a number and a head ejected as the cause, however often queued
 		ejectedHeads = map[int][]ejection{} // each pull request's ejections as the cause, with the trunk it was ejected on
@@ -91,6 +92,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		spans        []time.Duration
 		ejects       []time.Duration
 		busy         time.Duration
+		landings     []liveLanding
 		landed       int
 		wrong        int
 		unchecked    int
@@ -102,15 +104,15 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	for i, rec := range recs {
 		now := rec.World.Now
-		if i > 0 && len(recs[i-1].World.PRs) > 0 {
+		if i > 0 && opts.contains(now) && opts.contains(recs[i-1].World.Now) && len(recs[i-1].World.PRs) > 0 {
 			busy += now.Sub(recs[i-1].World.Now)
 		}
-		at := map[int]head{}
+		at := map[int]recordedHead{}
 		for _, pr := range rec.World.PRs {
 			if !pr.Queued.IsZero() && (labelled[pr.Number].IsZero() || pr.Queued.Before(labelled[pr.Number])) {
 				labelled[pr.Number] = pr.Queued
 			}
-			h := head{pr.Number, pr.Head, pr.Queued}
+			h := recordedHead{pr.Number, pr.Head, pr.Queued}
 			if at[pr.Number] = h; ready[h].IsZero() && pr.Wait == "" && pr.Checks == queue.Success {
 				if ready[h] = pr.Queued; seen[h] {
 					ready[h] = now
@@ -138,9 +140,13 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				answerAt, pushedAt = b.Landed, firstPush[b.SHA]
 			}
 			answered[b.SHA] = answerAt
-			took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
+			if opts.contains(answerAt) {
+				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
+			}
 			if b.Kind != queue.Probe {
-				verdicts[b.Tests()] = append(verdicts[b.Tests()], b.Verdict)
+				if opts.contains(answerAt) {
+					verdicts[b.Tests()] = append(verdicts[b.Tests()], b.Verdict)
+				}
 				for _, m := range b.Chain {
 					good[m.Merge] = good[m.Merge] || b.Verdict == queue.Success
 				}
@@ -154,16 +160,21 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			switch {
 			case a.Do == "push":
 				pushed[a.Build.SHA] = a.Build
+				if _, ok := pushTimes[a.Build.SHA]; !ok {
+					pushTimes[a.Build.SHA] = now
+				}
 				if _, seen := firstPush[a.Build.SHA]; !seen {
 					firstPush[a.Build.SHA] = now
 				}
 				observed[a.Build.SHA] = true
 			case a.Do == "eject" && a.Cause == "culprit":
-				causes++
+				if opts.contains(now) {
+					causes++
+				}
 				if h, ok := at[a.PR]; ok {
-					ejected[[2]any{h.Number, h.Head}] = true
-					ejectedHeads[h.Number] = append(ejectedHeads[h.Number], ejection{h.Head, rec.World.Trunk})
-					if !ready[h].IsZero() {
+					ejected[[2]any{h.number, h.head}] = true
+					ejectedHeads[h.number] = append(ejectedHeads[h.number], ejection{h.head, rec.World.Trunk})
+					if opts.contains(now) && !ready[h].IsZero() {
 						ejects = append(ejects, now.Sub(ready[h]))
 					}
 				}
@@ -172,15 +183,25 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				// trunk there, and once however often a refused push had it planned again.
 				trunks[a.SHA] = false
 				for _, m := range a.Members {
-					landed++
 					h := at[m.Number]
-					if ready[h].IsZero() { // no recorded tick read it ready
-						ready[h] = h.Queued
+					r := ready[h]
+					if h.head != m.Head {
+						r = time.Time{}
 					}
-					waits = append(waits, now.Sub(ready[h]))
+					landings = append(landings, liveLanding{at: now, ready: r, sha: a.SHA})
+					if !opts.contains(now) {
+						continue
+					}
+					landed++
+					start := ready[h]
+					if start.IsZero() {
+						start = h.queued
+						ready[h] = start
+					}
+					waits = append(waits, now.Sub(start))
 					since := labelled[m.Number]
 					if since.IsZero() {
-						since = ready[h]
+						since = start
 					}
 					spans = append(spans, now.Sub(since))
 					if ejected[[2]any{m.Number, m.Head}] {
@@ -206,6 +227,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	builds, hasProbe := 0.0, false
 	for _, sha := range slices.Sorted(maps.Keys(pushed)) {
 		b := pushed[sha]
+		if !opts.contains(pushTimes[sha]) {
+			continue
+		}
 		if b.Kind == queue.Probe {
 			hasProbe = true
 			if whole > 0 {
@@ -248,16 +272,27 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			}
 		}
 	}
-	win := window{build: time.Duration(whole * float64(time.Minute)), cfg: recs[len(recs)-1].Config}
+	win := window{build: time.Duration(whole * float64(time.Minute))}
+	if len(ticks) > 0 {
+		win.cfg = ticks[len(ticks)-1].Config
+	}
 	for _, at := range ready {
-		win.arrivals = append(win.arrivals, max(at.Sub(recs[0].World.Now), 0))
+		if len(ticks) > 0 && (!bounded || at.Before(ticks[len(ticks)-1].World.Now)) {
+			win.arrivals = append(win.arrivals, max(at.Sub(ticks[0].World.Now), 0))
+		}
 	}
 	slices.Sort(win.arrivals)
 	row := liveRow{
-		From: opts.from, To: opts.to, FirstTick: recs[0].World.Now, LastTick: recs[len(recs)-1].World.Now,
-		Ticks: len(recs), Commit: evalRevision(), Landed: landed, busy: busy, BusyMinutes: busy.Minutes(),
+		From: opts.from, To: opts.to,
+		Ticks: len(ticks), ContextTicks: len(recs) - len(ticks), Commit: evalRevision(), Landed: landed, busy: busy, BusyMinutes: busy.Minutes(),
 		WrongEjections: wrong, Unchecked: unchecked, Unreadable: unreadable, EjectionsAsCause: causes,
-		GoodBuilds: sc.Good, NonPassingBuilds: sc.Flaked, liveMeasures: measureLive(recs),
+		GoodBuilds: sc.Good, NonPassingBuilds: sc.Flaked, liveMeasures: measureLive(recs, opts, landings),
+	}
+	if row.SplitLandings+row.UnsplitLandings != landed {
+		return Score{}, window{}, liveRow{}, fmt.Errorf("split landings do not match counted landings")
+	}
+	if len(ticks) > 0 {
+		row.FirstTick, row.LastTick = ticks[0].World.Now, ticks[len(ticks)-1].World.Now
 	}
 	if len(took[queue.Candidate])+len(took[queue.Check]) > 0 {
 		row.BuildMedianMinutes = &whole

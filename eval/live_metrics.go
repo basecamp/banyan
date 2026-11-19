@@ -8,7 +8,6 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/basecamp/banyan/internal/queue"
@@ -45,6 +44,7 @@ type liveRow struct {
 	FirstTick                  time.Time  `json:"first_tick"`
 	LastTick                   time.Time  `json:"last_tick"`
 	Ticks                      int        `json:"ticks"`
+	ContextTicks               int        `json:"context_ticks"`
 	Commit                     string     `json:"commit"`
 	BusyMinutes                float64    `json:"busy_minutes"`
 	Landed                     int        `json:"landed"`
@@ -100,89 +100,105 @@ type liveMeasures struct {
 	LongestReadyGapFrom          *time.Time `json:"longest_ready_gap_from"`
 	LongestReadyGapTo            *time.Time `json:"longest_ready_gap_to"`
 	ReadyGapsOver90              int        `json:"ready_gaps_over_90"`
-	RedCandidates                int        `json:"red_candidates"`
-	RedReadN                     int        `json:"red_read_n"`
-	RedReadMedianMinutes         *float64   `json:"red_read_median_minutes"`
-	RedReadSumMinutes            *float64   `json:"red_read_sum_minutes"`
-	RedPullRequests              int        `json:"red_pull_requests"`
+	// UnplannedTrunkMoves counts the ticks in the window that read the trunk at a commit the tick
+	// before did not and no recorded plan landed: a merge made outside the queue, or a tick whose
+	// record is missing, whose landings the score cannot count.
+	UnplannedTrunkMoves  int      `json:"unplanned_trunk_moves"`
+	RedCandidates        int      `json:"red_candidates"`
+	RedReadN             int      `json:"red_read_n"`
+	RedReadMedianMinutes *float64 `json:"red_read_median_minutes"`
+	RedReadSumMinutes    *float64 `json:"red_read_sum_minutes"`
+	RedPullRequests      int      `json:"red_pull_requests"`
 }
 
 type recordedHead struct {
 	number int
 	head   queue.SHA
+	queued time.Time
+}
+
+type liveLanding struct {
+	at, ready time.Time
+	sha       queue.SHA
 }
 
 type landingParts struct {
-	first, again, build, toLand, total float64
+	added, build, toLand, total float64
 }
 
-// splitLive splits each planned landing from observed heads, candidate pushes and verdicts.
-func splitLive(recs []queue.Recording) ([]landingParts, int) {
-	type push struct {
-		at    time.Time
-		heads map[recordedHead]bool
+func (opts liveOptions) contains(at time.Time) bool {
+	return (opts.from == nil || !at.Before(*opts.from)) && (opts.to == nil || at.Before(*opts.to))
+}
+
+func (opts liveOptions) context() liveOptions {
+	if opts.from != nil {
+		at := opts.from.Add(-24 * time.Hour)
+		opts.from = &at
 	}
-	type landing struct {
-		at   time.Time
-		head recordedHead
-		sha  queue.SHA
+	if opts.to != nil {
+		at := opts.to.Add(time.Hour)
+		opts.to = &at
 	}
-	ready, verdicts := map[recordedHead]time.Time{}, map[queue.SHA]time.Time{}
-	pushes := map[queue.SHA]push{}
-	var landings []landing
+	return opts
+}
+
+// splitLive splits counted landings only when all of their clocks are known and ordered.
+func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions) ([]landingParts, int) {
+	pushes, verdicts := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
 	for _, rec := range recs {
-		now := rec.World.Now.Truncate(time.Second)
-		for _, pr := range rec.World.PRs {
-			h := recordedHead{pr.Number, pr.Head}
-			if pr.Checks == queue.Success && ready[h].IsZero() {
-				ready[h] = now
-			}
-		}
 		for _, b := range rec.World.Builds {
+			if !b.Pushed.IsZero() && pushes[b.SHA].IsZero() {
+				pushes[b.SHA] = b.Pushed
+			}
 			if b.Verdict != queue.Pending && verdicts[b.SHA].IsZero() {
-				verdicts[b.SHA] = now
+				verdicts[b.SHA] = rec.World.Now
 			}
 		}
 		for _, a := range rec.Actions {
-			switch {
-			case a.Do == "push" && a.Build.Kind == queue.Candidate:
-				p := push{at: now, heads: map[recordedHead]bool{}}
-				for _, m := range a.Build.Chain {
-					p.heads[recordedHead{m.Number, m.Head}] = true
-				}
-				pushes[a.Build.SHA] = p
-			case a.Do == "land":
-				for _, m := range a.Members {
-					landings = append(landings, landing{now, recordedHead{m.Number, m.Head}, a.SHA})
-				}
+			if a.Do == "push" && pushes[a.Build.SHA].IsZero() {
+				pushes[a.Build.SHA] = rec.World.Now
 			}
 		}
 	}
 	var rows []landingParts
 	skipped := 0
 	for _, l := range landings {
-		var first time.Time
-		for _, p := range pushes {
-			if p.heads[l.head] && !p.at.After(l.at) && (first.IsZero() || p.at.Before(first)) {
-				first = p.at
-			}
+		if !opts.contains(l.at) || l.at.IsZero() {
+			continue
 		}
-		r, lp, v := ready[l.head], pushes[l.sha].at, verdicts[l.sha]
-		if r.IsZero() || first.IsZero() || lp.IsZero() || v.IsZero() || r.After(first) || first.After(lp) || lp.After(v) || v.After(l.at) {
+		r, p, v := l.ready, pushes[l.sha], verdicts[l.sha]
+		end := l.at
+		if v.IsZero() || end.Before(v) {
+			v = end
+		}
+		if r.IsZero() || p.IsZero() || v.IsZero() || end.IsZero() || r.After(p) || p.After(v) || v.After(end) {
 			skipped++
 			continue
 		}
-		rows = append(rows, landingParts{first.Sub(r).Minutes(), lp.Sub(first).Minutes(), v.Sub(lp).Minutes(), l.at.Sub(v).Minutes(), l.at.Sub(r).Minutes()})
+		rows = append(rows, landingParts{p.Sub(r).Minutes(), v.Sub(p).Minutes(), end.Sub(v).Minutes(), end.Sub(r).Minutes()})
 	}
 	return rows, skipped
 }
 
-func measureLive(recs []queue.Recording) liveMeasures {
-	rows, skipped := splitLive(recs)
+func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLanding) liveMeasures {
+	rows, skipped := splitLive(recs, landings, opts)
 	m := liveMeasures{SplitLandings: len(rows), UnsplitLandings: skipped}
+	planned := map[queue.SHA]bool{}
+	for _, rec := range recs {
+		for _, a := range rec.Actions {
+			if a.Do == "land" {
+				planned[a.SHA] = true
+			}
+		}
+	}
+	for i := 1; i < len(recs); i++ {
+		if trunk := recs[i].World.Trunk; trunk != recs[i-1].World.Trunk && !planned[trunk] && opts.contains(recs[i].World.Now) {
+			m.UnplannedTrunkMoves++
+		}
+	}
 	var added, build, total []float64
 	for _, r := range rows {
-		added, build, total = append(added, r.first+r.again), append(build, r.build), append(total, r.total)
+		added, build, total = append(added, r.added), append(build, r.build), append(total, r.total)
 	}
 	slices.Sort(added)
 	var sum, over30 float64
@@ -200,40 +216,47 @@ func measureLive(recs []queue.Recording) liveMeasures {
 		m.QueueAddedSumMinutes, m.QueueAddedOver30SumMinutes = number(sum), number(over30)
 	}
 
-	var prev queue.SHA
-	var lastLand time.Time
-	readyAll := true
-	for i, rec := range recs {
-		now := rec.World.Now.Truncate(time.Second)
-		ready := false
-		for _, pr := range rec.World.PRs {
-			if strings.HasPrefix(pr.Note, "in the queue") {
-				ready = true
-			}
+	var times []time.Time
+	for _, l := range landings {
+		times = append(times, l.at)
+	}
+	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
+	times = slices.CompactFunc(times, func(a, b time.Time) bool { return a.Equal(b) })
+	for i := 1; i < len(times); i++ {
+		from, to := times[i-1], times[i]
+		if !opts.contains(to) {
+			continue
 		}
-		if i > 0 && rec.World.Trunk != prev {
-			if !lastLand.IsZero() && readyAll {
-				gap := now.Sub(lastLand).Minutes()
-				m.ReadyGaps++
-				if m.LongestReadyGapMinutes == nil || gap >= *m.LongestReadyGapMinutes {
-					m.LongestReadyGapMinutes, m.LongestReadyGapFrom, m.LongestReadyGapTo = number(gap), timeValue(lastLand), timeValue(now)
-				}
-				if gap > 90 {
-					m.ReadyGapsOver90++
-				}
+		between, allReady := false, true
+		for _, rec := range recs {
+			if !rec.World.Now.After(from) || !rec.World.Now.Before(to) {
+				continue
 			}
-			lastLand, readyAll = now, true
-		} else {
-			readyAll = readyAll && ready
+			between = true
+			ready := false
+			for _, pr := range rec.World.PRs {
+				ready = ready || waitsOnTheQueue(pr)
+			}
+			allReady = allReady && ready
 		}
-		prev = rec.World.Trunk
+		if !between || !allReady {
+			continue
+		}
+		gap := to.Sub(from).Minutes()
+		m.ReadyGaps++
+		if m.LongestReadyGapMinutes == nil || gap >= *m.LongestReadyGapMinutes {
+			m.LongestReadyGapMinutes, m.LongestReadyGapFrom, m.LongestReadyGapTo = number(gap), timeValue(from), timeValue(to)
+		}
+		if gap > 90 {
+			m.ReadyGapsOver90++
+		}
 	}
 
 	failed, red := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
 	kinds, chains := map[queue.SHA]queue.Kind{}, map[queue.SHA][]queue.Member{}
 	var redOrder []queue.SHA
 	for _, rec := range recs {
-		now := rec.World.Now.Truncate(time.Second)
+		now := rec.World.Now
 		for _, b := range rec.World.Builds {
 			kinds[b.SHA] = b.Kind
 			if _, ok := chains[b.SHA]; !ok {
@@ -253,12 +276,12 @@ func measureLive(recs []queue.Recording) liveMeasures {
 	slices.SortStableFunc(redOrder, func(a, b queue.SHA) int { return red[a].Compare(red[b]) })
 	for _, sha := range redOrder {
 		at := red[sha]
-		if kinds[sha] != queue.Candidate {
+		if kinds[sha] != queue.Candidate || !opts.contains(at) {
 			continue
 		}
 		m.RedCandidates++
 		m.RedPullRequests += len(chains[sha])
-		if !failed[sha].IsZero() {
+		if !failed[sha].IsZero() && !failed[sha].After(at) {
 			value, _ := strconv.ParseFloat(strconv.FormatFloat(at.Sub(failed[sha]).Minutes(), 'f', 1, 64), 64)
 			latencies = append(latencies, value)
 			redSum += value
@@ -269,6 +292,13 @@ func measureLive(recs []queue.Recording) liveMeasures {
 		m.RedReadSumMinutes = number(math.RoundToEven(redSum))
 	}
 	return m
+}
+
+// waitsOnTheQueue says a recorded pull request could be built: its own checks passed, nothing of
+// its own holds it, and the queue's last note on it is not that it conflicts with the trunk, which
+// only its author can change.
+func waitsOnTheQueue(pr queue.PR) bool {
+	return pr.Wait == "" && pr.Checks == queue.Success && pr.Note != "waits: it conflicts with the trunk"
 }
 
 func number(x float64) *float64 { return &x }

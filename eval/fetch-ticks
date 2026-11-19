@@ -1,36 +1,49 @@
 #!/usr/bin/env bash
-# fetch-ticks <owner/repo> <dir> <from> <to>: every tick record of the queue's successful runs created
-# in the window, each fetched once, into <dir>/ticks. Reads go through $BANYAN_GH (default gh): one
-# listing a hundred runs, then two a run not yet held. Exits 1 when any read failed, having kept the rest.
+# fetch-ticks <owner/repo> <dir> <from> <to>: every tick record of the queue's runs created in the
+# window, each fetched once, into <dir>/ticks. Reads go through $BANYAN_GH (default gh): one listing a
+# hundred runs of any outcome, since GitHub's listing by outcome leaves runs out, then two a run that
+# ran and is not yet held. A run still going is counted and left for the next fetch. A run is held once every record of it is in
+# <dir>/ticks, or it uploaded none. Exits 1 when any read or copy failed, having kept the rest, so a
+# caller never scores a day it could not fetch whole. A read that fails is tried once more.
 set -uo pipefail
 repo=$1 dir=$2 from=$3 to=$4
-gh=${BANYAN_GH:-gh} workflow=${BANYAN_WORKFLOW:-merge-queue.yml}
+gh=${BANYAN_GH:-gh} workflow=${BANYAN_WORKFLOW:-merge-queue.yml} pages=10
 mkdir -p "$dir/ticks" "$dir/runs"
-t=$(date -u -d "$from" +%s) end=$(date -u -d "$to" +%s) runs=0 new=0 failed=0
+read_api() { "$gh" api "$@" || { command sleep 5; "$gh" api "$@"; }; }
+t=$(date -u -d "$from" +%s) end=$(date -u -d "$to" +%s) runs=0 new=0 failed=0 bare=0 pending=0
 while [ "$t" -lt "$end" ]; do
   n=$((t + 7200)); [ "$n" -gt "$end" ] && n=$end
   window="$(date -u -d "@$t" +%FT%TZ)..$(date -u -d "@$n" +%FT%TZ)"
-  for page in 1 2 3 4 5 6 7 8 9 10; do
-    ids=$("$gh" api "repos/$repo/actions/workflows/$workflow/runs?per_page=100&page=$page&status=success&created=$window" --jq '.workflow_runs[].id') || { failed=$((failed + 1)); break; }
+  page=1
+  while :; do
+    ids=$(read_api "repos/$repo/actions/workflows/$workflow/runs?per_page=100&page=$page&created=$window" --jq '.workflow_runs[] | "\(.id):\(.status):\(.conclusion)"') || { failed=$((failed + 1)); break; }
     [ -n "$ids" ] || break
-    for run in $ids; do
+    for listed in $ids; do
+      run=${listed%%:*}
+      case $listed in *:completed:skipped) continue ;; *:completed:*) ;; *) pending=$((pending + 1)); continue ;; esac
       runs=$((runs + 1)); [ -e "$dir/runs/$run" ] && continue
-      artifacts=$("$gh" api "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.name | startswith("ticks-")) | .id') || { failed=$((failed + 1)); continue; }
+      artifacts=$(read_api "repos/$repo/actions/runs/$run/artifacts?per_page=100" --jq '.artifacts[] | select(.name | startswith("ticks-")) | .id') || { failed=$((failed + 1)); continue; }
       held=1
       for artifact in $artifacts; do
         tmp=$(mktemp -d "$dir/runs/.$run.XXXXXX")
-        if "$gh" api "repos/$repo/actions/artifacts/$artifact/zip" > "$tmp/ticks.zip" && unzip -q -o "$tmp/ticks.zip" -d "$tmp/out"; then
-          find "$tmp/out" -name '*.json' -exec cp -n {} "$dir/ticks/" \;
+        if read_api "repos/$repo/actions/artifacts/$artifact/zip" > "$tmp/ticks.zip" && unzip -q -o "$tmp/ticks.zip" -d "$tmp/out" \
+          && [ -n "$(find "$tmp/out" -name '*.json' -print -quit)" ] \
+          && find "$tmp/out" -name '*.json' -exec sh -c 'for f; do [ -e "$0/${f##*/}" ] || { cp "$f" "$0/.${f##*/}.part" && mv "$0/.${f##*/}.part" "$0/${f##*/}"; } || exit 1; done' "$dir/ticks" {} +; then :
         else
           held=0 failed=$((failed + 1))
         fi
         rm -rf "$tmp"
       done
-      [ "$held" = 1 ] && { : > "$dir/runs/$run"; new=$((new + 1)); }
+      if [ "$held" = 1 ]; then
+        if [ -n "$artifacts" ]; then echo recorded > "$dir/runs/$run"; else echo none > "$dir/runs/$run"; bare=$((bare + 1)); fi
+        new=$((new + 1))
+      fi
     done
     [ "$(wc -w <<< "$ids")" -lt 100 ] && break
+    page=$((page + 1))
+    [ "$page" -le "$pages" ] || { echo "fetch-ticks: $repo has over $((pages * 100)) runs in $window, more than this reads" >&2; failed=$((failed + 1)); break; }
   done
   t=$n
 done
-echo "$repo: $runs successful runs in $from..$to, $new newly held, $failed reads failed, $(find "$dir/ticks" -name '*.json' | wc -l) records, newest $(ls "$dir/ticks" | tail -1)"
+echo "$repo: $runs runs that ran in $from..$to, $new newly held ($bare with no recording), $pending still going, $failed failed, $(find "$dir/ticks" -name '*.json' | wc -l) records, newest $(ls "$dir/ticks" | tail -1)"
 [ "$failed" = 0 ]
