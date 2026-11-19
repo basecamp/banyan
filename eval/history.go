@@ -18,14 +18,18 @@ import (
 type Act struct {
 	At      time.Duration
 	Number  int
-	Do      string        // label, unlabel, head, checks, conflict, hold or ejected
-	Head    queue.SHA     // head, checks
-	First   bool          // label: it goes first in line
-	Breaks  bool          // head: it fails the whole build
-	Verdict queue.Verdict // checks
-	Ahead   int           // hold: the pull request ahead that it conflicts with
-	After   []int         // conflict: the pull requests whose landing together brought it
-	Mended  time.Duration // conflict, hold: when the head that mends it was pushed
+	Do      string         // label, unlabel, head, checks, conflict, hold, ejected, wait or settings
+	Head    queue.SHA      // head, checks
+	First   bool           // label: it goes first in line
+	Breaks  bool           // head: it fails the whole build
+	Verdict queue.Verdict  // checks
+	Ahead   int            // hold: the pull request ahead that it conflicts with
+	After   []int          // conflict: the pull requests whose landing together brought it
+	Wait    string         // wait: a personal hold, empty to release it
+	Config  *queue.Config  // settings: the configuration from this time on
+	Queued  *time.Duration // label: the recorded queueing time
+	Ready   *time.Duration // checks, wait: the head's first readiness
+	Mended  time.Duration  // conflict, hold: when the head that mends it was pushed
 }
 
 // script is where a replay stands in its acts, and what it saw happen to each pull request.
@@ -59,6 +63,13 @@ func (s *Sim) play() {
 		return
 	}
 	for _, n := range h.numbers {
+		if s.shape.Recorded {
+			for len(h.acts[n]) > 0 && h.acts[n][0].At <= s.now {
+				s.act(h.acts[n][0])
+				h.acts[n] = h.acts[n][1:]
+			}
+			continue
+		}
 		for len(h.acts[n]) > 0 && (h.acts[n][0].At+h.behind[n] <= s.now || s.early(h.acts[n][0])) && s.act(h.acts[n][0]) {
 			h.acts[n] = h.acts[n][1:]
 		}
@@ -91,6 +102,11 @@ func (h *script) blame(n int, at time.Duration) {
 // act does one act, and says whether it could. The record's ejection of a pull request that
 // breaks the build waits for this queue's: what its author did next, they did on being told.
 func (s *Sim) act(a Act) bool {
+	if a.Do == "settings" {
+		s.cfg = *a.Config
+		s.shape.Cancels = s.cfg.Cancels
+		return true
+	}
 	h, p := s.history, s.prs[a.Number]
 	if p == nil {
 		p = &simPR{}
@@ -99,7 +115,7 @@ func (s *Sim) act(a Act) bool {
 		s.next = max(s.next, a.Number)
 	}
 	if p.landed {
-		if a.Do == "conflict" && !s.passOn(a) {
+		if !s.shape.Recorded && a.Do == "conflict" && !s.passOn(a) {
 			h.spared++
 		}
 		return true
@@ -110,14 +126,34 @@ func (s *Sim) act(a Act) bool {
 			h.labelled[a.Number] = a.At
 		}
 		p.First = p.First || a.First
+		if s.shape.Recorded {
+			p.First = a.First
+		}
+		if s.shape.Recorded && a.Queued != nil {
+			p.arrived = *a.Queued
+			p.Queued = s.epoch.Add(*a.Queued)
+		}
 		if !p.queued {
-			p.queued, p.gone, p.back, p.ready = true, false, 0, s.now
+			if !s.shape.Recorded {
+				p.ready = s.now
+			}
+			p.queued, p.gone, p.back = true, false, 0
 			p.Queued = s.epoch.Add(s.now)
+			if s.shape.Recorded {
+				p.arrived = s.now
+			}
+			if a.Queued != nil {
+				p.arrived = *a.Queued
+				p.Queued = s.epoch.Add(*a.Queued)
+			}
 		}
 	case "unlabel":
 		p.queued = false
+		if s.shape.Recorded {
+			p.gone = true
+		}
 	case "head":
-		if (p.conflict || p.ahead > 0) && a.At >= h.mended[a.Number]-2*time.Minute {
+		if s.shape.Recorded || (p.conflict || p.ahead > 0) && a.At >= h.mended[a.Number]-2*time.Minute {
 			p.conflict, p.ahead = false, 0
 		}
 		p.Head, p.Checks, p.checksGreen, p.breaks, p.Note = a.Head, queue.Pending, never, a.Breaks, ""
@@ -125,6 +161,14 @@ func (s *Sim) act(a Act) bool {
 	case "checks":
 		if p.Head == a.Head {
 			p.Checks, p.ready = a.Verdict, s.now
+			if a.Ready != nil {
+				p.ready = *a.Ready
+			}
+		}
+	case "wait":
+		p.Wait = a.Wait
+		if a.Wait == "" && a.Ready != nil {
+			p.ready = *a.Ready
 		}
 	case "conflict":
 		p.conflict, h.mended[a.Number], h.waited[a.Number] = true, a.Mended, true

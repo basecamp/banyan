@@ -28,10 +28,12 @@ type Shape struct {
 	Errored      float64 // a build ends with no verdict
 	Backlog      int
 	Arrivals     float64
-	Hours        float64 // arrivals stop after this long
-	Moves        float64 // heads pushed while queued
-	Removals     float64 // labels taken off
-	Outside      float64 // trunk commits that did not come through the queue
+	Hours        float64       // arrivals stop after this long
+	Recorded     bool          // tick replay: facts and settings come from acts
+	Stop         time.Duration // where positive, no tick at or after this time runs
+	Moves        float64       // heads pushed while queued
+	Removals     float64       // labels taken off
+	Outside      float64       // trunk commits that did not come through the queue
 	Episodes     []Episode
 	Crash        float64         // a tick dies after one of its actions
 	Race         float64         // a head moves between a tick's read and its landing
@@ -108,7 +110,7 @@ type simPR struct {
 	gone        bool // ejected with cause, or removed by its author, and not coming back
 	back        time.Duration
 	mend        time.Duration // when its author pushes the head that mends its conflict with the trunk
-	ready       time.Duration // when it was last queued with its own checks passed, which starts its clock
+	ready       time.Duration // when this head became ready, which starts its clock
 	checksGreen time.Duration
 	at          time.Duration // when it landed
 }
@@ -118,6 +120,7 @@ type simBuild struct {
 	start, end time.Duration
 	lost       bool
 	flake      bool
+	errored    bool
 }
 
 // Sim is one simulated world: the repository, its CI and the hidden facts that decide
@@ -155,19 +158,29 @@ type Sim struct {
 	Left     map[int]string // the cause each ejected pull request last left for
 	Whole    int
 	Probes   int
+	Red      int       // whole builds that reported failure
 	Waits    []float64 // ready to landed, in build times
 	Labelled []float64 // arrival to landed, in build times
 	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
 	Lands    []time.Duration // when each pull request landed
 	Minutes  float64         // the time its builds took, each to its end
+	opening  int
 	history  *script
+
+	RedCandidates   int
+	RedPullRequests int
+	QueueAdded      []float64 // ready to the landing candidate's push, in minutes
 }
 
 const tick = 2 * time.Minute
 
 func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
-	cfg.Cancels = shape.Cancels
+	if shape.Recorded {
+		shape.Cancels = cfg.Cancels
+	} else {
+		cfg.Cancels = shape.Cancels
+	}
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
 		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, under: map[queue.SHA]queue.SHA{}, merges: map[queue.SHA]queue.Member{}, trunks: map[queue.SHA]bool{"trunk0": true}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
@@ -193,6 +206,9 @@ func (s *Sim) queue() {
 		p := &simPR{arrived: s.now, ready: s.now, queued: true, breaks: q.Breaks, clash: q.Clash, conflict: q.Conflict}
 		p.Number, p.Head = q.Number, fmt.Sprintf("head%d", q.Number)
 		p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
+		if s.shape.Stop > 0 {
+			p.arrived, p.ready, p.Queued = q.At, q.At, s.epoch.Add(q.At)
+		}
 		s.prs[p.Number], s.byHead[p.Head] = p, p.Number
 		s.next = max(s.next, q.Number)
 	}
@@ -247,7 +263,7 @@ func (s *Sim) read(b queue.Build) queue.Build {
 
 func (s *Sim) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, bool) {
 	p := s.prs[pr.Number]
-	if p.conflict || (p.ahead > 0 && s.holds[parent][p.ahead]) {
+	if p.conflict || s.shape.Recorded && p.ahead != 0 || p.ahead > 0 && s.holds[parent][p.ahead] {
 		return "", false
 	}
 	return s.commit(parent, pr.Head, note, pr.Number), true
@@ -399,7 +415,11 @@ func (s *Sim) verdict(b *simBuild) queue.Verdict {
 
 // Step advances the world one tick: people and CI act, then the queue takes its tick.
 func (s *Sim) Step() {
-	s.now += tick
+	s.step(s.now + tick)
+}
+
+func (s *Sim) step(at time.Duration) {
+	s.now = at
 	if s.pool != nil {
 		s.pool.advance(s.now)
 		s.alone.advance(s.now)
@@ -423,12 +443,17 @@ func (s *Sim) Step() {
 			p.Checks, p.ready = queue.Success, s.now
 		}
 		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
-			p.queued, p.back, p.Note, p.ready = true, 0, "", s.now
+			p.queued, p.back, p.Note = true, 0, ""
+			if !s.shape.Recorded {
+				p.ready = s.now
+			}
 			p.Queued = s.epoch.Add(s.now)
 		}
 	}
-	for _, n := range s.numbers() {
-		s.mend(s.prs[n])
+	if !s.shape.Recorded {
+		for _, n := range s.numbers() {
+			s.mend(s.prs[n])
+		}
 	}
 	if s.hourly(s.shape.Moves) {
 		s.move()
@@ -443,12 +468,19 @@ func (s *Sim) Step() {
 	}
 	for _, sha := range s.shas() {
 		if b := s.builds[sha]; b.Verdict == queue.Pending && !b.lost && s.now >= b.end {
-			if s.chance(s.shape.Errored) {
+			if b.errored || !s.shape.Recorded && s.chance(s.shape.Errored) {
 				b.Verdict = queue.Error
 				s.say("  %.7s errored", sha)
 				continue
 			}
 			b.Verdict = s.verdict(b)
+			if b.Kind != queue.Probe && b.Verdict == queue.Failure {
+				s.Red++
+				if b.Kind == queue.Candidate {
+					s.RedCandidates++
+					s.RedPullRequests += len(b.Chain)
+				}
+			}
 			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
 		}
 	}
@@ -662,7 +694,11 @@ func (s *Sim) push(b queue.Build) {
 		sb.end = never
 		s.pool.add(sb, d-s.pickup(b.SHA), sb.start)
 	}
-	if s.shape.Script != nil {
+	if s.shape.Recorded {
+		fate := s.rng.Float64()
+		sb.errored = fate < s.shape.Errored
+		sb.flake = !sb.errored && fate < s.shape.Errored+flake
+	} else if s.shape.Script != nil {
 		sb.flake = s.started < len(s.shape.Script) && s.shape.Script[s.started]
 	} else {
 		sb.flake = s.chance(flake)
@@ -712,6 +748,7 @@ func (s *Sim) land(a queue.Action) {
 	if !ok {
 		return
 	}
+	pushed := s.builds[a.SHA].Pushed.Sub(s.epoch)
 	for _, m := range a.Members {
 		p := s.prs[m.Number]
 		if p.landed {
@@ -722,6 +759,9 @@ func (s *Sim) land(a queue.Action) {
 		s.Lands = append(s.Lands, s.now)
 		s.Waits = append(s.Waits, float64(s.now-p.ready)/float64(s.shape.Build))
 		s.Labelled = append(s.Labelled, float64(s.now-p.arrived)/float64(s.shape.Build))
+		if pushed >= p.ready {
+			s.QueueAdded = append(s.QueueAdded, (pushed - p.ready).Minutes())
+		}
 	}
 	s.advance(a.SHA)
 	s.LastLand = s.now
@@ -732,9 +772,34 @@ func (s *Sim) land(a queue.Action) {
 	}
 }
 
-// Run plays the shape to its end: until the arrivals have stopped and the queue is empty, or
-// far longer than any queue should take, which breaks the fourth invariant.
+// Run plays ticks before Stop, or drains an unbounded shape and checks that it finishes.
 func (s *Sim) Run() {
+	if s.shape.Stop > 0 {
+		if s.shape.Recorded {
+			s.play()
+			for _, p := range s.prs {
+				if p.queued && waitsOnTheQueue(p.PR) {
+					s.opening++
+				}
+			}
+			s.tick()
+		}
+		for len(s.Broken) == 0 {
+			next := s.now + tick
+			if s.shape.Recorded {
+				for _, acts := range s.history.acts {
+					if len(acts) > 0 && acts[0].At > s.now {
+						next = min(next, acts[0].At)
+					}
+				}
+			}
+			if next >= s.shape.Stop {
+				break
+			}
+			s.step(next)
+		}
+		return
+	}
 	limit := time.Duration(s.shape.Hours*float64(time.Hour)) + time.Duration(60+2*len(s.prs)+int(4*s.shape.Arrivals*s.shape.Hours))*s.shape.Build
 	for _, e := range s.shape.Episodes {
 		limit += e.For + e.Fix

@@ -39,39 +39,48 @@ func liveBounds(from, to string, row bool) (liveOptions, error) {
 }
 
 type liveRow struct {
-	From                       *time.Time `json:"from"`
-	To                         *time.Time `json:"to"`
-	FirstTick                  time.Time  `json:"first_tick"`
-	LastTick                   time.Time  `json:"last_tick"`
-	Ticks                      int        `json:"ticks"`
-	ContextTicks               int        `json:"context_ticks"`
-	Commit                     string     `json:"commit"`
-	BusyMinutes                float64    `json:"busy_minutes"`
-	Landed                     int        `json:"landed"`
-	UnconfirmedLandingPlans    *int       `json:"unconfirmed_landing_plans,omitempty"`
-	BuildMedianMinutes         *float64   `json:"build_median_minutes"`
-	WaitP50                    *float64   `json:"wait_p50"`
-	WaitP90                    *float64   `json:"wait_p90"`
-	WaitP50Minutes             *float64   `json:"wait_p50_minutes"`
-	WaitP90Minutes             *float64   `json:"wait_p90_minutes"`
-	LabelledP50                *float64   `json:"labelled_p50"`
-	LabelledP90                *float64   `json:"labelled_p90"`
-	LabelledSlowest20th        *float64   `json:"labelled_slowest_20th"`
-	LabelledP50Minutes         *float64   `json:"labelled_p50_minutes"`
-	LabelledP90Minutes         *float64   `json:"labelled_p90_minutes"`
-	LabelledSlowest20thMinutes *float64   `json:"labelled_slowest_20th_minutes"`
-	EjectedP90                 *float64   `json:"ejected_p90"`
-	EjectedP90Minutes          *float64   `json:"ejected_p90_minutes"`
-	BuildsPerLanding           *float64   `json:"builds_per_landing"`
-	LandingsPerHour            *float64   `json:"landings_per_hour"`
-	WrongEjections             int        `json:"wrong_ejections"`
-	WrongPer1000               *float64   `json:"wrong_per_1000"`
-	Unchecked                  int        `json:"unchecked"`
-	Unreadable                 int        `json:"unreadable"`
-	GoodBuilds                 int        `json:"good_builds"`
-	NonPassingBuilds           int        `json:"non_passing_builds"`
-	EjectionsAsCause           int        `json:"ejections_as_cause"`
+	WholeBuilds                      int        `json:"whole_builds"`
+	DeparturesAfterAnUnconfirmedPlan *int       `json:"departures_after_an_unconfirmed_plan,omitempty"`
+	From                             *time.Time `json:"from"`
+	To                               *time.Time `json:"to"`
+	FirstTick                        time.Time  `json:"first_tick"`
+	LastTick                         time.Time  `json:"last_tick"`
+	Ticks                            int        `json:"ticks"`
+	ContextTicks                     int        `json:"context_ticks"`
+	Commit                           string     `json:"commit"`
+	BusyMinutes                      float64    `json:"busy_minutes"`
+	Landed                           int        `json:"landed"`
+	Arrivals                         *int       `json:"arrivals,omitempty"`
+	WaitingAtOpen                    *int       `json:"waiting_at_open,omitempty"`
+	SettingsInWindow                 *int       `json:"settings_in_window,omitempty"`
+	LeftWaiting                      *int       `json:"left_waiting,omitempty"`
+	Withdrawn                        *int       `json:"withdrawn,omitempty"`
+	LandingsWithoutAWait             *int       `json:"landings_without_a_wait,omitempty"`
+	UnconfirmedLandingPlans          *int       `json:"unconfirmed_landing_plans,omitempty"`
+	BuildMedianMinutes               *float64   `json:"build_median_minutes"`
+	WaitP50                          *float64   `json:"wait_p50"`
+	WaitP90                          *float64   `json:"wait_p90"`
+	WaitP50Minutes                   *float64   `json:"wait_p50_minutes"`
+	WaitP90Minutes                   *float64   `json:"wait_p90_minutes"`
+	LabelledP50                      *float64   `json:"labelled_p50"`
+	LabelledP90                      *float64   `json:"labelled_p90"`
+	LabelledSlowest20th              *float64   `json:"labelled_slowest_20th"`
+	LabelledP50Minutes               *float64   `json:"labelled_p50_minutes"`
+	LabelledP90Minutes               *float64   `json:"labelled_p90_minutes"`
+	LabelledSlowest20thMinutes       *float64   `json:"labelled_slowest_20th_minutes"`
+	EjectedP90                       *float64   `json:"ejected_p90"`
+	EjectedP90Minutes                *float64   `json:"ejected_p90_minutes"`
+	BuildsPerLanding                 *float64   `json:"builds_per_landing"`
+	LandingsPerHour                  *float64   `json:"landings_per_hour"`
+	WrongEjections                   int        `json:"wrong_ejections"`
+	WrongPer1000                     *float64   `json:"wrong_per_1000"`
+	Unchecked                        int        `json:"unchecked"`
+	Unreadable                       int        `json:"unreadable"`
+	GoodBuilds                       int        `json:"good_builds"`
+	NonPassingBuilds                 int        `json:"non_passing_builds"`
+	EjectionsAsCause                 int        `json:"ejections_as_cause"`
 	liveMeasures
+	Perturbed string          `json:"perturbed,omitempty"`
 	Simulated *liveComparison `json:"simulated,omitempty"`
 	OverLive  *liveComparison `json:"over_live,omitempty"`
 	busy      time.Duration
@@ -82,6 +91,31 @@ type liveComparison struct {
 	WaitP50          *float64 `json:"wait_p50"`
 	WaitP90          *float64 `json:"wait_p90"`
 	BuildsPerLanding *float64 `json:"builds_per_landing"`
+	*simulatedMeasures
+}
+
+type simulatedMeasures struct {
+	UnblamedRedCandidates            int            `json:"unblamed_red_candidates"`
+	CandidatesWithoutACulprit        int            `json:"candidates_without_a_culprit"`
+	CulpritsUnattributed             int            `json:"culprits_unattributed"`
+	DeparturesAfterAnUnconfirmedPlan int            `json:"departures_after_an_unconfirmed_plan"`
+	InvariantFailures                int            `json:"invariant_failures"`
+	WaitingAtOpen                    float64        `json:"waiting_at_open"`
+	SettingsInWindow                 int            `json:"settings_in_window"`
+	Acts                             map[string]int `json:"acts"`
+	UnattributedHolds                int            `json:"unattributed_holds"`
+	WaitP50Minutes                   *float64       `json:"wait_p50_minutes"`
+	WaitP90Minutes                   *float64       `json:"wait_p90_minutes"`
+	WholeBuilds                      float64        `json:"whole_builds"`
+	Probes                           float64        `json:"probes"`
+	RedBuilds                        float64        `json:"red_builds"`
+	QueueAddedP50Minutes             *float64       `json:"queue_added_p50_minutes"`
+	QueueAddedP90Minutes             *float64       `json:"queue_added_p90_minutes"`
+	QueueAddedOver30                 float64        `json:"queue_added_over_30"`
+	RedCandidates                    float64        `json:"red_candidates"`
+	RedPullRequests                  float64        `json:"red_pull_requests"`
+	EjectedAsCause                   float64        `json:"ejected_as_cause"`
+	LeftWaiting                      float64        `json:"left_waiting"`
 }
 
 type liveMeasures struct {
@@ -299,8 +333,10 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 // its own holds it, and the queue's last note on it is not that it conflicts with the trunk, which
 // only its author can change.
 func waitsOnTheQueue(pr queue.PR) bool {
-	return pr.Wait == "" && pr.Checks == queue.Success && pr.Note != "waits: it conflicts with the trunk"
+	return pr.Wait == "" && pr.Checks == queue.Success && pr.Note != trunkConflict
 }
+
+const trunkConflict = "waits: it conflicts with the trunk"
 
 func number(x float64) *float64 { return &x }
 
@@ -410,7 +446,7 @@ func fractionOver(simulated, live *float64) *float64 {
 	return number((*simulated - *live) / *live)
 }
 
-func runLive(dir, clone, like, from, to string, rowOnly bool) error {
+func runLive(dir, clone, like, from, to string, rowOnly bool, perturb string) error {
 	opts, err := liveBounds(from, to, rowOnly)
 	if err != nil {
 		return err
@@ -430,6 +466,14 @@ func runLive(dir, clone, like, from, to string, rowOnly bool) error {
 	if err != nil {
 		return err
 	}
+	if perturb != "" && (shape == nil || opts.from == nil || opts.to == nil) {
+		return fmt.Errorf("-perturb requires -like, -from and -to")
+	}
+	win, err = win.perturb(perturb)
+	if err != nil {
+		return err
+	}
+	row.Perturbed = perturb
 	var simulated *Score
 	if shape != nil && win.build > 0 {
 		sim, comparison := win.simulate(*shape, sc)
@@ -437,6 +481,10 @@ func runLive(dir, clone, like, from, to string, rowOnly bool) error {
 		row.OverLive = &liveComparison{
 			Landed: fractionOver(row.Simulated.Landed, number(float64(row.Landed))), WaitP50: fractionOver(row.Simulated.WaitP50, row.WaitP50),
 			WaitP90: fractionOver(row.Simulated.WaitP90, row.WaitP90), BuildsPerLanding: fractionOver(row.Simulated.BuildsPerLanding, row.BuildsPerLanding),
+		}
+		if win.stop > 0 {
+			row.OverLive.WaitP50 = fractionOver(row.Simulated.WaitP50Minutes, row.WaitP50Minutes)
+			row.OverLive.WaitP90 = fractionOver(row.Simulated.WaitP90Minutes, row.WaitP90Minutes)
 		}
 	} else if shape != nil {
 		row.Simulated, row.OverLive = &liveComparison{}, &liveComparison{}
