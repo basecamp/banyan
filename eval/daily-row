@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# daily-row <owner/repo> <YYYY-MM-DD> [<shape>]: a queue's row for one day, 01:17Z to 21:17Z, from the
+# eval's live score over its tick records and its take-outs from GitHub, kept under
+# $BANYAN_ROWS/<repo>/rows as <day>.json and <day>.md with a line in rows.tsv. <shape> adds the
+# simulated row beside it. With $BANYAN_ROW_POST set, the Markdown goes to that command's stdin
+# once a day and its answer is kept in <day>.posted; a day already posted is not posted again.
+# $BANYAN_EVAL is the eval's binary and $BANYAN_GH the gh every read goes through.
+set -euo pipefail
+repo=$1 day=$2 shape=${3:-}
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+eval_bin=${BANYAN_EVAL:?the eval binary}
+dir=${BANYAN_ROWS:-$HOME/.local/state/banyan-rows}/${repo##*/}
+rows=$dir/rows
+from=${day}T01:17:00Z to=${day}T21:17:00Z
+mkdir -p "$rows"
+
+[ "$(date -u +%s)" -ge "$(date -u -d "$to" +%s)" ] || { echo "daily-row: $day's window is still open" >&2; exit 2; }
+"$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$from - 2 hours" +%FT%TZ)" "$(date -u -d "$to + 10 minutes" +%FT%TZ)" >&2
+
+like=(); [ -n "$shape" ] && like=(-like "$shape")
+"$eval_bin" -live "$dir/ticks" -from "$from" -to "$to" "${like[@]}" -row > "$rows/$day.live.json"
+"$eval_bin" -takeouts "$repo" -from "$from" -to "$to" > "$rows/$day.takeouts.json"
+jq -n --arg repo "$repo" --arg day "$day" --slurpfile live "$rows/$day.live.json" --slurpfile out "$rows/$day.takeouts.json" \
+  '{repo: $repo, day: $day, live: $live[0], takeouts: $out[0]}' > "$rows/$day.json"
+jq -r -f "$here/daily-row.jq" "$rows/$day.json" > "$rows/$day.md"
+
+[ -e "$dir/rows.tsv" ] || printf 'day\tcommit\tlanded\tready_p50_min\tready_p90_min\tadded_p50_min\tadded_p90_min\tover_30\tsplit\tbuilds_per_landing\ttakeouts\tpassed_later\tlongest_gap_min\twrong\tsim_over_live\n' > "$dir/rows.tsv"
+grep -q "^$day	" "$dir/rows.tsv" || jq -r '[.day, .live.commit[0:12], .live.landed, .live.wait_p50_minutes, .live.wait_p90_minutes,
+  .live.queue_added_p50_minutes, .live.queue_added_p90_minutes, .live.queue_added_over_30, .live.split_landings,
+  .live.builds_per_landing, (.takeouts.takeouts | length), ([.takeouts.takeouts[] | select((.failed_then_passed // []) | length > 0)] | length),
+  .live.longest_ready_gap_minutes, .live.wrong_ejections,
+  ((.live.over_live // {}) | [.wait_p50, .wait_p90, .builds_per_landing, .landed] | map(if . == null then "" else (. * 100 | round | tostring) end) | join("/"))]
+  | map(if type == "number" then (. * 100 | round / 100) else . end) | @tsv' "$rows/$day.json" >> "$dir/rows.tsv"
+
+if [ -n "${BANYAN_ROW_POST:-}" ] && [ ! -s "$rows/$day.posted" ]; then
+  $BANYAN_ROW_POST < "$rows/$day.md" > "$rows/$day.posted.tmp" && mv "$rows/$day.posted.tmp" "$rows/$day.posted"
+  echo "daily-row: $repo $day posted: $(head -c 200 "$rows/$day.posted")" >&2
+fi
+echo "daily-row: $repo $day at $(jq -r '.live.commit[0:12]' "$rows/$day.json"): $(tail -1 "$dir/rows.tsv")" >&2

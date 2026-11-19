@@ -32,6 +32,7 @@ Each tick records what it read and what it planned, where the workflow passes `-
 
 - **Plan one again:** `go run ./eval -replay <recording>` in Banyan's repository prints the actions that world calls for. It is the same function the tick ran, so a surprise replays exactly on the release that recorded it.
 - **Score a stretch of them:** `go run ./eval -live <dir>` in Banyan's repository, with every recording in one folder. The row has the simulator's columns, so it sits beside `eval/scoreboard.tsv`.
+- **A day's row:** `eval/daily-row <owner/repo> <YYYY-MM-DD> [<shape>]` fetches the day's recordings (`eval/fetch-ticks`), scores 01:17Z to 21:17Z (`go run ./eval -live <dir> -from <time> -to <time> -row`, one JSON object, with the simulated row beside it where a shape is named) and reads the day's take-outs from the comments that carry the eject marker (`go run ./eval -takeouts <owner/repo> -from <time> -to <time>`): who made each, whether the same head landed since, and whether a check that had failed passed later on the same commit. It keeps the row as JSON and Markdown with a line in `rows.tsv`, and hands the Markdown to `$BANYAN_ROW_POST` once a day. Reads go through `$BANYAN_GH`.
 
 A surprise from a real queue becomes a case in `eval/cases/` before its fix. The hillclimb skill says how.
 

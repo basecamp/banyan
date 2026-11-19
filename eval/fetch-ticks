@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# fetch-ticks <owner/repo> <dir> <from> <to>: every tick record of the queue's successful runs created
+# in the window, each fetched once, into <dir>/ticks. Reads go through $BANYAN_GH (default gh): one
+# listing a hundred runs, then two a run not yet held. Exits 1 when any read failed, having kept the rest.
+set -uo pipefail
+repo=$1 dir=$2 from=$3 to=$4
+gh=${BANYAN_GH:-gh} workflow=${BANYAN_WORKFLOW:-merge-queue.yml}
+mkdir -p "$dir/ticks" "$dir/runs"
+t=$(date -u -d "$from" +%s) end=$(date -u -d "$to" +%s) runs=0 new=0 failed=0
+while [ "$t" -lt "$end" ]; do
+  n=$((t + 7200)); [ "$n" -gt "$end" ] && n=$end
+  window="$(date -u -d "@$t" +%FT%TZ)..$(date -u -d "@$n" +%FT%TZ)"
+  for page in 1 2 3 4 5 6 7 8 9 10; do
+    ids=$("$gh" api "repos/$repo/actions/workflows/$workflow/runs?per_page=100&page=$page&status=success&created=$window" --jq '.workflow_runs[].id') || { failed=$((failed + 1)); break; }
+    [ -n "$ids" ] || break
+    for run in $ids; do
+      runs=$((runs + 1)); [ -e "$dir/runs/$run" ] && continue
+      artifacts=$("$gh" api "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.name | startswith("ticks-")) | .id') || { failed=$((failed + 1)); continue; }
+      held=1
+      for artifact in $artifacts; do
+        tmp=$(mktemp -d "$dir/runs/.$run.XXXXXX")
+        if "$gh" api "repos/$repo/actions/artifacts/$artifact/zip" > "$tmp/ticks.zip" && unzip -q -o "$tmp/ticks.zip" -d "$tmp/out"; then
+          find "$tmp/out" -name '*.json' -exec cp -n {} "$dir/ticks/" \;
+        else
+          held=0 failed=$((failed + 1))
+        fi
+        rm -rf "$tmp"
+      done
+      [ "$held" = 1 ] && { : > "$dir/runs/$run"; new=$((new + 1)); }
+    done
+    [ "$(wc -w <<< "$ids")" -lt 100 ] && break
+  done
+  t=$n
+done
+echo "$repo: $runs successful runs in $from..$to, $new newly held, $failed reads failed, $(find "$dir/ticks" -name '*.json' | wc -l) records, newest $(ls "$dir/ticks" | tail -1)"
+[ "$failed" = 0 ]
