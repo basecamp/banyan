@@ -546,6 +546,9 @@ func main() {
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
 	clone := flag.String("clone", "", "with -live: local clone to compare changes when a pull request ejected as the cause lands at a newer head")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
+	fromText := flag.String("from", "", "with -live: include ticks at or after this RFC 3339 time")
+	toText := flag.String("to", "", "with -live: include ticks before this RFC 3339 time")
+	row := flag.Bool("row", false, "with -live: print one JSON row instead of the usual output")
 	again := flag.String("replay", "", "plan one recorded tick again from its recording alone, and print the actions")
 	var check checkFlag
 	past := flag.String("history", "", `play a recorded window to the planner and print it beside what the record's own queue did: -history <trace.json> ["<slots> <batch> [<gather> [<minutes a probe takes>]]" ...]`)
@@ -558,6 +561,10 @@ func main() {
 	rescued := flag.Float64("rescued", 0.6, "with -history and -rerun: the share of flakes that pass when run again")
 	flag.Var(&check, "check", `explore the planner deeper with the model checker, or one named world: -check "<world name>"`)
 	flag.Parse()
+	if (*fromText != "" || *toText != "" || *row) && *recordings == "" {
+		fmt.Fprintln(os.Stderr, "-from, -to and -row require -live")
+		os.Exit(1)
+	}
 	if check.on {
 		check.run(flag.Args())
 		return
@@ -594,17 +601,9 @@ func main() {
 		return
 	}
 	if *recordings != "" {
-		sc, win, err := live(*recordings, *clone)
-		if err != nil {
-			fmt.Println(err)
+		if err := runLive(*recordings, *clone, *like, *fromText, *toText, *row); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
-		}
-		fmt.Printf(columns, "shape", "config", "landed", "wrong/1k", "wait50", "wait90", "label50", "label90", "slow20th", "eject90", "builds/pr", "per hour")
-		sc.print(Shape{})
-		for _, shape := range shapes {
-			if shape.Name == *like {
-				win.simulated(shape, sc).print(Shape{})
-			}
 		}
 		return
 	}

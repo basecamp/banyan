@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -24,26 +25,42 @@ import (
 // read its verdict, a pull request whose checks passed after it was labelled is ready from the
 // first tick that read them passed, and every time here is as coarse as the ticks are far apart.
 func live(dir, clone string) (Score, window, error) {
+	sc, win, row, err := scoreLive(dir, clone, liveOptions{})
+	if err == nil {
+		printLive(sc, row)
+	}
+	return sc, win, err
+}
+
+func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, error) {
 	names, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	sort.Strings(names)
 	var recs []queue.Recording
 	for _, name := range names {
+		if tick, err := time.Parse("20060102T150405Z", strings.SplitN(filepath.Base(name), "-", 2)[0]); err == nil {
+			if opts.to != nil && !tick.Before(*opts.to) || opts.from != nil && !tick.Add(time.Second).After(*opts.from) {
+				continue
+			}
+		}
 		data, err := os.ReadFile(name)
 		if err != nil {
-			return Score{}, window{}, err
+			return Score{}, window{}, liveRow{}, err
 		}
 		var rec queue.Recording
 		if err := json.Unmarshal(data, &rec); err != nil {
-			return Score{}, window{}, fmt.Errorf("%s: %w", name, err)
+			return Score{}, window{}, liveRow{}, fmt.Errorf("%s: %w", name, err)
+		}
+		if opts.from != nil && rec.World.Now.Before(*opts.from) || opts.to != nil && !rec.World.Now.Before(*opts.to) {
+			continue
 		}
 		recs = append(recs, rec)
 	}
 	if len(recs) == 0 {
-		return Score{}, window{}, fmt.Errorf("%s holds no recorded ticks", dir)
+		return Score{}, window{}, liveRow{}, fmt.Errorf("%s holds no recorded ticks", dir)
 	}
 	if clone != "" {
 		if _, err := gitRead(clone, nil, "rev-parse", "--git-dir"); err != nil {
-			return Score{}, window{}, fmt.Errorf("clone %s: %w", clone, err)
+			return Score{}, window{}, liveRow{}, fmt.Errorf("clone %s: %w", clone, err)
 		}
 	}
 
@@ -78,6 +95,7 @@ func live(dir, clone string) (Score, window, error) {
 		wrong        int
 		unchecked    int
 		unreadable   int
+		causes       int
 	)
 	for _, rec := range recs {
 		trunks[rec.World.Trunk] = true
@@ -141,6 +159,7 @@ func live(dir, clone string) (Score, window, error) {
 				}
 				observed[a.Build.SHA] = true
 			case a.Do == "eject" && a.Cause == "culprit":
+				causes++
 				if h, ok := at[a.PR]; ok {
 					ejected[[2]any{h.Number, h.Head}] = true
 					ejectedHeads[h.Number] = append(ejectedHeads[h.Number], ejection{h.Head, rec.World.Trunk})
@@ -181,13 +200,17 @@ func live(dir, clone string) (Score, window, error) {
 	}
 
 	whole := percentile(append(took[queue.Candidate], took[queue.Check]...), 50)
-	if whole == 0 {
-		return Score{}, window{}, fmt.Errorf("%s holds no build with a verdict", dir)
+	if whole == 0 && !opts.row {
+		return Score{}, window{}, liveRow{}, fmt.Errorf("%s holds no build with a verdict", dir)
 	}
-	builds := 0.0
-	for _, b := range pushed {
+	builds, hasProbe := 0.0, false
+	for _, sha := range slices.Sorted(maps.Keys(pushed)) {
+		b := pushed[sha]
 		if b.Kind == queue.Probe {
-			builds += percentile(took[queue.Probe], 50) / whole
+			hasProbe = true
+			if whole > 0 {
+				builds += percentile(took[queue.Probe], 50) / whole
+			}
 		} else {
 			builds++
 		}
@@ -195,7 +218,9 @@ func live(dir, clone string) (Score, window, error) {
 	inBuilds := func(ds []time.Duration) []float64 {
 		var xs []float64
 		for _, d := range ds {
-			xs = append(xs, d.Minutes()/whole)
+			if whole > 0 {
+				xs = append(xs, d.Minutes()/whole)
+			}
 		}
 		return xs
 	}
@@ -211,19 +236,6 @@ func live(dir, clone string) (Score, window, error) {
 	if busy > 0 {
 		sc.PerHour = float64(landed) / busy.Hours()
 	}
-	fmt.Printf("%d ticks over %s with something queued; a whole build took %.1f min at the median, as the ticks saw it\n",
-		len(recs), busy.Round(time.Minute), whole)
-	fmt.Printf("ready to landed: %.0f min at the median, %.0f at p90\n", sc.WaitP50*whole, sc.WaitP90*whole)
-	fmt.Printf("labelled to landed: %.0f min at the median, %.0f at p90, %.0f at the mean of the slowest twentieth\n",
-		sc.LabelP50*whole, sc.LabelP90*whole, sc.LabelSlow*whole)
-	fmt.Printf("wrong ejections: %d in %d landings (%.2f per 1,000)", wrong, landed, sc.Wrong)
-	if sc.Unchecked > 0 {
-		fmt.Printf(", %d at a newer head unchecked", sc.Unchecked)
-	}
-	if sc.Unreadable > 0 {
-		fmt.Printf(", %d at a newer head unreadable", sc.Unreadable)
-	}
-	fmt.Println()
 	// A tree that a whole build passed is good, alone or with more merged onto it, so every
 	// other verdict on it is CI's own failure.
 	for tree, vs := range verdicts {
@@ -236,13 +248,52 @@ func live(dir, clone string) (Score, window, error) {
 			}
 		}
 	}
-	fmt.Printf("of %d whole builds of trees that passed, alone or under more, %d did not pass\n", sc.Good, sc.Flaked)
 	win := window{build: time.Duration(whole * float64(time.Minute)), cfg: recs[len(recs)-1].Config}
 	for _, at := range ready {
 		win.arrivals = append(win.arrivals, max(at.Sub(recs[0].World.Now), 0))
 	}
 	slices.Sort(win.arrivals)
-	return sc, win, nil
+	row := liveRow{
+		From: opts.from, To: opts.to, FirstTick: recs[0].World.Now, LastTick: recs[len(recs)-1].World.Now,
+		Ticks: len(recs), Commit: evalRevision(), Landed: landed, busy: busy, BusyMinutes: busy.Minutes(),
+		WrongEjections: wrong, Unchecked: unchecked, Unreadable: unreadable, EjectionsAsCause: causes,
+		GoodBuilds: sc.Good, NonPassingBuilds: sc.Flaked, liveMeasures: measureLive(recs),
+	}
+	if len(took[queue.Candidate])+len(took[queue.Check]) > 0 {
+		row.BuildMedianMinutes = &whole
+	}
+	if len(waits) > 0 {
+		row.WaitP50Minutes, row.WaitP90Minutes = number(sc.WaitP50*whole), number(sc.WaitP90*whole)
+		row.LabelledP50Minutes, row.LabelledP90Minutes, row.LabelledSlowest20thMinutes = number(sc.LabelP50*whole), number(sc.LabelP90*whole), number(sc.LabelSlow*whole)
+		if whole > 0 {
+			row.WaitP50, row.WaitP90 = number(sc.WaitP50), number(sc.WaitP90)
+			row.LabelledP50, row.LabelledP90, row.LabelledSlowest20th = number(sc.LabelP50), number(sc.LabelP90), number(sc.LabelSlow)
+		} else {
+			row.WaitP50Minutes, row.WaitP90Minutes = durationQuantile(waits, 50), durationQuantile(waits, 90)
+			row.LabelledP50Minutes, row.LabelledP90Minutes = durationQuantile(spans, 50), durationQuantile(spans, 90)
+			var minutes []float64
+			for _, d := range spans {
+				minutes = append(minutes, d.Minutes())
+			}
+			row.LabelledSlowest20thMinutes = number(slowest(minutes, 20))
+		}
+	}
+	if len(ejects) > 0 {
+		row.EjectedP90Minutes = durationQuantile(ejects, 90)
+		if whole > 0 {
+			row.EjectedP90 = number(sc.EjectP90)
+		}
+	}
+	if landed > 0 {
+		row.WrongPer1000 = number(sc.Wrong)
+		if whole > 0 || !hasProbe {
+			row.BuildsPerLanding = number(sc.Builds)
+		}
+	}
+	if busy > 0 {
+		row.LandingsPerHour = number(sc.PerHour)
+	}
+	return sc, win, row, nil
 }
 
 // window is what a simulation needs of the ticks a real queue recorded, to play the same
@@ -258,6 +309,11 @@ type window struct {
 // as flaky as the real queue's were. Each world draws its own flakes and its own breaking
 // pull requests, at the shape's rate.
 func (w window) simulated(shape Shape, was Score) Score {
+	sc, _ := w.simulate(shape, was)
+	return sc
+}
+
+func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 	shape.Backlog, shape.Arrivals, shape.Build, shape.Hours = 0, 0, w.build, 0
 	if was.Good > 0 {
 		shape.Flake = float64(was.Flaked) / float64(was.Good)
@@ -284,8 +340,15 @@ func (w window) simulated(shape Shape, was Score) Score {
 	sc.Shape, sc.Config = was.Shape, "simulated"
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
 	sc.LabelP50, sc.LabelP90, sc.LabelSlow = percentile(labelled, 50), percentile(labelled, 90), slowest(labelled, 20)
+	comparison := liveComparison{Landed: number(float64(sc.Landed / seeds))}
+	if len(waits) > 0 {
+		comparison.WaitP50, comparison.WaitP90 = number(sc.WaitP50), number(sc.WaitP90)
+	}
+	if sc.Landed > 0 {
+		comparison.BuildsPerLanding = number(sc.Builds)
+	}
 	sc.Landed /= seeds
-	return sc
+	return sc, comparison
 }
 
 // planAgain plans one recorded tick again from the recording alone, which holds everything the
