@@ -570,7 +570,7 @@ func TestLiveWindowIncludesFromAndExcludesTo(t *testing.T) {
 		{World: queue.World{Now: start.Add(time.Minute)}},
 		{World: queue.World{Now: end}},
 	})
-	for _, name := range []string{"20261117T115959Z-0.json", "20261118T131000Z-0.json"} {
+	for _, name := range []string{"20261115T115959Z-0.json", "20261118T131000Z-0.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("unreadable JSON outside window"), 0o644); err != nil {
 			t.Fatal(err)
 		}

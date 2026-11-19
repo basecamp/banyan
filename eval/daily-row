@@ -14,10 +14,14 @@ dir=${BANYAN_ROWS:-$HOME/.local/state/banyan-rows}/${repo##*/}
 rows=$dir/rows
 from=${day}T01:17:00Z to=${day}T21:17:00Z
 mkdir -p "$rows"
+committed() {
+  jq -e '.live.commit | test("^[0-9a-f]{40}$")' "$1" > /dev/null && return 0
+  echo "daily-row: the eval is not built from a commit ($(jq -r .live.commit "$1")), so its row is not posted" >&2; exit 1
+}
 
 if [ ! -s "$rows/$day.json" ]; then
   [ "$(date -u +%s)" -ge "$(date -u -d "$to" +%s)" ] || { echo "daily-row: $day's window is still open" >&2; exit 2; }
-  "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$from - 24 hours" +%FT%TZ)" "$(date -u -d "$to + 1 hour" +%FT%TZ)" >&2
+  "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$from - 72 hours" +%FT%TZ)" "$(date -u -d "$to + 5 minutes" +%FT%TZ)" >&2
   tmp=$(mktemp -d "$rows/.$day.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   like=(); [ -n "$shape" ] && like=(-like "$shape")
   "$eval_bin" -live "$dir/ticks" -from "$from" -to "$to" "${like[@]}" -row > "$tmp/live.json"
@@ -25,13 +29,15 @@ if [ ! -s "$rows/$day.json" ]; then
   jq -n --arg repo "$repo" --arg day "$day" --arg made "$(date -u +%FT%TZ)" --slurpfile live "$tmp/live.json" --slurpfile out "$tmp/takeouts.json" \
     '{repo: $repo, day: $day, made: $made, live: $live[0], takeouts: $out[0]}' > "$tmp/row.json"
   jq -e '.live.landed != null and .live.ticks > 0 and (.takeouts.takeouts | type) == "array"' "$tmp/row.json" > /dev/null
-  if [ -n "${BANYAN_ROW_POST:-}" ] && ! jq -e '.live.commit | test("^[0-9a-f]{40}$")' "$tmp/row.json" > /dev/null; then
-    echo "daily-row: the eval is not built from a commit ($(jq -r .live.commit "$tmp/row.json")), so its row is not posted" >&2; exit 1
-  fi
+  [ -z "${BANYAN_ROW_POST:-}" ] || committed "$tmp/row.json"
   jq -r -f "$here/daily-row.jq" "$tmp/row.json" > "$tmp/row.md"
   [ -s "$tmp/row.md" ]
+  header=$(printf '%b' 'day\tmade\tcommit\tlanded\tready_p50_min\tready_p90_min\tadded_p50_min\tadded_p90_min\tover_30\tsplit\tbuilds_per_landing\ttakeouts\tpassed_later\tnot_read\tlongest_gap_min\twrong\tunchecked\tsim_over_live')
+  if [ -e "$dir/rows.tsv" ] && [ "$(head -1 "$dir/rows.tsv")" != "$header" ]; then
+    mv "$dir/rows.tsv" "$dir/rows.$(date -u +%Y%m%dT%H%M%SZ).tsv"
+  fi
   {
-    printf 'day\tmade\tcommit\tlanded\tready_p50_min\tready_p90_min\tadded_p50_min\tadded_p90_min\tover_30\tsplit\tbuilds_per_landing\ttakeouts\tpassed_later\tnot_read\tlongest_gap_min\twrong\tunchecked\tsim_over_live\n'
+    printf '%s\n' "$header"
     [ -e "$dir/rows.tsv" ] && awk -F'\t' -v day="$day" 'NR > 1 && $1 != day' "$dir/rows.tsv"
     jq -r '[.day, .made, (.live.commit | if endswith("+") then .[0:12] + "+" else .[0:12] end), .live.landed, .live.wait_p50_minutes, .live.wait_p90_minutes,
       .live.queue_added_p50_minutes, .live.queue_added_p90_minutes, .live.queue_added_over_30, .live.split_landings,
@@ -45,10 +51,9 @@ if [ ! -s "$rows/$day.json" ]; then
 fi
 
 if [ -n "${BANYAN_ROW_POST:-}" ] && [ ! -e "$rows/$day.posted" ]; then
-  if answer=$($BANYAN_ROW_POST < "$rows/$day.md"); then
-    printf '%s %s\n' "$(date -u +%FT%TZ)" "$answer" > "$rows/.$day.posted" && mv "$rows/.$day.posted" "$rows/$day.posted"
-  else
-    echo "daily-row: $repo $day was made and could not be posted" >&2; exit 1
-  fi
+  committed "$rows/$day.json"
+  answer=$($BANYAN_ROW_POST < "$rows/$day.md") || { echo "daily-row: $repo $day was made and could not be posted" >&2; exit 1; }
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "$answer" > "$rows/.$day.posted"
+  mv "$rows/.$day.posted" "$rows/$day.posted"
 fi
 echo "daily-row: $repo $day at $(jq -r '.live.commit | .[0:12] + (if endswith("+") then "+" else "" end)' "$rows/$day.json"), made $(jq -r .made "$rows/$day.json"), $(cat "$rows/$day.posted" 2>/dev/null || echo 'not posted')" >&2

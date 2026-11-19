@@ -48,6 +48,7 @@ type liveRow struct {
 	Commit                     string     `json:"commit"`
 	BusyMinutes                float64    `json:"busy_minutes"`
 	Landed                     int        `json:"landed"`
+	UnconfirmedLandingPlans    *int       `json:"unconfirmed_landing_plans,omitempty"`
 	BuildMedianMinutes         *float64   `json:"build_median_minutes"`
 	WaitP50                    *float64   `json:"wait_p50"`
 	WaitP90                    *float64   `json:"wait_p90"`
@@ -132,7 +133,7 @@ func (opts liveOptions) contains(at time.Time) bool {
 
 func (opts liveOptions) context() liveOptions {
 	if opts.from != nil {
-		at := opts.from.Add(-24 * time.Hour)
+		at := opts.from.Add(-72 * time.Hour)
 		opts.from = &at
 	}
 	if opts.to != nil {

@@ -3,13 +3,20 @@
 # window, each fetched once, into <dir>/ticks. Reads go through $BANYAN_GH (default gh): one listing a
 # hundred runs of any outcome, since GitHub's listing by outcome leaves runs out, then two a run that
 # ran and is not yet held. A run still going is counted and left for the next fetch. A run is held once every record of it is in
-# <dir>/ticks, or it uploaded none. Exits 1 when any read or copy failed, having kept the rest, so a
-# caller never scores a day it could not fetch whole. A read that fails is tried once more.
+# <dir>/ticks, or it uploaded none. Exits 1 when any read or copy failed, having kept the rest, and 3
+# when a run in the window is still going, so a caller never scores a day it could not fetch whole. A read that fails is tried once more.
 set -uo pipefail
 repo=$1 dir=$2 from=$3 to=$4
 gh=${BANYAN_GH:-gh} workflow=${BANYAN_WORKFLOW:-merge-queue.yml} pages=10
 mkdir -p "$dir/ticks" "$dir/runs"
-read_api() { "$gh" api "$@" || { command sleep 5; "$gh" api "$@"; }; }
+read_api() {
+  local out status=0
+  out=$(mktemp "$dir/runs/.read.XXXXXX")
+  "$gh" api "$@" > "$out" 2> /dev/null || { command sleep 5; "$gh" api "$@" > "$out"; } || status=1
+  [ "$status" = 0 ] && cat "$out"
+  rm -f "$out"
+  return "$status"
+}
 t=$(date -u -d "$from" +%s) end=$(date -u -d "$to" +%s) runs=0 new=0 failed=0 bare=0 pending=0
 while [ "$t" -lt "$end" ]; do
   n=$((t + 7200)); [ "$n" -gt "$end" ] && n=$end
@@ -46,4 +53,5 @@ while [ "$t" -lt "$end" ]; do
   t=$n
 done
 echo "$repo: $runs runs that ran in $from..$to, $new newly held ($bare with no recording), $pending still going, $failed failed, $(find "$dir/ticks" -name '*.json' | wc -l) records, newest $(ls "$dir/ticks" | tail -1)"
-[ "$failed" = 0 ]
+[ "$failed" = 0 ] || exit 1
+[ "$pending" = 0 ] || exit 3

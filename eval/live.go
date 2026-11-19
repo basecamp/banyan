@@ -85,6 +85,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		ejectedHeads = map[int][]ejection{} // each pull request's ejections as the cause, with the trunk it was ejected on
 		patchIDs     = map[[2]queue.SHA]patchResult{}
 		trunks       = map[queue.SHA]bool{}
+		unconfirmed  = map[queue.SHA]bool{}
 		took         = map[queue.Kind][]float64{}
 		verdicts     = map[queue.SHA][]queue.Verdict{} // each tree's whole builds, by the prefix they test
 		good         = map[queue.SHA]bool{}            // the trees a whole build passed, each prefix of its chain among them
@@ -101,11 +102,26 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	)
 	for _, rec := range recs {
 		trunks[rec.World.Trunk] = true
+		for _, a := range rec.Actions {
+			if a.Do == "land" && opts.contains(rec.World.Now) {
+				unconfirmed[a.SHA] = true
+			}
+		}
 	}
 	for i, rec := range recs {
 		now := rec.World.Now
-		if i > 0 && opts.contains(now) && opts.contains(recs[i-1].World.Now) && len(recs[i-1].World.PRs) > 0 {
-			busy += now.Sub(recs[i-1].World.Now)
+		delete(unconfirmed, rec.World.Trunk)
+		if i > 0 && len(recs[i-1].World.PRs) > 0 {
+			from, to := recs[i-1].World.Now, now
+			if opts.from != nil && from.Before(*opts.from) {
+				from = *opts.from
+			}
+			if opts.to != nil && to.After(*opts.to) {
+				to = *opts.to
+			}
+			if to.After(from) {
+				busy += to.Sub(from)
+			}
 		}
 		at := map[int]recordedHead{}
 		for _, pr := range rec.World.PRs {
@@ -277,7 +293,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		win.cfg = ticks[len(ticks)-1].Config
 	}
 	for _, at := range ready {
-		if len(ticks) > 0 && (!bounded || at.Before(ticks[len(ticks)-1].World.Now)) {
+		if len(ticks) > 0 && (opts.to == nil || at.Before(*opts.to)) {
 			win.arrivals = append(win.arrivals, max(at.Sub(ticks[0].World.Now), 0))
 		}
 	}
@@ -287,6 +303,10 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		Ticks: len(ticks), ContextTicks: len(recs) - len(ticks), Commit: evalRevision(), Landed: landed, busy: busy, BusyMinutes: busy.Minutes(),
 		WrongEjections: wrong, Unchecked: unchecked, Unreadable: unreadable, EjectionsAsCause: causes,
 		GoodBuilds: sc.Good, NonPassingBuilds: sc.Flaked, liveMeasures: measureLive(recs, opts, landings),
+	}
+	if bounded {
+		count := len(unconfirmed)
+		row.UnconfirmedLandingPlans = &count
 	}
 	if row.SplitLandings+row.UnsplitLandings != landed {
 		return Score{}, window{}, liveRow{}, fmt.Errorf("split landings do not match counted landings")

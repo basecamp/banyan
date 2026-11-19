@@ -46,8 +46,11 @@ func TestLiveAttributesOutcomesUsingContext(t *testing.T) {
 	if second.Landed != 0 || second.SplitLandings != 0 || second.WaitP50Minutes != nil || second.QueueAddedP50Minutes != nil || second.LandingBuildMedianMinutes != nil || second.BuildMedianMinutes != nil || second.EjectionsAsCause != 0 {
 		t.Fatalf("second: %+v", second)
 	}
-	if first.Ticks != 1 || first.BusyMinutes != 0 || second.Ticks != 1 || second.BusyMinutes != 0 {
+	if first.Ticks != 1 || first.BusyMinutes != 10 || second.Ticks != 1 || second.BusyMinutes != 1 {
 		t.Fatalf("ticks: %+v / %+v", first, second)
+	}
+	if first.LandingsPerHour == nil || *first.LandingsPerHour != 6 || second.LandingsPerHour == nil || *second.LandingsPerHour != 0 {
+		t.Fatalf("landings per hour: %v / %v", first.LandingsPerHour, second.LandingsPerHour)
 	}
 	data, _ := json.Marshal(second)
 	var fields map[string]any
@@ -70,17 +73,64 @@ func TestLiveSortsContextByWorldTime(t *testing.T) {
 	}
 }
 
+func TestLiveKeepsReadyReadFromThreeDayContext(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	pr := queue.PR{Number: 1, Head: "h", Queued: start.Add(-96 * time.Hour), Checks: queue.Pending}
+	b := queue.Build{SHA: "b", Pushed: start, Chain: []queue.Member{{Number: 1, Head: "h"}}}
+	recs := []queue.Recording{{World: queue.World{Now: start.Add(-48 * time.Hour), Trunk: "t", PRs: []queue.PR{pr}}}}
+	pr.Checks = queue.Success
+	recs = append(recs,
+		queue.Recording{World: queue.World{Now: start.Add(-30 * time.Hour), Trunk: "t", PRs: []queue.PR{pr}}},
+		queue.Recording{World: queue.World{Now: start, Trunk: "t", PRs: []queue.PR{pr}}, Actions: []queue.Action{{Do: "push", Build: b}}})
+	b.Verdict = queue.Success
+	recs = append(recs,
+		queue.Recording{World: queue.World{Now: start.Add(5 * time.Minute), Trunk: "t", PRs: []queue.PR{pr}, Builds: []queue.Build{b}}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: b.Chain}}},
+		queue.Recording{World: queue.World{Now: start.Add(6 * time.Minute), Trunk: "b"}})
+	row := windowRow(t, recs, start, start.Add(time.Hour))
+	if row.ContextTicks != 2 || row.Landed != 1 || row.WaitP50Minutes == nil || *row.WaitP50Minutes != 1805 || row.QueueAddedP90Minutes == nil || *row.QueueAddedP90Minutes != 1800 {
+		t.Fatalf("ready clock: %+v", row)
+	}
+}
+
+func TestLiveClipsBusyIntervalsToWindow(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Minute)
+	for _, test := range []struct {
+		name    string
+		minutes []int
+		opts    liveOptions
+		busy    float64
+	}{
+		{"both bounds", []int{-5, 5, 15}, liveOptions{from: &start, to: &end, row: true}, 10},
+		{"whole window between ticks", []int{-5, 15}, liveOptions{from: &start, to: &end, row: true}, 10},
+		{"from only", []int{-10, -5, 5}, liveOptions{from: &start, row: true}, 5},
+		{"to only", []int{5, 15, 20}, liveOptions{to: &end, row: true}, 5},
+		{"unwindowed", []int{-5, 5, 15}, liveOptions{row: true}, 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var recs []queue.Recording
+			for _, minute := range test.minutes {
+				recs = append(recs, queue.Recording{World: queue.World{Now: start.Add(time.Duration(minute) * time.Minute), PRs: []queue.PR{{Number: 1}}}})
+			}
+			_, _, row, err := scoreLive(writeLive(t, recs), "", test.opts)
+			if err != nil || row.BusyMinutes != test.busy {
+				t.Fatalf("busy minutes=%g, want %g; err=%v", row.BusyMinutes, test.busy, err)
+			}
+		})
+	}
+}
+
 func TestLiveContextBoundsSkipOnlyOutsideFiles(t *testing.T) {
 	start := time.Date(2026, 11, 18, 12, 0, 0, 500000000, time.UTC)
 	end := start.Add(time.Hour)
 	dir := t.TempDir()
-	times := []time.Time{start.Add(-24*time.Hour - time.Nanosecond), start.Add(-24 * time.Hour), start, end, end.Add(time.Hour - time.Nanosecond), end.Add(time.Hour)}
+	times := []time.Time{start.Add(-72*time.Hour - time.Nanosecond), start.Add(-72 * time.Hour), start, end, end.Add(time.Hour - time.Nanosecond), end.Add(time.Hour)}
 	for i, at := range times {
 		data, _ := json.Marshal(queue.Recording{World: queue.World{Now: at}})
 		name := at.Format("20060102T150405Z") + "-" + string(rune('a'+i)) + ".json"
 		os.WriteFile(filepath.Join(dir, name), data, 0600)
 	}
-	os.WriteFile(filepath.Join(dir, "20261117T115959Z-bad.json"), []byte("bad"), 0600)
+	os.WriteFile(filepath.Join(dir, "20261115T115959Z-bad.json"), []byte("bad"), 0600)
 	os.WriteFile(filepath.Join(dir, "20261118T140001Z-bad.json"), []byte("bad"), 0600)
 	_, _, row, err := scoreLive(dir, "", liveOptions{from: &start, to: &end, row: true})
 	if err != nil {
@@ -310,11 +360,14 @@ func TestLiveFullWindowMatchesUnwindowed(t *testing.T) {
 				trunk = b.SHA
 				recs = append(recs, queue.Recording{World: queue.World{Now: at.Add(12 * time.Minute), Trunk: trunk, Builds: []queue.Build{b}}})
 			}
+			last := &recs[len(recs)-1].World
+			last.PRs = []queue.PR{{Number: 25, Head: "last", Queued: last.Now, Checks: queue.Success}}
 			dir := writeLive(t, recs)
 			var rows []liveRow
 			var scores []Score
+			var windows []window
 			for _, opts := range []liveOptions{{row: true}, {from: &start, to: &end, row: true}} {
-				score, _, row, err := scoreLive(dir, "", opts)
+				score, win, row, err := scoreLive(dir, "", opts)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -322,6 +375,10 @@ func TestLiveFullWindowMatchesUnwindowed(t *testing.T) {
 					t.Fatalf("day: %+v", row)
 				}
 				scores, rows = append(scores, score), append(rows, row)
+				windows = append(windows, win)
+			}
+			if len(windows[0].arrivals) != 25 || !reflect.DeepEqual(windows[0], windows[1]) {
+				t.Fatalf("full window arrivals differ: %+v / %+v", windows[0], windows[1])
 			}
 			if !reflect.DeepEqual(scores[0], scores[1]) || !reflect.DeepEqual(rows[0].WaitP50, rows[1].WaitP50) || !reflect.DeepEqual(rows[0].WaitP90, rows[1].WaitP90) || !reflect.DeepEqual(rows[0].liveMeasures, rows[1].liveMeasures) {
 				t.Fatalf("full window differs: %+v / %+v; %+v / %+v", scores[0], scores[1], rows[0], rows[1])
@@ -345,6 +402,55 @@ func TestLivePlanBelongsToItsWindowWhenConfirmedAfterTo(t *testing.T) {
 	second := windowRow(t, recs, end, end.Add(time.Hour))
 	if first.Landed != 1 || first.SplitLandings != 1 || first.UnsplitLandings != 0 || *first.WaitP50Minutes != 9 || *first.LabelledP50Minutes != 9 || *first.SplitReadyToLandedP50Minutes != 9 || second.Landed != 0 || second.SplitLandings != 0 || second.UnsplitLandings != 0 {
 		t.Fatalf("landing windows: %+v / %+v", first, second)
+	}
+}
+
+func TestLiveCountsUnconfirmedLandingPlans(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Minute)
+	members := []queue.Member{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2"}}
+	for _, confirmed := range []bool{false, true} {
+		t.Run(fmt.Sprint(confirmed), func(t *testing.T) {
+			recs := []queue.Recording{
+				{World: queue.World{Now: start.Add(-time.Minute), Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "before", Members: members}}},
+				{World: queue.World{Now: start.Add(time.Minute), Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: members}}},
+				{World: queue.World{Now: start.Add(2 * time.Minute), Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: members}}},
+				{World: queue.World{Now: end, Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "after", Members: members}}},
+			}
+			wantPlans, wantLanded := 1.0, 0
+			if confirmed {
+				recs = append(recs, queue.Recording{World: queue.World{Now: end.Add(30 * time.Minute), Trunk: "b"}})
+				wantPlans, wantLanded = 0, len(members)
+			}
+			row := windowRow(t, recs, start, end)
+			data, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if fields["unconfirmed_landing_plans"] != wantPlans || row.Landed != wantLanded {
+				t.Fatalf("unconfirmed plans=%v landed=%d, want %g and %d", fields["unconfirmed_landing_plans"], row.Landed, wantPlans, wantLanded)
+			}
+		})
+	}
+}
+
+func TestLiveUnwindowedOmitsUnconfirmedLandingPlans(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	dir := writeLive(t, []queue.Recording{{World: queue.World{Now: start, Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "unconfirmed"}}}})
+	out, err := captureLiveRun(t, dir, "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(out), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["unconfirmed_landing_plans"]; ok {
+		t.Fatalf("unwindowed row added a field: %s", out)
 	}
 }
 
