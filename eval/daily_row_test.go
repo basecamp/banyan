@@ -43,8 +43,8 @@ func standIns(t *testing.T) string {
 	}
 	for name, script := range map[string]string{
 		"fetch-ticks": "#!/bin/sh\nexit \"${FETCH_EXIT:-0}\"\n",
-		"eval": "#!/bin/sh\ncase \" $* \" in *\" -takeouts \"*) echo '{\"takeouts\":[],\"by_class\":{},\"comments_read\":0}' ;;\n" +
-			"*) echo \"{\\\"commit\\\":\\\"$COMMIT\\\",\\\"landed\\\":1,\\\"ticks\\\":2}\" ;; esac\n",
+		"eval": "#!/bin/sh\necho \"$*\" >> \"$T/asked\"\ncase \" $* \" in *\" -takeouts \"*) echo '{\"takeouts\":[],\"by_class\":{},\"comments_read\":0}' ;;\n" +
+			"*) echo \"{\\\"commit\\\":\\\"$COMMIT\\\",\\\"landed\\\":1,\\\"ticks\\\":2,\\\"red_candidates\\\":0,\\\"red_read_n\\\":0}\" ;; esac\n",
 		"post": "#!/bin/sh\ncat > /dev/null; echo x >> \"$T/posts\"; [ \"${POST_EXIT:-0}\" = 0 ] || exit \"$POST_EXIT\"; echo posted\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
@@ -112,5 +112,20 @@ func TestDailyRowSetsAsideResultsWithAnotherHeader(t *testing.T) {
 	now, _ := os.ReadFile(filepath.Join(app, "rows.tsv"))
 	if lines := strings.Split(strings.TrimSpace(string(now)), "\n"); len(kept) != 1 || len(lines) != 2 || !strings.HasPrefix(lines[1], "2026-11-18\t") {
 		t.Fatalf("set aside %v, results now:\n%s", kept, now)
+	}
+}
+
+func TestDailyRowChecksEjectionsAgainstACloneAndSaysNoneForADayWithoutReds(t *testing.T) {
+	dir := standIns(t)
+	if status, _ := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40), "BANYAN_CLONE=/a/clone"); status != 0 {
+		t.Fatalf("status %d", status)
+	}
+	asked, _ := os.ReadFile(filepath.Join(dir, "asked"))
+	if live := strings.Split(string(asked), "\n")[0]; !strings.Contains(live, " -clone /a/clone ") || !strings.HasSuffix(live, " -row") {
+		t.Fatalf("the live score was asked with: %s", live)
+	}
+	row, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
+	if !strings.Contains(string(row), "| Red candidates | none |") {
+		t.Fatalf("a day without a red candidate reads:\n%s", row)
 	}
 }

@@ -5,7 +5,9 @@
 # simulated row beside it. The day's first whole row is the row: a later run changes nothing, and
 # only posts it where that is still owed. With $BANYAN_ROW_POST set, the Markdown goes to that
 # command's stdin once and its answer is kept in <day>.posted. Any failure exits non-zero with
-# nothing of the day replaced. $BANYAN_EVAL is the eval's binary, $BANYAN_GH the gh reads go through.
+# nothing of the day replaced. $BANYAN_EVAL is the eval's binary, $BANYAN_GH the gh reads go through,
+# and $BANYAN_CLONE a clone of the repository the wrong-ejection check reads; without one, a landing
+# after an ejection as the cause is counted as unchecked.
 set -euo pipefail
 repo=$1 day=$2 shape=${3:-}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -24,6 +26,7 @@ if [ ! -s "$rows/$day.json" ]; then
   "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$from - 72 hours" +%FT%TZ)" "$(date -u -d "$to + 5 minutes" +%FT%TZ)" >&2
   tmp=$(mktemp -d "$rows/.$day.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   like=(); [ -n "$shape" ] && like=(-like "$shape")
+  [ -z "${BANYAN_CLONE:-}" ] || like+=(-clone "$BANYAN_CLONE")
   "$eval_bin" -live "$dir/ticks" -from "$from" -to "$to" "${like[@]}" -row > "$tmp/live.json"
   "$eval_bin" -takeouts "$repo" -from "$from" -to "$to" > "$tmp/takeouts.json"
   jq -n --arg repo "$repo" --arg day "$day" --arg made "$(date -u +%FT%TZ)" --slurpfile live "$tmp/live.json" --slurpfile out "$tmp/takeouts.json" \
