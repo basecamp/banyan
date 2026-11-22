@@ -55,7 +55,7 @@ func TestLiveScoresRecordedTicksByTheEvalsDefinitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A whole build took 10 minutes, so an hour to land is 6 builds and half an hour to an ejection is 3.
-	want := Score{Shape: filepath.Base(dir), Config: "live", Landed: 2, Wrong: 500, WaitP50: 6, WaitP90: 6, LabelP50: 6, LabelP90: 6, LabelSlow: 6, EjectP90: 3, Builds: 1, PerHour: 2 / (61.0 / 60),
+	want := Score{Shape: filepath.Base(dir), Config: "live", Landed: 2, Wrong: 500, WaitP50: 6, WaitP90: 6, LabelP50: 6, LabelP90: 6, LabelSlow: 6, EjectP90: 3, Builds: 1.5, PerHour: 2 / (61.0 / 60),
 		Good: 3, Flaked: 1}
 	if fmt.Sprintf("%.3v", sc) != fmt.Sprintf("%.3v", want) {
 		t.Errorf("scored\n %+v\nwant\n %+v", sc, want)
@@ -473,7 +473,7 @@ func writeLive(t *testing.T, recs []queue.Recording) string {
 	return dir
 }
 
-func captureLiveRun(t *testing.T, dir, like, from, to string, row bool) (string, error) {
+func captureLiveRun(t *testing.T, dir, like, from, to string, row bool, perturb ...string) (string, error) {
 	t.Helper()
 	old := os.Stdout
 	r, w, err := os.Pipe()
@@ -482,7 +482,11 @@ func captureLiveRun(t *testing.T, dir, like, from, to string, row bool) (string,
 	}
 	os.Stdout = w
 	defer func() { os.Stdout = old }()
-	err = runLive(dir, "", like, from, to, row)
+	name := ""
+	if len(perturb) > 0 {
+		name = perturb[0]
+	}
+	err = runLive(dir, "", like, from, to, row, name)
 	w.Close()
 	os.Stdout = old
 	out, readErr := io.ReadAll(r)

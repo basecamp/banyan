@@ -72,14 +72,18 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 
 	var (
-		before       = map[queue.SHA]bool{}
-		observed     = map[queue.SHA]bool{}
-		firstPush    = map[queue.SHA]time.Time{}
-		pushed       = map[queue.SHA]queue.Build{}
-		pushTimes    = map[queue.SHA]time.Time{}
-		answered     = map[queue.SHA]time.Time{}
-		ready        = map[recordedHead]time.Time{}
-		seen         = map[recordedHead]bool{}
+		before     = map[queue.SHA]bool{}
+		observed   = map[queue.SHA]bool{}
+		firstPush  = map[queue.SHA]time.Time{}
+		pushed     = map[queue.SHA]queue.Build{}
+		pushTimes  = map[queue.SHA]time.Time{}
+		answered   = map[queue.SHA]time.Time{}
+		candidates = map[queue.SHA]queue.Build{}
+		ready      = map[recordedHead]time.Time{}
+		seen       = map[recordedHead]bool{}
+		seenQueue  = map[[2]any]bool{}
+		knownHeads = map[headKey]recordedHead{}
+
 		labelled     = map[int]time.Time{}
 		ejected      = map[[2]any]bool{}    // a number and a head ejected as the cause, however often queued
 		ejectedHeads = map[int][]ejection{} // each pull request's ejections as the cause, with the trunk it was ejected on
@@ -99,6 +103,8 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		unchecked    int
 		unreadable   int
 		causes       int
+		withoutWait  int
+		errored      int
 	)
 	for _, rec := range recs {
 		trunks[rec.World.Trunk] = true
@@ -130,13 +136,20 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			}
 			h := recordedHead{pr.Number, pr.Head, pr.Queued}
 			if at[pr.Number] = h; ready[h].IsZero() && pr.Wait == "" && pr.Checks == queue.Success {
-				if ready[h] = pr.Queued; seen[h] {
+				if ready[h] = pr.Queued; seen[h] || seenQueue[[2]any{pr.Number, pr.Queued}] || pr.Queued.IsZero() {
 					ready[h] = now
 				}
 			}
 			seen[h] = true
+			seenQueue[[2]any{pr.Number, pr.Queued}] = true
+			knownHeads[headKey{pr.Number, pr.Head}] = h
 		}
 		for _, b := range rec.World.Builds {
+			if !b.Pushed.IsZero() {
+				if _, ok := pushed[b.SHA]; !ok {
+					pushed[b.SHA], pushTimes[b.SHA] = b, b.Pushed
+				}
+			}
 			_, counted := answered[b.SHA]
 			if !b.Landed.IsZero() && (!observed[b.SHA] || b.SHA == rec.World.Trunk && !counted) {
 				before[b.SHA] = true
@@ -158,6 +171,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			answered[b.SHA] = answerAt
 			if opts.contains(answerAt) {
 				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
+				if b.Kind == queue.Candidate {
+					candidates[b.SHA] = b
+				}
 			}
 			if b.Kind != queue.Probe {
 				if opts.contains(answerAt) {
@@ -200,26 +216,32 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				trunks[a.SHA] = false
 				for _, m := range a.Members {
 					h := at[m.Number]
-					r := ready[h]
 					if h.head != m.Head {
-						r = time.Time{}
+						h = knownHeads[headKey{m.Number, m.Head}]
 					}
+					if h.head != m.Head {
+						h = recordedHead{}
+					}
+					r := ready[h]
 					landings = append(landings, liveLanding{at: now, ready: r, sha: a.SHA})
 					if !opts.contains(now) {
 						continue
 					}
 					landed++
-					start := ready[h]
+					start := r
 					if start.IsZero() {
 						start = h.queued
-						ready[h] = start
 					}
-					waits = append(waits, now.Sub(start))
-					since := labelled[m.Number]
-					if since.IsZero() {
-						since = start
+					if start.IsZero() {
+						withoutWait++
+					} else {
+						waits = append(waits, now.Sub(start))
+						since := labelled[m.Number]
+						if since.IsZero() {
+							since = start
+						}
+						spans = append(spans, now.Sub(since))
 					}
-					spans = append(spans, now.Sub(since))
 					if ejected[[2]any{m.Number, m.Head}] {
 						wrong++
 					} else if prior := earlierHeads(ejectedHeads[m.Number], m.Head); len(prior) > 0 {
@@ -236,11 +258,12 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		}
 	}
 
-	whole := percentile(append(took[queue.Candidate], took[queue.Check]...), 50)
+	whole := percentile(append(slices.Clone(took[queue.Candidate]), took[queue.Check]...), 50)
 	if whole == 0 && !opts.row {
 		return Score{}, window{}, liveRow{}, fmt.Errorf("%s holds no build with a verdict", dir)
 	}
 	builds, hasProbe := 0.0, false
+	wholeBuilds := 0
 	for _, sha := range slices.Sorted(maps.Keys(pushed)) {
 		b := pushed[sha]
 		if !opts.contains(pushTimes[sha]) {
@@ -249,10 +272,15 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		if b.Kind == queue.Probe {
 			hasProbe = true
 			if whole > 0 {
-				builds += percentile(took[queue.Probe], 50) / whole
+				probe := percentile(took[queue.Probe], 50)
+				if probe == 0 && opts.from != nil && opts.to != nil {
+					probe = whole
+				}
+				builds += probe / whole
 			}
 		} else {
 			builds++
+			wholeBuilds++
 		}
 	}
 	inBuilds := func(ds []time.Duration) []float64 {
@@ -284,6 +312,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			for _, v := range vs {
 				if v != queue.Success {
 					sc.Flaked++
+					if v != queue.Failure {
+						errored++
+					}
 				}
 			}
 		}
@@ -292,21 +323,50 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	if len(ticks) > 0 {
 		win.cfg = ticks[len(ticks)-1].Config
 	}
-	for _, at := range ready {
-		if len(ticks) > 0 && (opts.to == nil || at.Before(*opts.to)) {
-			win.arrivals = append(win.arrivals, max(at.Sub(ticks[0].World.Now), 0))
+	if opts.from != nil && opts.to != nil {
+		win.stop = opts.to.Sub(*opts.from)
+		for _, minutes := range append(slices.Clone(took[queue.Candidate]), took[queue.Check]...) {
+			win.times = append(win.times, time.Duration(minutes*float64(time.Minute)))
+		}
+		win.probe = win.build
+		if len(took[queue.Probe]) > 0 {
+			win.probe = time.Duration(percentile(took[queue.Probe], 50) * float64(time.Minute))
+		}
+		if sc.Good > 0 {
+			win.errored = float64(errored) / float64(sc.Good)
+		}
+		win.recorded(recs, ready, candidates, *opts.from, *opts.to)
+	} else {
+		for _, at := range ready {
+			if len(ticks) > 0 && (opts.to == nil || at.Before(*opts.to)) {
+				win.arrivals = append(win.arrivals, max(at.Sub(ticks[0].World.Now), 0))
+			}
 		}
 	}
 	slices.Sort(win.arrivals)
 	row := liveRow{
 		From: opts.from, To: opts.to,
 		Ticks: len(ticks), ContextTicks: len(recs) - len(ticks), Commit: evalRevision(), Landed: landed, busy: busy, BusyMinutes: busy.Minutes(),
-		WrongEjections: wrong, Unchecked: unchecked, Unreadable: unreadable, EjectionsAsCause: causes,
+		WholeBuilds: wholeBuilds, WrongEjections: wrong, Unchecked: unchecked, Unreadable: unreadable, EjectionsAsCause: causes,
 		GoodBuilds: sc.Good, NonPassingBuilds: sc.Flaked, liveMeasures: measureLive(recs, opts, landings),
+	}
+	if withoutWait > 0 {
+		row.LandingsWithoutAWait = &withoutWait
 	}
 	if bounded {
 		count := len(unconfirmed)
 		row.UnconfirmedLandingPlans = &count
+	}
+	if win.stop > 0 {
+		settings := map[queue.Config]bool{}
+		for _, rec := range ticks {
+			settings[rec.Config] = true
+		}
+		arrivals, configs := len(win.arrivals), len(settings)
+		opening, left := win.opening, win.left
+		row.Arrivals, row.WaitingAtOpen, row.SettingsInWindow, row.LeftWaiting = &arrivals, &opening, &configs, &left
+		row.Withdrawn = &win.withdrawn
+		row.DeparturesAfterAnUnconfirmedPlan = &win.unconfirmedDepartures
 	}
 	if row.SplitLandings+row.UnsplitLandings != landed {
 		return Score{}, window{}, liveRow{}, fmt.Errorf("split landings do not match counted landings")
@@ -351,18 +411,63 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	return sc, win, row, nil
 }
 
-// window is what a simulation needs of the ticks a real queue recorded, to play the same
-// hours again: when each pull request was ready, how long a whole build took, and the dials
-// of the last tick.
+// window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
-	arrivals []time.Duration
-	build    time.Duration
-	cfg      queue.Config
+	arrivals                                        []time.Duration
+	times                                           []time.Duration // a bounded window's whole builds, each as long as it took
+	acts                                            []Act
+	unblamedRedCandidates, candidatesWithoutCulprit int
+	opening, left, withdrawn, settings              int
+	ignoredHolds                                    int
+	unattributed, unconfirmedDepartures             int
+	flake, errored                                  float64
+	build                                           time.Duration
+	probe                                           time.Duration
+	stop                                            time.Duration
+	cfg                                             queue.Config
 }
 
-// simulated is the row a shape's CI gives the window's own arrivals, with builds as long and
-// as flaky as the real queue's were. Each world draws its own flakes and its own breaking
-// pull requests, at the shape's rate.
+// perturb changes only the replay's build times or recorded settings.
+func (w window) perturb(name string) (window, error) {
+	switch name {
+	case "":
+		return w, nil
+	case "builds-double", "builds-half":
+		scale := func(d time.Duration) time.Duration {
+			if name == "builds-double" {
+				return 2 * d
+			}
+			return d / 2
+		}
+		w.build, w.probe = scale(w.build), scale(w.probe)
+		w.times = slices.Clone(w.times)
+		for i := range w.times {
+			w.times[i] = scale(w.times[i])
+		}
+	case "one-slot", "no-batch":
+		change := func(c queue.Config) queue.Config {
+			if name == "one-slot" {
+				c.Slots = 1
+			} else {
+				c.MaxBatch = 1
+			}
+			return c
+		}
+		w.cfg = change(w.cfg)
+		w.acts = slices.Clone(w.acts)
+		for i, a := range w.acts {
+			if a.Do == "settings" {
+				c := change(*a.Config)
+				w.acts[i].Config = &c
+			}
+		}
+	default:
+		return w, fmt.Errorf("unknown perturbation %q", name)
+	}
+	return w, nil
+}
+
+// simulated scores recorded traffic using the window's CI observations.
 func (w window) simulated(shape Shape, was Score) Score {
 	sc, _ := w.simulate(shape, was)
 	return sc
@@ -370,32 +475,86 @@ func (w window) simulated(shape Shape, was Score) Score {
 
 func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 	shape.Backlog, shape.Arrivals, shape.Build, shape.Hours = 0, 0, w.build, 0
-	if was.Good > 0 {
+	if w.stop > 0 {
+		shape.Stop, shape.Recorded, shape.Acts = w.stop, true, w.acts
+		shape.Queue = nil
+		shape.Moves, shape.Removals, shape.Break, shape.Conflict, shape.Ahead, shape.Clash = 0, 0, 0, 0, 0, 0
+		shape.Agents, shape.Lost, shape.Flake, shape.Errored = 0, 0, w.flake, w.errored
+		shape.Outside, shape.Race, shape.Crash = 0, 0, 0
+		shape.ProbeFlake, shape.Spread, shape.Fails = 0, 0, 0
+		shape.Episodes, shape.Script, shape.Takes = nil, nil, nil
+		shape.Rerun, shape.Rescued, shape.Whole = 0, 0, 0
+		shape.Times, shape.Probe = w.times, w.probe
+	} else if was.Good > 0 {
 		shape.Flake = float64(was.Flaked) / float64(was.Good)
 	}
 	var sc Score
 	var waits, labelled, ejects []float64
+	var added []float64
 	whole, wrong, hours := 0, 0, 0.0
+	probes, red, causes, left, opening, failures := 0, 0, 0, 0, 0, 0
+	redCandidates, redPullRequests, over30 := 0, 0, 0
 	for _, s := range each(seeds, func(i int) *Sim {
 		world, rng := shape, rand.New(rand.NewSource(int64(i)))
-		for n, at := range w.arrivals {
-			world.Queue = append(slices.Clone(world.Queue), Queued{Number: n + 1, At: at, Breaks: rng.Float64() < shape.Break})
-			world.Hours = max(world.Hours, at.Hours())
+		if w.stop <= 0 {
+			for n, at := range w.arrivals {
+				world.Queue = append(slices.Clone(world.Queue), Queued{Number: n + 1, At: at, Breaks: rng.Float64() < shape.Break})
+				world.Hours = max(world.Hours, at.Hours())
+			}
 		}
 		s := NewSim(world, w.cfg, int64(i))
 		s.Run()
 		return s
 	}) {
 		sc.Landed, whole, wrong, hours = sc.Landed+s.Landed, whole+s.Whole, wrong+s.Wrong, hours+s.LastLand.Hours()
+		probes, red, causes = probes+s.Probes, red+s.Red, causes+s.Ejected["culprit"]
+		redCandidates, redPullRequests = redCandidates+s.RedCandidates, redPullRequests+s.RedPullRequests
+		added = append(added, s.QueueAdded...)
+		for _, minutes := range s.QueueAdded {
+			if minutes > 30 {
+				over30++
+			}
+		}
+		opening += s.opening
+		failures += len(s.Broken)
+		for _, p := range s.prs {
+			if p.queued && !p.landed && waitsOnTheQueue(p.PR) {
+				left++
+			}
+		}
 		waits, labelled, ejects = append(waits, s.Waits...), append(labelled, s.Labelled...), append(ejects, s.Ejects...)
 	}
 	if sc.Landed > 0 {
 		sc.Wrong, sc.Builds, sc.PerHour = 1000*float64(wrong)/float64(sc.Landed), float64(whole)/float64(sc.Landed), float64(sc.Landed)/hours
+		if w.stop > 0 {
+			probe := shape.Probe
+			if probe == 0 {
+				probe = shape.Build
+			}
+			sc.Builds += float64(probes) * float64(probe) / float64(shape.Build) / float64(sc.Landed)
+		}
 	}
 	sc.Shape, sc.Config = was.Shape, "simulated"
 	sc.WaitP50, sc.WaitP90, sc.EjectP90 = percentile(waits, 50), percentile(waits, 90), percentile(ejects, 90)
 	sc.LabelP50, sc.LabelP90, sc.LabelSlow = percentile(labelled, 50), percentile(labelled, 90), slowest(labelled, 20)
 	comparison := liveComparison{Landed: number(float64(sc.Landed / seeds))}
+	if w.stop > 0 {
+		comparison.Landed = number(float64(sc.Landed) / seeds)
+		comparison.simulatedMeasures = &simulatedMeasures{
+			WholeBuilds: float64(whole) / seeds, Probes: float64(probes) / seeds,
+			RedBuilds: float64(red) / seeds, EjectedAsCause: float64(causes) / seeds, LeftWaiting: float64(left) / seeds,
+			QueueAddedP50Minutes: median(added), QueueAddedP90Minutes: quantile(added, 90), QueueAddedOver30: float64(over30) / seeds,
+			RedCandidates: float64(redCandidates) / seeds, RedPullRequests: float64(redPullRequests) / seeds,
+			UnblamedRedCandidates: w.unblamedRedCandidates, CandidatesWithoutACulprit: w.candidatesWithoutCulprit,
+			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, CulpritsUnattributed: w.unattributed, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
+		}
+		for _, a := range w.acts {
+			comparison.Acts[a.Do]++
+		}
+		if len(waits) > 0 {
+			comparison.WaitP50Minutes, comparison.WaitP90Minutes = number(sc.WaitP50*shape.Build.Minutes()), number(sc.WaitP90*shape.Build.Minutes())
+		}
+	}
 	if len(waits) > 0 {
 		comparison.WaitP50, comparison.WaitP90 = number(sc.WaitP50), number(sc.WaitP90)
 	}

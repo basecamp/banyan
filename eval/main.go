@@ -545,6 +545,7 @@ func main() {
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
 	clone := flag.String("clone", "", "with -live: local clone to compare changes when a pull request ejected as the cause lands at a newer head")
+	perturb := flag.String("perturb", "", "with -like and a window: check that over_live can fail (builds-double, builds-half, one-slot, no-batch)")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	takeouts := flag.String("takeouts", "", "report take-outs from owner/repo as one JSON row; requires -from and -to")
 	fromText := flag.String("from", "", "with -live or -takeouts: include records at or after this RFC 3339 time")
@@ -562,6 +563,16 @@ func main() {
 	rescued := flag.Float64("rescued", 0.6, "with -history and -rerun: the share of flakes that pass when run again")
 	flag.Var(&check, "check", `explore the planner deeper with the model checker, or one named world: -check "<world name>"`)
 	flag.Parse()
+	if *perturb != "" {
+		if _, err := (window{}).perturb(*perturb); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if *recordings == "" || *like == "" || *fromText == "" || *toText == "" {
+			fmt.Fprintln(os.Stderr, "-perturb requires -live, -like, -from and -to")
+			os.Exit(1)
+		}
+	}
 	if *takeouts != "" {
 		if *recordings != "" || *row {
 			fmt.Fprintln(os.Stderr, "-takeouts cannot be combined with -live or -row")
@@ -613,7 +624,7 @@ func main() {
 		return
 	}
 	if *recordings != "" {
-		if err := runLive(*recordings, *clone, *like, *fromText, *toText, *row); err != nil {
+		if err := runLive(*recordings, *clone, *like, *fromText, *toText, *row, *perturb); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

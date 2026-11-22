@@ -377,7 +377,7 @@ func TestLiveFullWindowMatchesUnwindowed(t *testing.T) {
 				scores, rows = append(scores, score), append(rows, row)
 				windows = append(windows, win)
 			}
-			if len(windows[0].arrivals) != 25 || !reflect.DeepEqual(windows[0], windows[1]) {
+			if len(windows[0].arrivals) != 25 || !reflect.DeepEqual(windows[0].arrivals, windows[1].arrivals) || windows[0].build != windows[1].build || windows[0].cfg != windows[1].cfg {
 				t.Fatalf("full window arrivals differ: %+v / %+v", windows[0], windows[1])
 			}
 			if !reflect.DeepEqual(scores[0], scores[1]) || !reflect.DeepEqual(rows[0].WaitP50, rows[1].WaitP50) || !reflect.DeepEqual(rows[0].WaitP90, rows[1].WaitP90) || !reflect.DeepEqual(rows[0].liveMeasures, rows[1].liveMeasures) {
