@@ -81,6 +81,7 @@ type Build struct {
 	Failed []string
 	// Jobs is the newest state of each of those contexts CI has reported on the commit, by
 	// name. One that is not in it is unknown: it has not reported, did not run, or was skipped.
+	// A context that judges a build or a probe is never a job, on either kind of commit.
 	Jobs map[string]Verdict `json:",omitempty"`
 	// Pushed is the time of the queue's latest status on this commit.
 	Pushed time.Time

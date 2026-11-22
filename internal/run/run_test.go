@@ -968,6 +968,41 @@ func TestARecordedBuildSaysWhatEachJobDidAndNothingOfOneThatDidNotReport(t *test
 	}
 }
 
+func TestAContextThatJudgesAProbeIsNoJobOfACandidate(t *testing.T) {
+	w := newWorld(t, `{"probe": "merge-queue/probe"}`)
+	w.queue(1, "a", "1\n")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	w.set(cand, "merge-queue/probe", "failure")
+	w.set(cand, "unit", "success")
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := false
+	for _, b := range r.World.Builds {
+		if b.SHA != cand {
+			continue
+		}
+		seen = true
+		if want := map[string]queue.Verdict{"unit": queue.Success}; !maps.Equal(b.Jobs, want) {
+			t.Errorf("the candidate reads jobs %v, want %v: the probe's context judges a probe", b.Jobs, want)
+		}
+		if !slices.Equal(b.Failed, []string{"merge-queue/probe"}) {
+			t.Errorf("the candidate reads failed %v, want it as before", b.Failed)
+		}
+	}
+	if !seen {
+		t.Fatal("the candidate is not among the builds read")
+	}
+}
+
 func TestProbesNarrowABatchToItsCulprit(t *testing.T) {
 	w := newWorld(t, `{"slots": 3, "max_batch": 4, "probe": "merge-queue/probe"}`)
 	w.red = func(sha string) bool { return w.o.Holds(sha, "broken") }

@@ -226,10 +226,12 @@ func (q *Queue) Read() (*Read, error) {
 			if name == q.Status || slices.Contains(contexts, name) || strings.ContainsFunc(name, unicode.IsControl) || s.Skipped {
 				continue
 			}
-			if b.Jobs == nil {
-				b.Jobs = map[string]queue.Verdict{}
+			if !slices.Contains(q.Build, name) && name != q.Probe {
+				if b.Jobs == nil {
+					b.Jobs = map[string]queue.Verdict{}
+				}
+				b.Jobs[name] = s.State
 			}
-			b.Jobs[name] = s.State
 			if s.State == queue.Failure {
 				b.Failed = append(b.Failed, name)
 			}
