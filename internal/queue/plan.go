@@ -648,7 +648,7 @@ func (p *plan) fill() {
 }
 
 const suspected = "a build that holds it failed, and the queue is finding the cause"
-const redTrunk = "the trunk itself is failing, and no new candidate is built until it passes"
+const redTrunk = "the trunk itself is failing, and only a fix joins the chain until it passes"
 
 // notes writes each pull request's place in the queue on its head, when it changed.
 func (p *plan) notes() {
