@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -903,6 +904,67 @@ func TestARecordedTickReplaysToTheSameActions(t *testing.T) {
 		if got, want := fmt.Sprint(rec.Replay()), fmt.Sprint(rec.Actions); got != want {
 			t.Errorf("%s replays to\n %s\nrecorded\n %s", f.Name(), got, want)
 		}
+	}
+}
+
+func TestARecordedBuildSaysWhatEachJobDidAndNothingOfOneThatDidNotReport(t *testing.T) {
+	w := newWorld(t, `{}`)
+	w.queue(1, "a", "1\n")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	w.set(cand, "merge-queue/build", "failure")
+	w.set(cand, "unit", "success")
+	w.set(cand, "lint", "failure")
+	w.set(cand, "slow", "pending")
+	w.check(cand, "apple", "cancelled", w.now)
+	w.check(cand, "docs", "skipped", w.now)
+	w.check(cand, "notes", "neutral", w.now)
+	w.q.Record = t.TempDir()
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := os.ReadDir(w.q.Record)
+	reds, others := 0, 0
+	for _, f := range files {
+		data, _ := os.ReadFile(w.q.Record + "/" + f.Name())
+		var rec queue.Recording
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Fatal(err)
+		}
+		for i, b := range rec.World.Builds {
+			if b.SHA != cand {
+				others++
+				if b.Jobs != nil {
+					t.Errorf("%s: a build no job has reported on reads jobs %v, want none known", f.Name(), b.Jobs)
+				}
+				continue
+			}
+			reds++
+			want := map[string]queue.Verdict{"unit": queue.Success, "lint": queue.Failure, "slow": queue.Pending, "apple": queue.Error}
+			if !maps.Equal(b.Jobs, want) || !slices.Equal(b.Failed, []string{"lint"}) {
+				t.Errorf("%s: the red build reads jobs %v and failed %v, want %v and [lint]", f.Name(), b.Jobs, b.Failed, want)
+			}
+			slow, reported := b.Jobs["slow"]
+			_, never := b.Jobs["never"]
+			_, skipped := b.Jobs["docs"]
+			if slow != queue.Pending || !reported || never || skipped {
+				t.Errorf("%s: a job still running, one that never reported and one skipped read alike: %v", f.Name(), b.Jobs)
+			}
+			rec.World.Builds[i].Jobs = nil
+		}
+		if got, want := fmt.Sprint(rec.Replay()), fmt.Sprint(rec.Actions); got != want {
+			t.Errorf("%s without its jobs replays to\n %s\nrecorded\n %s", f.Name(), got, want)
+		}
+	}
+	if reds != 2 || others != 1 {
+		t.Errorf("the records hold the red build %d times and another %d times, want 2 and 1", reds, others)
 	}
 }
 
@@ -1904,6 +1966,9 @@ func TestARedCandidatesFailedJobsComeOnlyFromTheConfiguredApp(t *testing.T) {
 	}
 	if len(r.World.Builds) != 1 || !slices.Equal(r.World.Builds[0].Failed, []string{"unit"}) {
 		t.Errorf("red candidate Failed = %v, want [unit]", r.World.Builds[0].Failed)
+	}
+	if jobs := r.World.Builds[0].Jobs; !maps.Equal(jobs, map[string]queue.Verdict{"unit": queue.Failure}) {
+		t.Errorf("red candidate Jobs = %v, want unit failed and no other", jobs)
 	}
 }
 

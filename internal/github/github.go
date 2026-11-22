@@ -48,6 +48,8 @@ type Status struct {
 	At          time.Time
 	// Running is a check run saying it has begun. A commit status has only its description.
 	Running bool
+	// Skipped is a check run that ended without judging the commit: skipped or neutral.
+	Skipped bool
 }
 
 const maxWait = 5 * time.Second
@@ -213,7 +215,7 @@ func (r *rollup) statuses(names Names) map[string]Status {
 			case n.Status != "COMPLETED":
 				s.State = queue.Pending
 			case n.Conclusion == "SUCCESS" || n.Conclusion == "NEUTRAL" || n.Conclusion == "SKIPPED":
-				s.State = queue.Success
+				s.State, s.Skipped = queue.Success, n.Conclusion != "SUCCESS"
 			case n.Conclusion == "FAILURE" || n.Conclusion == "ACTION_REQUIRED":
 				s.State = queue.Failure
 			default:

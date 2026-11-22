@@ -79,6 +79,9 @@ type Build struct {
 	// Failed names the contexts that failed on the commit beside its verdict's own: the jobs
 	// of its build, where the repository's CI reports each as a context.
 	Failed []string
+	// Jobs is the newest state of each of those contexts CI has reported on the commit, by
+	// name. One that is not in it is unknown: it has not reported, did not run, or was skipped.
+	Jobs map[string]Verdict `json:",omitempty"`
 	// Pushed is the time of the queue's latest status on this commit.
 	Pushed time.Time
 	// Started is when CI began running the build: zero until it has, and always zero where

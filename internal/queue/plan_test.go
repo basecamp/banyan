@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -722,5 +723,41 @@ func TestKeepZeroAddsNothingToARecording(t *testing.T) {
 	want = `{"Slots":0,"MaxBatch":0,"Gather":0,"Probes":false,"Cancels":false,"Timeout":0,"Recheck":0}`
 	if string(c) != want {
 		t.Fatalf("zero config JSON = %s, want %s", c, want)
+	}
+}
+
+// recordedBeforeJobs is a tick as the queue recorded it before a build carried its jobs: a red
+// candidate, and the first round's build pushed for it.
+const recordedBeforeJobs = `{"World":{"Now":"2026-11-11T12:02:01Z","Trunk":"eec28e4225d05c3c8f44a5cd314009a644f44593",
+ "PRs":[{"Number":1,"Head":"bc7b828ba5284b178ee88e32e452b4e9387a4732","Branch":"o/pr1","Message":"","Queued":"2026-11-11T12:00:01Z","First":false,"Wait":"","Checks":1,"Gate":"","Note":"in the queue, 0 ahead of it"}],
+ "Builds":[{"SHA":"3cc617358d1aba323621e6ada320369886638f0f","Kind":0,"Base":"eec28e4225d05c3c8f44a5cd314009a644f44593","Chain":[{"Number":1,"Head":"bc7b828ba5284b178ee88e32e452b4e9387a4732","Merge":"3cc617358d1aba323621e6ada320369886638f0f"}],"Round":0,"Of":"","Verdict":2,"Failed":["lint"],"Pushed":"2026-11-11T12:01:01Z","Started":"0001-01-01T00:00:00Z"}]},
+ "Config":{"Slots":4,"MaxBatch":1,"Gather":0,"Probes":false,"Cancels":false,"Timeout":5400000000000,"Recheck":600000000000},
+ "Commits":{
+  "mark 3cc617358d1aba323621e6ada320369886638f0f \"Banyan-Try: 1\\nBanyan-Round: 1\\nBanyan-Of: 3cc617358d1aba323621e6ada320369886638f0f\\nBanyan-Check: whole\"":{"SHA":"0aeb7d78100bb651f86fba284b34b08583fba68c","OK":true,"Seen":false},
+  "merge eec28e4225d05c3c8f44a5cd314009a644f44593 1 bc7b828ba5284b178ee88e32e452b4e9387a4732 \"\"":{"SHA":"3cc617358d1aba323621e6ada320369886638f0f","OK":true,"Seen":false},
+  "seen 0aeb7d78100bb651f86fba284b34b08583fba68c":{"SHA":"","OK":false,"Seen":false}},
+ "Actions":[
+  {"do":"push","build":{"SHA":"0aeb7d78100bb651f86fba284b34b08583fba68c","Kind":1,"Base":"eec28e4225d05c3c8f44a5cd314009a644f44593","Chain":[{"Number":1,"Head":"bc7b828ba5284b178ee88e32e452b4e9387a4732","Merge":"3cc617358d1aba323621e6ada320369886638f0f"}],"Round":1,"Of":"3cc617358d1aba323621e6ada320369886638f0f","Verdict":0,"Failed":null,"Pushed":"2026-11-11T12:02:01Z","Started":"0001-01-01T00:00:00Z"}},
+  {"do":"note","pr":1,"text":"waits: a build that holds it failed, and the queue is finding the cause"}]}`
+
+func TestARecordingFromBeforeJobsReadsThemAsUnknownAndReplaysExactly(t *testing.T) {
+	var rec Recording
+	var old struct{ Actions json.RawMessage }
+	var recorded, actions bytes.Buffer
+	if err := json.Unmarshal([]byte(recordedBeforeJobs), &rec); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal([]byte(recordedBeforeJobs), &old)
+	json.Compact(&recorded, []byte(recordedBeforeJobs))
+	json.Compact(&actions, old.Actions)
+	red := rec.World.Builds[0]
+	if _, known := red.Jobs["lint"]; known || red.Jobs != nil || !slices.Equal(red.Failed, []string{"lint"}) {
+		t.Errorf("the red build reads jobs %v and failed %v, want no job known and lint failed", red.Jobs, red.Failed)
+	}
+	if got, _ := json.Marshal(rec.Replay()); string(got) != actions.String() {
+		t.Errorf("replays to\n %s\nrecorded\n %s", got, actions.String())
+	}
+	if got, _ := json.Marshal(rec); string(got) != recorded.String() {
+		t.Errorf("written again it is\n %s\nrecorded\n %s", got, recorded.String())
 	}
 }
