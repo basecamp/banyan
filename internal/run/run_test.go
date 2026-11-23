@@ -802,7 +802,8 @@ func TestALandedReadGitHubLimitsStopsTheTick(t *testing.T) {
 		if !bytes.Contains(body, []byte("query Landed")) {
 			return false
 		}
-		json.NewEncoder(rw).Encode(map[string]any{"errors": []any{map[string]any{"type": "RATE_LIMITED", "message": "limited"}}})
+		json.NewEncoder(rw).Encode(map[string]any{"errors": []any{
+			map[string]any{"type": "FORBIDDEN", "message": "refused"}, map[string]any{"type": "RATE_LIMITED", "message": "limited"}}})
 		return true
 	}
 	w.now = w.now.Add(2 * time.Minute)

@@ -155,19 +155,17 @@ func (c *Client) graphql(query string, vars map[string]any, out any) error {
 		return err
 	}
 	if len(reply.Errors) > 0 {
-		t := reply.Errors[0].Type
-		text := "graphql: " + reply.Errors[0].Message
+		text, unavailable := "graphql: "+reply.Errors[0].Message, false
 		for i, e := range reply.Errors {
-			if i == 3 {
+			unavailable = unavailable || e.Type == "RATE_LIMITED" || e.Type == "SERVICE_UNAVAILABLE" || e.Type == "INTERNAL"
+			switch {
+			case i < 3:
+				text += fmt.Sprintf("; %s at %s", cmp.Or(e.Type, "no type"), cmp.Or(strings.Trim(fmt.Sprint(e.Path), "[]"), "no path"))
+			case i == 3:
 				text += fmt.Sprintf("; and %d more", len(reply.Errors)-i)
-				break
 			}
-			text += fmt.Sprintf("; %s at %s", cmp.Or(e.Type, "no type"), cmp.Or(strings.Trim(fmt.Sprint(e.Path), "[]"), "no path"))
 		}
-		return &Error{
-			Text:        text,
-			Unavailable: t == "RATE_LIMITED" || t == "SERVICE_UNAVAILABLE" || t == "INTERNAL",
-		}
+		return &Error{Text: text, Unavailable: unavailable}
 	}
 	return json.Unmarshal(reply.Data, out)
 }
