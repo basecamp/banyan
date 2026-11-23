@@ -381,6 +381,29 @@ func TestReplayBuildTimesDoNotAlias(t *testing.T) {
 		t.Fatal(w.times)
 	}
 }
+func TestReplayLeavesOutABuildAnsweredAfterAnUnrecordedStretch(t *testing.T) {
+	short := queue.Build{SHA: "short", Pushed: replayStart, Verdict: queue.Success}
+	long := queue.Build{SHA: "long", Pushed: replayStart, Verdict: queue.Success}
+	recs := []queue.Recording{replayTick(0), replayTick(10), replayTick(110)}
+	recs[1].World.Builds = []queue.Build{short}
+	recs[2].World.Builds = []queue.Build{long}
+	_, w, row := replayWindow(t, recs, 120)
+	if !slices.Equal(w.times, []time.Duration{10 * time.Minute}) {
+		t.Fatalf("pool %v", w.times)
+	}
+	if row.BuildMedianMinutes == nil || *row.BuildMedianMinutes != 110 || row.WholeBuilds != 2 || w.build != 110*time.Minute {
+		t.Fatalf("live build median %v, whole builds %d, window build %v", row.BuildMedianMinutes, row.WholeBuilds, w.build)
+	}
+}
+func TestReplayKeepsABuildAnsweredSoonAfterThePreviousTick(t *testing.T) {
+	b := queue.Build{SHA: "b", Pushed: replayStart, Verdict: queue.Success}
+	recs := []queue.Recording{replayTick(0), replayTick(30), replayTick(40)}
+	recs[2].World.Builds = []queue.Build{b}
+	_, w, _ := replayWindow(t, recs, 60)
+	if !slices.Equal(w.times, []time.Duration{40 * time.Minute}) {
+		t.Fatalf("pool %v", w.times)
+	}
+}
 func TestReplayNoChanceFromShape(t *testing.T) {
 	_, w, _ := replayWindow(t, durationBuild([]queue.Recording{replayTick(0, replayPR(1))}, 10), 40)
 	_, plain := w.simulate(Shape{}, Score{})
