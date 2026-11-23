@@ -5,6 +5,7 @@ package github
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,6 +148,7 @@ func (c *Client) graphql(query string, vars map[string]any, out any) error {
 		Errors []struct {
 			Type    string
 			Message string
+			Path    []any
 		}
 	}
 	if err := c.do(true, "POST", "/graphql", map[string]any{"query": query, "variables": vars}, &reply); err != nil {
@@ -154,8 +156,16 @@ func (c *Client) graphql(query string, vars map[string]any, out any) error {
 	}
 	if len(reply.Errors) > 0 {
 		t := reply.Errors[0].Type
+		text := "graphql: " + reply.Errors[0].Message
+		for i, e := range reply.Errors {
+			if i == 3 {
+				text += fmt.Sprintf("; and %d more", len(reply.Errors)-i)
+				break
+			}
+			text += fmt.Sprintf("; %s at %s", cmp.Or(e.Type, "no type"), cmp.Or(strings.Trim(fmt.Sprint(e.Path), "[]"), "no path"))
+		}
 		return &Error{
-			Text:        "graphql: " + reply.Errors[0].Message,
+			Text:        text,
 			Unavailable: t == "RATE_LIMITED" || t == "SERVICE_UNAVAILABLE" || t == "INTERNAL",
 		}
 	}
@@ -192,11 +202,22 @@ type rollup struct {
 	}
 }
 
-const contextFields = `pageInfo { hasNextPage endCursor } nodes { __typename
-	... on StatusContext { context state description targetUrl createdAt }
-	... on CheckRun { name status conclusion detailsUrl startedAt checkSuite { app { databaseId } } } }`
+const statusFields = `context state description targetUrl createdAt`
 
-const rollupFields = `statusCheckRollup { contexts(first: 100) { ` + contextFields + ` } }`
+// contextFields asks whose check run each is only of a queue that reads one App's alone.
+func (n Names) contextFields() string {
+	app := ""
+	if n.App != 0 {
+		app = " checkSuite { app { databaseId } }"
+	}
+	return `pageInfo { hasNextPage endCursor } nodes { __typename
+	... on StatusContext { ` + statusFields + ` }
+	... on CheckRun { name status conclusion detailsUrl startedAt` + app + ` } }`
+}
+
+func (n Names) rollupFields() string {
+	return `statusCheckRollup { contexts(first: 100) { ` + n.contextFields() + ` } }`
+}
 
 // statuses is the newest report of each context: a commit status by its context, a check
 // run by its name.
@@ -369,11 +390,13 @@ type pullNode struct {
 const timelineFields = `pageInfo { hasPreviousPage startCursor } nodes {
 	... on LabeledEvent { createdAt label { name } } }`
 
-const pullFields = `number title body isDraft merged isCrossRepository baseRefName headRefOid headRefName headRepositoryOwner { login }
+func (n Names) pullFields() string {
+	return `number title body isDraft merged isCrossRepository baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 100) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { ` + timelineFields + ` }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
-	commits(last: 1) { nodes { commit { oid ` + rollupFields + ` } } }`
+	commits(last: 1) { nodes { commit { oid ` + n.rollupFields() + ` } } }`
+}
 
 func queuedAt(events []labelEvent, label string) time.Time {
 	var at time.Time
@@ -470,7 +493,7 @@ func (c *Client) pulls(n Names, nodes []pullNode) ([]Pull, error) {
 			}
 		}
 	}
-	if err := c.moreContexts(pages); err != nil {
+	if err := c.moreContexts(n, pages); err != nil {
 		return nil, err
 	}
 	var pulls []Pull
@@ -498,7 +521,7 @@ func (c *Client) Queue(n Names) ([]Pull, error) {
 		err := c.graphql(`query Queue($owner: String!, $name: String!, $label: String!, $after: String) {
 			repository(owner: $owner, name: $name) {
 				pullRequests(states: OPEN, labels: [$label], first: 25, after: $after) {
-					pageInfo { hasNextPage endCursor } nodes { `+pullFields+` } } } }`,
+					pageInfo { hasNextPage endCursor } nodes { `+n.pullFields()+` } } } }`,
 			map[string]any{"label": n.Label, "after": after}, &out)
 		if err != nil {
 			return nil, err
@@ -517,18 +540,50 @@ func (c *Client) Queue(n Names) ([]Pull, error) {
 	return pulls, nil
 }
 
-// Landed is the pull requests merged lately that still carry the queue's label.
+// Landed is the pull requests merged lately that still carry the queue's label, each with
+// the queue's own status on its head and no other.
 func (c *Client) Landed(n Names) ([]Pull, error) {
 	var out struct {
-		Repository struct{ PullRequests struct{ Nodes []pullNode } }
+		Repository struct {
+			PullRequests struct {
+				Nodes []struct {
+					Number     int
+					Merged     bool
+					HeadRefOid string
+					Commits    struct {
+						Nodes []struct {
+							Commit struct {
+								Oid    string
+								Status struct{ Context contextNode }
+							}
+						}
+					}
+				}
+			}
+		}
 	}
-	if err := c.graphql(`query Landed($owner: String!, $name: String!, $label: String!) {
+	if err := c.graphql(`query Landed($owner: String!, $name: String!, $label: String!, $status: String!) {
 		repository(owner: $owner, name: $name) {
 			pullRequests(states: MERGED, labels: [$label], first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
-				nodes { `+pullFields+` } } } }`, map[string]any{"label": n.Label}, &out); err != nil {
+				nodes { number merged headRefOid
+					commits(last: 1) { nodes { commit { oid status { context(name: $status) { `+statusFields+` } } } } } } } } }`,
+		map[string]any{"label": n.Label, "status": n.Status}, &out); err != nil {
 		return nil, err
 	}
-	return c.pulls(n, out.Repository.PullRequests.Nodes)
+	var pulls []Pull
+	for _, node := range out.Repository.PullRequests.Nodes {
+		p := Pull{Merged: node.Merged}
+		p.Number, p.Head = node.Number, node.HeadRefOid
+		for _, cm := range node.Commits.Nodes {
+			if cm.Commit.Oid == p.Head {
+				said := rollup{}
+				said.Contexts.Nodes = []contextNode{cm.Commit.Status.Context}
+				p.Statuses = said.statuses(n)
+			}
+		}
+		pulls = append(pulls, p)
+	}
+	return pulls, nil
 }
 
 type rollupPage struct {
@@ -536,14 +591,14 @@ type rollupPage struct {
 	r   *rollup
 }
 
-func (c *Client) moreContexts(pages []rollupPage) error {
+func (c *Client) moreContexts(n Names, pages []rollupPage) error {
 	for len(pages) > 0 {
 		batch := pages[:min(len(pages), 40)]
 		pages = pages[len(batch):]
 		q := "query Contexts($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {"
 		for i, p := range batch {
 			q += fmt.Sprintf(" c%d: object(oid: %q) { ... on Commit { statusCheckRollup { contexts(first: 100, after: %q) { %s } } } }",
-				i, p.oid, p.r.Contexts.PageInfo.EndCursor, contextFields)
+				i, p.oid, p.r.Contexts.PageInfo.EndCursor, n.contextFields())
 		}
 		var reply struct {
 			Repository map[string]*struct {
@@ -576,7 +631,7 @@ func (c *Client) Commits(n Names, shas []queue.SHA) (map[queue.SHA]map[string]St
 		shas = shas[len(page):]
 		q := "query Commits($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {"
 		for i, sha := range page {
-			q += fmt.Sprintf(" c%d: object(oid: %q) { ... on Commit { %s } }", i, sha, rollupFields)
+			q += fmt.Sprintf(" c%d: object(oid: %q) { ... on Commit { %s } }", i, sha, n.rollupFields())
 		}
 		var reply struct {
 			Repository map[string]*struct {
@@ -596,7 +651,7 @@ func (c *Client) Commits(n Names, shas []queue.SHA) (map[queue.SHA]map[string]St
 				}
 			}
 		}
-		if err := c.moreContexts(pages); err != nil {
+		if err := c.moreContexts(n, pages); err != nil {
 			return nil, err
 		}
 		for i, sha := range page {

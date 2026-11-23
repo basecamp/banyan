@@ -38,6 +38,10 @@ type hub struct {
 	contextPages int
 	intercept    func(http.ResponseWriter, *http.Request) bool
 	lagUnlabel   bool
+	// refused is the commits whose checks GitHub will not show: a query that reads one's is
+	// answered with an error and nothing else.
+	refused  map[string]bool
+	refusing bool
 }
 
 type pull struct {
@@ -151,6 +155,7 @@ func (h *hub) timeline(p *pull, last int, before string) map[string]any {
 }
 
 func (h *hub) rollup(sha, after string, first int) any {
+	h.refusing = h.refusing || h.refused[sha]
 	type key struct {
 		context string
 		check   bool
@@ -231,7 +236,28 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.listings++
 			repo["pullRequests"] = listed(false)
 		case strings.Contains(q.Query, "query Landed"):
-			repo["pullRequests"] = listed(true)
+			own, _ := q.Variables["status"].(string)
+			var nodes []any
+			for _, n := range h.numbers() {
+				p := h.pulls[n]
+				if _, labelled := p.labels[q.Variables["label"].(string)]; !labelled || !p.merged {
+					continue
+				}
+				head := p.heads[len(p.heads)-1]
+				if strings.Contains(q.Query, "statusCheckRollup") {
+					h.rollup(head, "", 100)
+				}
+				var said any
+				for _, s := range h.statuses[head] {
+					if s.Context == own && !s.Check {
+						said = map[string]any{"context": map[string]any{"context": s.Context, "state": strings.ToUpper(s.State),
+							"description": s.Description, "targetUrl": s.URL, "createdAt": s.At}}
+					}
+				}
+				nodes = append(nodes, map[string]any{"number": p.number, "merged": true, "headRefOid": head,
+					"commits": map[string]any{"nodes": []any{map[string]any{"commit": map[string]any{"oid": head, "status": said}}}}})
+			}
+			repo["pullRequests"] = map[string]any{"nodes": nodes}
 		case strings.Contains(q.Query, "query Timeline"):
 			if p := h.pulls[int(q.Variables["number"].(float64))]; p != nil {
 				before, _ := q.Variables["before"].(string)
@@ -261,6 +287,12 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					repo[m[1]] = map[string]any{"statusCheckRollup": h.rollup(m[2], m[4], first)}
 				}
 			}
+		}
+		if h.refusing {
+			h.refusing = false
+			reply(map[string]any{"errors": []any{map[string]any{"type": "FORBIDDEN", "path": []any{"repository", "pullRequests", "nodes", 0},
+				"message": "the `other` organization has an IP allow list enabled, and your IP address is not permitted to access this resource."}}})
+			return
 		}
 		reply(map[string]any{"data": map[string]any{"repository": repo}})
 	case parts[0] == "statuses" && r.Method == "POST":
@@ -717,6 +749,76 @@ func TestALandingWhoseTicksDiedBeforeSayingAnythingIsSaidByTheNext(t *testing.T)
 	w.round()
 	if len(w.statuses[p.heads[0]]) != said {
 		t.Errorf("a landing already said was said again")
+	}
+}
+
+func TestALandedPullRequestWhoseChecksGitHubRefusesDoesNotStopTheQueue(t *testing.T) {
+	w := newWorld(t, `{}`)
+	old := w.open(1, "a", "1\n")
+	old.labels["merge-queue"] = w.now
+	w.rounds(2)
+	if !w.landed(1) {
+		t.Fatalf("#1 did not land\n%s", w.log)
+	}
+	w.check(old.heads[0], "review", "neutral", w.now)
+	w.refused = map[string]bool{old.heads[0]: true}
+	w.queue(2, "b", "2\n")
+	w.rounds(2)
+	if !w.landed(2) {
+		t.Errorf("#2 did not land behind a landed pull request whose checks GitHub refuses\n%s", w.log)
+	}
+}
+
+func TestALandedReadGitHubRefusesFailsTheTickAndStopsNothing(t *testing.T) {
+	w := newWorld(t, `{}`)
+	w.queue(1, "a", "1\n")
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if !bytes.Contains(body, []byte("query Landed")) {
+			return false
+		}
+		json.NewEncoder(rw).Encode(map[string]any{"errors": []any{map[string]any{"type": "FORBIDDEN", "message": "refused"}}})
+		return true
+	}
+	for i := 0; i < 2; i++ {
+		w.now = w.now.Add(2 * time.Minute)
+		if err := w.q.Tick(); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("the tick's error is %v, want the landed read's refusal\n%s", err, w.log)
+		}
+		w.ci()
+	}
+	if !w.o.Landed(w.pulls[1].heads[0]) {
+		t.Errorf("#1 did not land while GitHub refused the landed read\n%s", w.log)
+	}
+}
+
+func TestALandedReadGitHubLimitsStopsTheTick(t *testing.T) {
+	w := newWorld(t, `{}`)
+	w.queue(1, "a", "1\n")
+	w.intercept = func(rw http.ResponseWriter, r *http.Request) bool {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if !bytes.Contains(body, []byte("query Landed")) {
+			return false
+		}
+		json.NewEncoder(rw).Encode(map[string]any{"errors": []any{map[string]any{"type": "RATE_LIMITED", "message": "limited"}}})
+		return true
+	}
+	w.now = w.now.Add(2 * time.Minute)
+	if err := w.q.Tick(); !github.Unavailable(err) || w.listings != 0 {
+		t.Errorf("the tick's error is %v and it listed the queue %d times, want GitHub unavailable and no listing\n%s", err, w.listings, w.log)
+	}
+}
+
+func TestARefusedReadSaysWhichNodeGitHubRefused(t *testing.T) {
+	w := newWorld(t, `{}`)
+	p := w.queue(1, "a", "1\n")
+	w.refused = map[string]bool{p.heads[0]: true}
+	w.now = w.now.Add(2 * time.Minute)
+	err := w.q.Tick()
+	if err == nil || !strings.Contains(err.Error(), "FORBIDDEN at repository pullRequests nodes 0") {
+		t.Errorf("the tick's error is %v, want the refusal's type and path", err)
 	}
 }
 
