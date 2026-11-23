@@ -14,7 +14,7 @@ def over($limit; $what): if . == null then "\($what) was not measured" elif . > 
 | ([$outs[] | select((.failed_then_passed // []) | length > 0)]) as $later
 | ([$outs[] | select(.landed_same_head == true)] | length) as $same
 | (($l.unchecked // 0) + ($l.unreadable // 0)) as $unjudged
-| ([ ($l.ready_gaps_over_90 | if . == null then "gaps between landings were not measured" elif . > 0 then "\(.) gap(s) over 90 minutes between landings with a ready head waiting" else empty end),
+| ([ ($l.ready_gaps_over_90 | if . == null then "waits of a ready head were not measured" elif . > 0 then "\(.) wait(s) over 90 minutes of a ready head with no landing" else empty end),
      (if $repo == "basecamp/hey-native-apps" and ($l.landed // 0) > 0 then ($l.queue_added_p50_minutes | over(6; "minutes the queue adds at the median")) else empty end),
      (if ($l.landed // 0) > 0 then ($l.builds_per_landing | over(if $repo == "basecamp/hey2" then 1.3 else 0.60 end; "builds per landing")) else empty end),
      ($l.wrong_ejections | if . == null then "wrong ejections were not measured" elif . > 0 then "\(.) wrong ejection(s)" else empty end),
@@ -29,7 +29,7 @@ def over($limit; $what): if . == null then "\($what) was not measured" elif . > 
   "| Minutes the queue adds, median / p90 / p95 | \($l.queue_added_p50_minutes | n1) / \($l.queue_added_p90_minutes | n1) / \($l.queue_added_p95_minutes | n1) |",
   "| Landings held over 30 minutes | \($l.queue_added_over_30 | n1) of \($l.split_landings) (\($l.unsplit_landings) more could not be split) |",
   "| Builds per landing | \($l.builds_per_landing | n2) |",
-  "| Longest gap between landings with a ready head waiting | \(if $l.ready_gaps == null then "not measured" elif $l.longest_ready_gap_minutes == null then "none" else "\($l.longest_ready_gap_minutes | n1) min, \($l.longest_ready_gap_from | hm) to \($l.longest_ready_gap_to | hm)" end) |",
+  "| Longest wait of a ready head with no landing | \(if $l.ready_gaps == null then "not measured" elif $l.longest_ready_gap_minutes == null then "none" else "\($l.longest_ready_gap_minutes | n1) min, \($l.longest_ready_gap_from | hm) to \($l.longest_ready_gap_to | hm)" end) |",
   "| Red candidates | \(if $l.red_candidates == null then "not measured" elif $l.red_candidates == 0 then "none" else "\($l.red_candidates), holding \($l.red_pull_requests | n1) pull requests; " + (if ($l.red_read_n // 0) > 0 then "failed job seen to read red \($l.red_read_median_minutes | n1) min at the median over \($l.red_read_n)" else "no failed job's time was recorded" end) end) |",
   "| Trunk moves no recorded tick planned | \($l.unplanned_trunk_moves | n1)\(if ($l.unplanned_trunk_moves // 0) > 0 then " (a merge outside the queue, or a tick whose record is missing; its landings are not counted)" else "" end) |",
   (if ($l.unconfirmed_landing_plans // 0) > 0 then "| Landing plans in the window the records never confirm | \($l.unconfirmed_landing_plans) (a refused push, or a landing confirmed after the records end) |" else empty end),
