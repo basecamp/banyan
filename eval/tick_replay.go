@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/basecamp/banyan/internal/queue"
@@ -81,6 +82,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	planned := map[headKey]bool{}
 	conflicted := map[int]queue.SHA{}
 	holding := map[int]queue.SHA{}
+	heldSince := map[int]time.Time{}
 	var cfg queue.Config
 	for i, r := range recs {
 		at := max(r.World.Now.Sub(start), 0)
@@ -184,6 +186,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 					held = true
 				}
 			}
+			if !held && exists && old.Head == p.Head && holding[p.Number] == p.Head && conflicted[p.Number] != p.Head {
+				held = !taken(r, key, heldSince[p.Number])
+			}
 			if was := exists && holding[p.Number] == p.Head; !exists || old.Head != p.Head || held != was {
 				ahead := 0
 				if held {
@@ -193,6 +198,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 				add(p.Number, Act{Do: "hold", Ahead: ahead})
 			}
 			if held {
+				if holding[p.Number] != p.Head {
+					heldSince[p.Number] = r.World.Now
+				}
 				holding[p.Number] = p.Head
 			} else {
 				delete(holding, p.Number)
@@ -259,6 +267,21 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			w.arrivals = append(w.arrivals, 0)
 		}
 	}
+}
+
+// taken says the queue has built this head into a chain since the hold began. The queue writes
+// the hold's note only on a tick that tries the merge, so a record without the note does not end
+// the hold: a chain with the head in it does, as a new head or a conflict with the trunk do.
+func taken(r queue.Recording, k headKey, since time.Time) bool {
+	in := func(b queue.Build) bool {
+		return slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return m.Number == k.number && m.Head == k.head })
+	}
+	for _, a := range r.Actions {
+		if a.Do == "push" && in(a.Build) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(r.World.Builds, func(b queue.Build) bool { return b.Pushed.After(since) && in(b) })
 }
 
 // confirmedMembers reports landings only once the trunk observation confirms them.

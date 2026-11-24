@@ -479,11 +479,13 @@ func TestReplayBuildWithoutPushRecordProvesClean(t *testing.T) {
 		t.Fatalf("conflicts=%d, want 1", conflicts)
 	}
 }
-func TestReplayHoldLastsAsRecorded(t *testing.T) {
+func TestReplayHoldStandsUntilACandidateTakesTheHead(t *testing.T) {
 	p, q := replayPR(1), replayPR(2)
 	held := q
 	held.Note = "waits: it conflicts with a pull request ahead of it"
-	_, w, _ := replayWindow(t, []queue.Recording{replayTick(0, p, q), replayTick(5, p, held), replayTick(8, p, q)}, 30)
+	taken := replayTick(12, p, q)
+	taken.Actions = []queue.Action{{Do: "push", Build: queue.Build{SHA: "c", Chain: []queue.Member{{Number: q.Number, Head: q.Head}}}}}
+	_, w, _ := replayWindow(t, []queue.Recording{replayTick(0, p, q), replayTick(5, p, held), replayTick(8, p, q), taken}, 30)
 	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
 	s.now = 0
 	s.play()
@@ -495,8 +497,13 @@ func TestReplayHoldLastsAsRecorded(t *testing.T) {
 	}
 	s.now += 3 * time.Minute
 	s.play()
+	if _, ok := s.Merge(s.trunk, q, ""); ok {
+		t.Fatal("the hold ended on a record that only lacks its note")
+	}
+	s.now += 4 * time.Minute
+	s.play()
 	if _, ok := s.Merge(s.trunk, q, ""); !ok {
-		t.Fatal("recorded hold did not end")
+		t.Fatal("the hold did not end when a candidate took the head")
 	}
 }
 func TestReplayProbeWithoutVerdictHasEqualCost(t *testing.T) {
