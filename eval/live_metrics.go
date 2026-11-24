@@ -104,6 +104,7 @@ type simulatedMeasures struct {
 	SettingsInWindow                 int            `json:"settings_in_window"`
 	Acts                             map[string]int `json:"acts"`
 	UnattributedHolds                int            `json:"unattributed_holds"`
+	ClashingPairs                    *int           `json:"clashing_pairs,omitempty"`
 	WaitP50Minutes                   *float64       `json:"wait_p50_minutes"`
 	WaitP90Minutes                   *float64       `json:"wait_p90_minutes"`
 	WholeBuilds                      float64        `json:"whole_builds"`

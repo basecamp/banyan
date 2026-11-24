@@ -544,7 +544,7 @@ func main() {
 	try := flag.String("try", "", `measure shapes under other dials, and record nothing: "<shape> <slots> <batch> <probes> [<flake rate> [<build minutes> [<share of a build a broken tree takes to fail> [<share of the agents broken for three hours>]]]]; ..."`)
 	fitted := flag.Bool("fit", false, "play each shape's pool with no queue, and print it beside what its pipeline measured")
 	recordings := flag.String("live", "", "score a real queue from the folder its ticks recorded into, and record nothing")
-	clone := flag.String("clone", "", "with -live: local clone to compare changes when a pull request ejected as the cause lands at a newer head")
+	clone := flag.String("clone", "", "with -live: local clone to compare changes when a pull request ejected as the cause lands at a newer head, and, in a window, to ask git which heads each head held behind a pull request ahead of it cannot merge with")
 	perturb := flag.String("perturb", "", "with -like and a window: check that over_live can fail (builds-double, builds-half, one-slot, no-batch)")
 	like := flag.String("like", "", "with -live: play the same arrivals on this shape's CI too, and print that row under the live one")
 	takeouts := flag.String("takeouts", "", "report take-outs from owner/repo as one JSON row; requires -from and -to")

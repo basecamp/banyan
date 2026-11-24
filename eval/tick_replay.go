@@ -14,7 +14,7 @@ type headKey struct {
 
 // recorded starts from the last snapshot at or before from, preserving its pull
 // requests and their live ready clocks. It does not carry running builds.
-func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Time, candidates map[queue.SHA]queue.Build, from, to time.Time) {
+func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Time, candidates map[queue.SHA]queue.Build, from, to time.Time, clone string) error {
 	start := from
 	w.stop = to.Sub(start)
 	confirmed := confirmedMembers(recs)
@@ -75,6 +75,39 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			break
 		}
 		firstIndex = i
+	}
+	answered := map[queue.SHA]bool{}
+	if clone != "" {
+		beside := map[queue.SHA]map[queue.SHA]bool{}
+		inWindow := recs[firstIndex:]
+		for i, r := range inWindow {
+			if r.World.Now.Sub(start) >= w.stop {
+				inWindow = inWindow[:i]
+				break
+			}
+			for _, p := range r.World.PRs {
+				if heldBehind(r, p) {
+					beside[p.Head] = map[queue.SHA]bool{}
+				}
+			}
+		}
+		for _, r := range inWindow {
+			for _, p := range r.World.PRs {
+				if others := beside[p.Head]; others != nil {
+					for _, o := range r.World.PRs {
+						if o.Number != p.Number {
+							others[o.Head] = true
+						}
+					}
+				}
+			}
+		}
+		clashing, ok, err := clashingHeads(clone, beside)
+		if err != nil {
+			return err
+		}
+		pairs := pairsIn(clashing)
+		w.clashing, w.clashingPairs, answered = clashing, &pairs, ok
 	}
 	previous := map[int]queue.PR{}
 	removed := map[recordedHead]bool{}
@@ -176,14 +209,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			} else {
 				delete(conflicted, p.Number)
 			}
-			held := p.Note == "waits: it conflicts with a pull request ahead of it"
-			for k, a := range r.Commits {
-				var parent, head string
-				var n int
-				if _, err := fmt.Sscanf(k, "merge %s %d %s", &parent, &n, &head); err == nil && queue.SHA(parent) != r.World.Trunk && n == p.Number && queue.SHA(head) == p.Head && !a.OK {
-					held = true
-				}
-			}
+			held := heldBehind(r, p) && !answered[p.Head]
 			if was := exists && holding[p.Number] == p.Head; !exists || old.Head != p.Head || held != was {
 				ahead := 0
 				if held {
@@ -259,6 +285,20 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			w.arrivals = append(w.arrivals, 0)
 		}
 	}
+	return nil
+}
+
+// heldBehind says the record shows this head refused onto a chain of pull requests ahead of it.
+func heldBehind(r queue.Recording, p queue.PR) bool {
+	held := p.Note == "waits: it conflicts with a pull request ahead of it"
+	for k, a := range r.Commits {
+		var parent, head string
+		var n int
+		if _, err := fmt.Sscanf(k, "merge %s %d %s", &parent, &n, &head); err == nil && queue.SHA(parent) != r.World.Trunk && n == p.Number && queue.SHA(head) == p.Head && !a.OK {
+			held = true
+		}
+	}
+	return held
 }
 
 // confirmedMembers reports landings only once the trunk observation confirms them.
