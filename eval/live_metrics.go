@@ -16,6 +16,7 @@ import (
 type liveOptions struct {
 	from, to *time.Time
 	row      bool
+	replays  bool // a shape replays the window, so git is asked which heads clash
 }
 
 func liveBounds(from, to string, row bool) (liveOptions, error) {
@@ -463,6 +464,7 @@ func runLive(dir, clone, like, from, to string, rowOnly bool, perturb string) er
 			return fmt.Errorf("unknown shape %q", like)
 		}
 	}
+	opts.replays = shape != nil
 	sc, win, row, err := scoreLive(dir, clone, opts)
 	if err != nil {
 		return err

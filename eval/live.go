@@ -335,7 +335,11 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		if sc.Good > 0 {
 			win.errored = float64(errored) / float64(sc.Good)
 		}
-		if err := win.recorded(recs, ready, candidates, *opts.from, *opts.to, clone); err != nil {
+		pairs := ""
+		if opts.replays {
+			pairs = clone
+		}
+		if err := win.recorded(recs, ready, candidates, *opts.from, *opts.to, pairs); err != nil {
 			return Score{}, window{}, liveRow{}, fmt.Errorf("clone %s: %w", clone, err)
 		}
 	} else {

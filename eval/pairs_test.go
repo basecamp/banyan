@@ -102,7 +102,7 @@ func failsOnto(r *queue.Recording, held queue.PR, chain ...queue.PR) {
 func pairWindow(t *testing.T, recs []queue.Recording, minutes int, clone string) (Score, window, liveRow) {
 	t.Helper()
 	to := replayStart.Add(time.Duration(minutes) * time.Minute)
-	sc, win, row, err := scoreLive(writeLive(t, recs), clone, liveOptions{from: &replayStart, to: &to, row: true})
+	sc, win, row, err := scoreLive(writeLive(t, recs), clone, liveOptions{from: &replayStart, to: &to, row: true, replays: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,5 +519,21 @@ func TestReplayPairsReadNoMergeDriverFromTheMachinesConfiguration(t *testing.T) 
 	_, w, _ := pairWindow(t, []queue.Recording{replayTick(0, a, q), failed, replayTick(30, a, q)}, 60, g.dir)
 	if want := map[queue.SHA]map[queue.SHA]bool{q.Head: {a.Head: true}, a.Head: {q.Head: true}}; !reflect.DeepEqual(w.clashing, want) {
 		t.Fatalf("clashing %v, want Q and A: a merge driver the machine configures answered for git", w.clashing)
+	}
+}
+
+func TestReplayPairsAreNotAskedWhereNoShapeReplaysTheWindow(t *testing.T) {
+	g := newPairRepo(t)
+	h := g.heads()
+	a, q := pairPR(1, h.a, 0), pairPR(2, h.q, 1)
+	failed := replayTick(1, a, q)
+	failsOnto(&failed, q, a)
+	to := replayStart.Add(time.Hour)
+	_, w, _, err := scoreLive(writeLive(t, []queue.Recording{replayTick(0, a, q), failed, replayTick(30, a, q)}), g.dir, liveOptions{from: &replayStart, to: &to, row: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.clashing != nil || w.clashingPairs != nil || heldActs(w, q.Number) != 1 || w.ignoredHolds != 1 {
+		t.Fatalf("a row with no replay asked git: clashing %v, pairs %v, %d hold acts, %d unattributed", w.clashing, w.clashingPairs, heldActs(w, q.Number), w.ignoredHolds)
 	}
 }
