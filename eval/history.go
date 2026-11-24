@@ -171,7 +171,12 @@ func (s *Sim) act(a Act) bool {
 			p.ready = *a.Ready
 		}
 	case "conflict":
-		p.conflict, h.mended[a.Number], h.waited[a.Number] = true, a.Mended, true
+		h.mended[a.Number], h.waited[a.Number] = a.Mended, true
+		if s.shape.Recorded && len(a.After) > 0 {
+			p.ahead = a.After
+		} else {
+			p.conflict = true
+		}
 	case "hold":
 		p.ahead, h.mended[a.Number] = a.Ahead, a.Mended
 	case "ejected":

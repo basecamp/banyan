@@ -83,7 +83,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	planned := map[headKey]bool{}
 	conflicted := map[int]queue.SHA{}
 	holding := map[int]recordedHead{}
-	ahead := behind(recs, builds, confirmed)
+	ahead, landed := behind(recs, builds, confirmed), map[int]bool{}
 	var cfg queue.Config
 	for i, r := range recs {
 		at := max(r.World.Now.Sub(start), 0)
@@ -109,6 +109,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			}
 		}
 		for _, m := range confirmed[i] {
+			landed[m.Number] = true
 			delete(planned, headKey{m.Number, m.Head})
 			p, ok := present[m.Number]
 			if !ok {
@@ -172,8 +173,12 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 				}
 			}
 			if conflict || conflicted[p.Number] == p.Head {
-				if !exists || old.Head != p.Head || conflicted[p.Number] != p.Head {
-					add(p.Number, Act{Do: "conflict"})
+				if !exists || old.Head != p.Head || old.Queued != p.Queued || conflicted[p.Number] != p.Head {
+					c := Act{Do: "conflict", After: ahead[h]}
+					if slices.ContainsFunc(c.After, func(n int) bool { return !landed[n] }) {
+						c.After = nil
+					}
+					add(p.Number, c)
 				}
 				conflicted[p.Number] = p.Head
 			} else {

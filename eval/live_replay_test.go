@@ -542,6 +542,62 @@ func TestReplayHoldBecomesAConflictWithTheTrunkOnceItsPullRequestLands(t *testin
 		t.Fatal("the head merged onto a trunk that holds the pull request it conflicts with")
 	}
 }
+func TestReplayHeldHeadsConflictWithTheTrunkOnceItsPullRequestLandsHere(t *testing.T) {
+	p, q := replayPR(1), replayPR(2)
+	_, w, _ := replayWindow(t, conflictAfterLanding(p, q, true), 30)
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
+	s.now = 6 * time.Minute
+	s.play()
+	if _, ok := s.Merge(s.trunk, q, ""); !ok {
+		t.Fatal("the recorded conflict with the trunk came before the pull request it is behind landed here")
+	}
+	onP, _ := s.Merge(s.trunk, p, "")
+	s.advance(onP)
+	if _, ok := s.Merge(s.trunk, q, ""); ok {
+		t.Fatal("the head merged onto a trunk that holds the pull request it conflicts with")
+	}
+}
+func TestReplayHeldHeadsConflictWithTheTrunkStandsWhereItsPullRequestHadNotLanded(t *testing.T) {
+	p, q := replayPR(1), replayPR(2)
+	_, w, _ := replayWindow(t, conflictAfterLanding(p, q, false), 30)
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
+	s.now = 6 * time.Minute
+	s.play()
+	if _, ok := s.Merge(s.trunk, q, ""); ok {
+		t.Fatal("a conflict with the trunk the pull request ahead did not bring was dropped")
+	}
+}
+func TestReplayHeldHeadsConflictWithTheTrunkLastsAcrossARequeue(t *testing.T) {
+	p, q := replayPR(1), replayPR(2)
+	recs := conflictAfterLanding(p, q, true)
+	again := recs[2].World.PRs[0]
+	again.Queued = replayStart.Add(7 * time.Minute)
+	requeued := replayTick(8, again)
+	requeued.World.Trunk = "land1"
+	_, w, _ := replayWindow(t, append(recs, requeued), 30)
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
+	s.now = 8 * time.Minute
+	s.play()
+	if _, ok := s.Merge(s.trunk, q, ""); ok {
+		t.Fatal("a requeue at the same head lost its conflict with the trunk")
+	}
+}
+
+// conflictAfterLanding records q held behind p, then conflicting with the trunk, after p lands or while it waits.
+func conflictAfterLanding(p, q queue.PR, lands bool) []queue.Recording {
+	held := q
+	held.Note = "waits: it conflicts with a pull request ahead of it"
+	conflict := q
+	conflict.Note = trunkConflict
+	recs := []queue.Recording{replayTick(0, p, held), replayTick(5, p, q), replayTick(6, conflict, p)}
+	recs[0].World.Builds = []queue.Build{{SHA: "c1", Base: "t", Chain: []queue.Member{{Number: p.Number, Head: p.Head, Merge: "m1"}}}}
+	recs[0].Commits = map[string]queue.Answer{fmt.Sprintf("merge m1 %d %s %q", q.Number, q.Head, ""): {OK: false}}
+	if lands {
+		recs[1].Actions = []queue.Action{{Do: "land", SHA: "land1", Members: []queue.Member{{Number: p.Number, Head: p.Head}}}}
+		recs[2].World.Trunk, recs[2].World.PRs = "land1", recs[2].World.PRs[:1]
+	}
+	return recs
+}
 func TestReplayHoldBelongsToOneQueueing(t *testing.T) {
 	p, q, r := replayPR(1), replayPR(2), replayPR(3)
 	again := q
