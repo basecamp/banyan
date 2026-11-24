@@ -16,6 +16,7 @@ import (
 type liveOptions struct {
 	from, to *time.Time
 	row      bool
+	replays  bool // a shape replays the window, so git is asked which heads clash
 }
 
 func liveBounds(from, to string, row bool) (liveOptions, error) {
@@ -104,6 +105,7 @@ type simulatedMeasures struct {
 	SettingsInWindow                 int            `json:"settings_in_window"`
 	Acts                             map[string]int `json:"acts"`
 	UnattributedHolds                int            `json:"unattributed_holds"`
+	ClashingPairs                    *int           `json:"clashing_pairs,omitempty"`
 	WaitP50Minutes                   *float64       `json:"wait_p50_minutes"`
 	WaitP90Minutes                   *float64       `json:"wait_p90_minutes"`
 	WholeBuilds                      float64        `json:"whole_builds"`
@@ -491,6 +493,7 @@ func runLive(dir, clone, like, from, to string, rowOnly bool, perturb string) er
 			return fmt.Errorf("unknown shape %q", like)
 		}
 	}
+	opts.replays = shape != nil
 	sc, win, row, err := scoreLive(dir, clone, opts)
 	if err != nil {
 		return err
