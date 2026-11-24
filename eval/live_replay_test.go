@@ -479,13 +479,11 @@ func TestReplayBuildWithoutPushRecordProvesClean(t *testing.T) {
 		t.Fatalf("conflicts=%d, want 1", conflicts)
 	}
 }
-func TestReplayHoldStandsUntilACandidateTakesTheHead(t *testing.T) {
+func TestReplayHoldLastsAsRecorded(t *testing.T) {
 	p, q := replayPR(1), replayPR(2)
 	held := q
 	held.Note = "waits: it conflicts with a pull request ahead of it"
-	taken := replayTick(12, p, q)
-	taken.Actions = []queue.Action{{Do: "push", Build: queue.Build{SHA: "c", Chain: []queue.Member{{Number: q.Number, Head: q.Head}}}}}
-	_, w, _ := replayWindow(t, []queue.Recording{replayTick(0, p, q), replayTick(5, p, held), replayTick(8, p, q), taken}, 30)
+	_, w, _ := replayWindow(t, []queue.Recording{replayTick(0, p, q), replayTick(5, p, held), replayTick(8, p, q)}, 30)
 	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
 	s.now = 0
 	s.play()
@@ -497,13 +495,95 @@ func TestReplayHoldStandsUntilACandidateTakesTheHead(t *testing.T) {
 	}
 	s.now += 3 * time.Minute
 	s.play()
-	if _, ok := s.Merge(s.trunk, q, ""); ok {
-		t.Fatal("the hold ended on a record that only lacks its note")
-	}
-	s.now += 4 * time.Minute
-	s.play()
 	if _, ok := s.Merge(s.trunk, q, ""); !ok {
-		t.Fatal("the hold did not end when a candidate took the head")
+		t.Fatal("recorded hold did not end")
+	}
+}
+
+// heldBehind records q held behind p, in a chain the records hold, then only waiting for a build.
+func heldBehind(t *testing.T, more ...queue.Recording) (s *Sim, p, q, r queue.PR) {
+	p, q, r = replayPR(1), replayPR(2), replayPR(3)
+	held := q
+	held.Note = "waits: it conflicts with a pull request ahead of it"
+	first := replayTick(0, p, held, r)
+	first.World.Builds = []queue.Build{{SHA: "c1", Base: "t", Chain: []queue.Member{{Number: p.Number, Head: p.Head, Merge: "m1"}}}}
+	first.Commits = map[string]queue.Answer{fmt.Sprintf("merge m1 %d %s %q", q.Number, q.Head, ""): {OK: false}}
+	_, w, _ := replayWindow(t, append([]queue.Recording{first, replayTick(5, p, q, r)}, more...), 30)
+	s = NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
+	s.play()
+	return s, p, q, r
+}
+func TestReplayHoldKeepsTheHeadOutOfAChainWithThePullRequestItIsBehind(t *testing.T) {
+	s, p, q, _ := heldBehind(t)
+	s.now = 5 * time.Minute
+	s.play()
+	onP, _ := s.Merge(s.trunk, p, "")
+	if _, ok := s.Merge(onP, q, ""); ok {
+		t.Fatal("the head merged onto the pull request it conflicts with once the note was gone")
+	}
+}
+func TestReplayHoldLetsTheHeadOntoTheTrunkAndOtherChains(t *testing.T) {
+	s, _, q, r := heldBehind(t)
+	onR, _ := s.Merge(s.trunk, r, "")
+	if _, ok := s.Merge(s.trunk, q, ""); !ok {
+		t.Fatal("the hold refused the trunk")
+	}
+	if _, ok := s.Merge(onR, q, ""); !ok {
+		t.Fatal("the hold refused a chain without the pull request it is behind")
+	}
+}
+func TestReplayHoldBecomesAConflictWithTheTrunkOnceItsPullRequestLands(t *testing.T) {
+	s, p, q, _ := heldBehind(t)
+	s.now = 5 * time.Minute
+	s.play()
+	onP, _ := s.Merge(s.trunk, p, "")
+	s.advance(onP)
+	if _, ok := s.Merge(s.trunk, q, ""); ok {
+		t.Fatal("the head merged onto a trunk that holds the pull request it conflicts with")
+	}
+}
+func TestReplayHoldBelongsToOneQueueing(t *testing.T) {
+	p, q, r := replayPR(1), replayPR(2), replayPR(3)
+	again := q
+	again.Queued = replayStart.Add(4 * time.Minute)
+	first, second := replayTick(0, p, q, r), replayTick(5, p, again, r)
+	first.World.Builds = []queue.Build{
+		{SHA: "c1", Base: "t", Chain: []queue.Member{{Number: p.Number, Head: p.Head, Merge: "m1"}}},
+		{SHA: "c3", Base: "t", Chain: []queue.Member{{Number: r.Number, Head: r.Head, Merge: "m3"}}},
+	}
+	first.Commits = map[string]queue.Answer{fmt.Sprintf("merge m1 %d %s %q", q.Number, q.Head, ""): {OK: false}}
+	second.Commits = map[string]queue.Answer{fmt.Sprintf("merge m3 %d %s %q", q.Number, q.Head, ""): {OK: false}}
+	_, w, _ := replayWindow(t, []queue.Recording{first, second}, 30)
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
+	s.now = 5 * time.Minute
+	s.play()
+	onP, _ := s.Merge(s.trunk, p, "")
+	onR, _ := s.Merge(s.trunk, r, "")
+	if _, ok := s.Merge(onP, q, ""); !ok {
+		t.Fatal("the queueing before kept its hold")
+	}
+	if _, ok := s.Merge(onR, q, ""); ok {
+		t.Fatal("the new queueing lost its own hold")
+	}
+}
+func TestReplayHoldThatTheTrunkDisprovesLetsTheHeadLand(t *testing.T) {
+	p, q := replayPR(1), replayPR(2)
+	held := q
+	held.Note = "waits: it conflicts with a pull request ahead of it"
+	recs := []queue.Recording{replayTick(0, p, held), replayTick(5, p, q), replayTick(6, q), replayTick(20, q), replayTick(21)}
+	recs[0].World.Builds = []queue.Build{{SHA: "c1", Base: "t", Chain: []queue.Member{{Number: p.Number, Head: p.Head, Merge: "m1"}}}}
+	recs[0].Commits = map[string]queue.Answer{fmt.Sprintf("merge m1 %d %s %q", q.Number, q.Head, ""): {OK: false}}
+	recs[1].Actions = []queue.Action{{Do: "land", SHA: "land1", Members: []queue.Member{{Number: p.Number, Head: p.Head}}}}
+	recs[2].World.Trunk = "land1"
+	recs[2].Commits = map[string]queue.Answer{fmt.Sprintf("merge land1 %d %s %q", q.Number, q.Head, ""): {SHA: "q1", OK: true}}
+	recs[3].World.Trunk = "land1"
+	recs[3].Actions = []queue.Action{{Do: "land", SHA: "land2", Members: []queue.Member{{Number: q.Number, Head: q.Head}}}}
+	recs[4].World.Trunk = "land2"
+	_, w, row := replayWindow(t, recs, 30)
+	w.build = 2 * time.Minute
+	_, sim := w.simulate(Shape{}, Score{})
+	if row.Landed != 2 || sim.Landed == nil || *sim.Landed != 2 || sim.LeftWaiting != 0 {
+		t.Fatalf("live landed %d, simulated landed %v and left %v waiting", row.Landed, sim.Landed, sim.LeftWaiting)
 	}
 }
 func TestReplayProbeWithoutVerdictHasEqualCost(t *testing.T) {
@@ -675,7 +755,7 @@ func TestReplayHoldBeginsAtTheRecordWhoseMergeOntoOneAheadFails(t *testing.T) {
 	_, w, _ := replayWindow(t, []queue.Recording{first, replayTick(30, ahead, p)}, 60)
 	held := 0
 	for _, a := range w.acts {
-		if a.Number == p.Number && a.Do == "hold" && a.Ahead != 0 {
+		if a.Number == p.Number && a.Do == "hold" && len(a.Ahead) != 0 {
 			if held++; a.At != 0 {
 				t.Fatalf("the hold begins at %v, the first record is at %v", a.At, 0)
 			}

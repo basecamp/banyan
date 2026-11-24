@@ -431,11 +431,11 @@ func small(m mutant) []string {
 						s.plan, s.verify = m.plan, m.verify
 						for n, kind := range []int{a, b, c} {
 							p := s.prs[n+1]
-							p.breaks, p.clash, p.conflict, p.ahead, p.Checks = kind == 1, 0, false, 0, queue.Success
+							p.breaks, p.clash, p.conflict, p.ahead, p.Checks = kind == 1, 0, false, nil, queue.Success
 							if kind == 2 {
 								p.clash = n
 							} else if kind == 3 {
-								p.ahead = n
+								p.ahead = []int{n}
 							}
 						}
 						s.Run()

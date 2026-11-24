@@ -23,7 +23,7 @@ type Act struct {
 	First   bool           // label: it goes first in line
 	Breaks  bool           // head: it fails the whole build
 	Verdict queue.Verdict  // checks
-	Ahead   int            // hold: the pull request ahead that it conflicts with
+	Ahead   []int          // hold: the pull requests ahead that it can conflict with
 	After   []int          // conflict: the pull requests whose landing together brought it
 	Wait    string         // wait: a personal hold, empty to release it
 	Config  *queue.Config  // settings: the configuration from this time on
@@ -153,8 +153,8 @@ func (s *Sim) act(a Act) bool {
 			p.gone = true
 		}
 	case "head":
-		if s.shape.Recorded || (p.conflict || p.ahead > 0) && a.At >= h.mended[a.Number]-2*time.Minute {
-			p.conflict, p.ahead = false, 0
+		if s.shape.Recorded || (p.conflict || len(p.ahead) > 0) && a.At >= h.mended[a.Number]-2*time.Minute {
+			p.conflict, p.ahead = false, nil
 		}
 		p.Head, p.Checks, p.checksGreen, p.breaks, p.Note = a.Head, queue.Pending, never, a.Breaks, ""
 		s.byHead[p.Head] = p.Number
@@ -344,7 +344,7 @@ func (t trace) acts(repair bool) (all []Act) {
 				mended += late
 			}
 			if c.Kind == "hold" {
-				add(at, Act{Do: "hold", Ahead: c.Ahead, Mended: mended})
+				add(at, Act{Do: "hold", Ahead: slices.DeleteFunc([]int{c.Ahead}, func(n int) bool { return n == 0 }), Mended: mended})
 			} else {
 				add(at, Act{Do: "conflict", Mended: mended, After: landed[c.Onto]})
 			}
@@ -507,7 +507,7 @@ func (t trace) replayed(cfg queue.Config, seeds int, shape Shape, repair bool) o
 			switch {
 			case !p.landed:
 				o.left++
-				if p.queued && p.Checks == queue.Success && !p.conflict && p.ahead == 0 {
+				if p.queued && p.Checks == queue.Success && !p.conflict && len(p.ahead) == 0 {
 					o.inHand++
 				}
 			case ok && first >= 0:

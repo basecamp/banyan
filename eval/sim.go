@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"slices"
 	"sort"
 	"time"
 
@@ -103,8 +104,8 @@ type simPR struct {
 	breaks      bool
 	clash       int // fails together with this pull request, 0 for none
 	conflict    bool
-	ahead       int // conflicts with this pull request, 0 for none
-	fix         int // 1 + the episode it fixes
+	ahead       []int // conflicts with these pull requests; in a replay, -1 with whichever is ahead
+	fix         int   // 1 + the episode it fixes
 	queued      bool
 	landed      bool
 	gone        bool // ejected with cause, or removed by its author, and not coming back
@@ -263,10 +264,25 @@ func (s *Sim) read(b queue.Build) queue.Build {
 
 func (s *Sim) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, bool) {
 	p := s.prs[pr.Number]
-	if p.conflict || s.shape.Recorded && p.ahead != 0 || p.ahead > 0 && s.holds[parent][p.ahead] {
+	if p.conflict || s.shape.Recorded && slices.Contains(p.ahead, -1) || s.behind(p, parent) {
 		return "", false
 	}
 	return s.commit(parent, pr.Head, note, pr.Number), true
+}
+
+// behind says this tree holds one the pull request conflicts with that has not landed, or all of them.
+func (s *Sim) behind(p *simPR, tree queue.SHA) bool {
+	in := 0
+	for _, n := range p.ahead {
+		switch {
+		case !s.holds[tree][n]:
+		case !s.holds[s.trunk][n]:
+			return true
+		default:
+			in++
+		}
+	}
+	return in > 0 && in == len(p.ahead)
 }
 
 func (s *Sim) Mark(parent queue.SHA, note string) queue.SHA { return s.commit(parent, "", note, 0) }
@@ -297,7 +313,7 @@ func (s *Sim) arrive() *simPR {
 	case s.chance(s.shape.Conflict):
 		p.conflict = true
 	case len(ahead) > 0 && s.chance(s.shape.Ahead):
-		p.ahead = ahead[s.rng.Intn(len(ahead))]
+		p.ahead = []int{ahead[s.rng.Intn(len(ahead))]}
 	}
 	if s.chance(0.2) {
 		p.Checks, p.checksGreen = queue.Pending, s.now+10*time.Minute
@@ -432,7 +448,7 @@ func (s *Sim) step(at time.Duration) {
 	for i, e := range s.shape.Episodes {
 		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
-			p.First, p.fix, p.breaks, p.clash, p.conflict, p.ahead = true, i+1, false, 0, false, 0
+			p.First, p.fix, p.breaks, p.clash, p.conflict, p.ahead = true, i+1, false, 0, false, nil
 			s.say("the fix for the red trunk is queued as #%d", p.Number)
 			p.Checks, p.ready = queue.Success, s.now
 		}
@@ -545,13 +561,13 @@ func (s *Sim) move() {
 // mend is a pull request's author merging the trunk in once it conflicts with it: the new head
 // is pushed 50 minutes after the conflict began, and its own checks take as long as any.
 func (s *Sim) mend(p *simPR) {
-	switch conflicts := p.queued && (p.conflict || (p.ahead > 0 && s.holds[s.trunk][p.ahead])); {
+	switch conflicts := p.queued && (p.conflict || s.behind(p, s.trunk)); {
 	case !conflicts:
 		p.mend = 0
 	case p.mend == 0:
 		p.mend = s.now + 50*time.Minute
 	case s.now >= p.mend:
-		p.conflict, p.ahead, p.mend = false, 0, 0
+		p.conflict, p.ahead, p.mend = false, nil, 0
 		p.Head = fmt.Sprintf("%s+", p.Head)
 		s.byHead[p.Head] = p.Number
 		p.Checks, p.checksGreen, p.Note = queue.Pending, s.now+10*time.Minute, ""

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -81,8 +82,8 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	removed := map[recordedHead]bool{}
 	planned := map[headKey]bool{}
 	conflicted := map[int]queue.SHA{}
-	holding := map[int]queue.SHA{}
-	heldSince := map[int]time.Time{}
+	holding := map[int]recordedHead{}
+	ahead := behind(recs, builds, confirmed)
 	var cfg queue.Config
 	for i, r := range recs {
 		at := max(r.World.Now.Sub(start), 0)
@@ -178,7 +179,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			} else {
 				delete(conflicted, p.Number)
 			}
-			held := p.Note == "waits: it conflicts with a pull request ahead of it"
+			held := len(ahead[h]) > 0 || p.Note == "waits: it conflicts with a pull request ahead of it"
 			for k, a := range r.Commits {
 				var parent, head string
 				var n int
@@ -186,22 +187,16 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 					held = true
 				}
 			}
-			if !held && exists && old.Head == p.Head && holding[p.Number] == p.Head && conflicted[p.Number] != p.Head {
-				held = !taken(r, key, heldSince[p.Number])
-			}
-			if was := exists && holding[p.Number] == p.Head; !exists || old.Head != p.Head || held != was {
-				ahead := 0
-				if held {
-					ahead = -1
+			if was := exists && holding[p.Number] == h; !exists || old.Head != p.Head || old.Queued != p.Queued || held != was {
+				hold := Act{Do: "hold", Ahead: ahead[h]}
+				if held && len(hold.Ahead) == 0 {
+					hold.Ahead = []int{-1}
 					w.ignoredHolds++
 				}
-				add(p.Number, Act{Do: "hold", Ahead: ahead})
+				add(p.Number, hold)
 			}
 			if held {
-				if holding[p.Number] != p.Head {
-					heldSince[p.Number] = r.World.Now
-				}
-				holding[p.Number] = p.Head
+				holding[p.Number] = h
 			} else {
 				delete(holding, p.Number)
 			}
@@ -269,19 +264,102 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	}
 }
 
-// taken says the queue has built this head into a chain since the hold began. The queue writes
-// the hold's note only on a tick that tries the merge, so a record without the note does not end
-// the hold: a chain with the head in it does, as a new head or a conflict with the trunk do.
-func taken(r queue.Recording, k headKey, since time.Time) bool {
-	in := func(b queue.Build) bool {
-		return slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return m.Number == k.number && m.Head == k.head })
+// behind names the pull requests a held queueing of a head can conflict with, where the records say.
+func behind(recs []queue.Recording, builds map[queue.SHA]queue.Build, confirmed [][]queue.Member) map[recordedHead][]int {
+	type tree struct {
+		chain []int
+		base  queue.SHA
 	}
-	for _, a := range r.Actions {
-		if a.Do == "push" && in(a.Build) {
-			return true
+	under := map[queue.SHA]tree{}
+	for _, sha := range slices.Sorted(maps.Keys(builds)) {
+		b := builds[sha]
+		for i, m := range b.Chain {
+			if m.Merge != "" && len(under[m.Merge].chain) <= i {
+				t := tree{base: b.Base}
+				for _, c := range b.Chain[:i+1] {
+					t.chain = append(t.chain, c.Number)
+				}
+				under[m.Merge] = t
+			}
 		}
 	}
-	return slices.ContainsFunc(r.World.Builds, func(b queue.Build) bool { return b.Pushed.After(since) && in(b) })
+	landing, trunks := map[int]int{}, map[queue.SHA][]int{}
+	can, clean, conflicted := map[recordedHead]map[int]bool{}, map[recordedHead]map[int]bool{}, map[recordedHead]int{}
+	for i, r := range recs {
+		for _, m := range confirmed[i] {
+			landing[m.Number] = i
+		}
+		if _, ok := trunks[r.World.Trunk]; !ok {
+			trunks[r.World.Trunk] = slices.Collect(maps.Keys(landing))
+		}
+		queueings := map[headKey]recordedHead{}
+		for _, p := range r.World.PRs {
+			h := recordedHead{p.Number, p.Head, p.Queued}
+			queueings[headKey{p.Number, p.Head}] = h
+			if _, ok := conflicted[h]; !ok && p.Note == trunkConflict {
+				conflicted[h] = i
+			}
+		}
+		for k, a := range r.Commits {
+			var parent, head string
+			var n int
+			if _, err := fmt.Sscanf(k, "merge %s %d %s", &parent, &n, &head); err != nil {
+				continue
+			}
+			h, queued := queueings[headKey{n, queue.SHA(head)}]
+			t, known := under[queue.SHA(parent)]
+			onto := t.chain
+			if queue.SHA(parent) == r.World.Trunk {
+				known, onto, t.base = true, nil, r.World.Trunk
+			}
+			switch {
+			case !queued || !known:
+			case a.OK:
+				if clean[h] == nil {
+					clean[h] = map[int]bool{}
+				}
+				for _, m := range slices.Concat(onto, trunks[t.base]) {
+					clean[h][m] = true
+				}
+			case onto == nil:
+				if _, ok := conflicted[h]; !ok {
+					conflicted[h] = i
+				}
+			case can[h] == nil:
+				can[h] = map[int]bool{}
+				for _, m := range onto {
+					can[h][m] = true
+				}
+			default:
+				maps.DeleteFunc(can[h], func(m int, _ bool) bool { return !slices.Contains(onto, m) })
+			}
+		}
+	}
+	ahead := map[recordedHead][]int{}
+	for h, c := range can {
+		var names []int
+		for m := range c {
+			if m != h.number && !clean[h][m] {
+				names = append(names, m)
+			}
+		}
+		last := -1
+		if at, ok := conflicted[h]; ok && len(names) > 1 {
+			for _, m := range names {
+				if l, ok := landing[m]; ok && l <= at {
+					last = max(last, l)
+				}
+			}
+		}
+		if last >= 0 {
+			names = slices.DeleteFunc(names, func(m int) bool { l, ok := landing[m]; return !ok || l != last })
+		}
+		slices.Sort(names)
+		if len(names) > 0 {
+			ahead[h] = names
+		}
+	}
+	return ahead
 }
 
 // confirmedMembers reports landings only once the trunk observation confirms them.

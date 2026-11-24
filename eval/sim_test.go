@@ -273,7 +273,7 @@ func TestAChangeInsideTheNoiseIsNotWorse(t *testing.T) {
 func TestTheSimulatorReadsABuildAgainstTheTrunkAsGitDoes(t *testing.T) {
 	chain := func(s *Sim, land int) (queue.SHA, []int) {
 		one, two := s.arrive(), s.arrive()
-		one.conflict, one.ahead, two.conflict, two.ahead = false, 0, false, 0
+		one.conflict, one.ahead, two.conflict, two.ahead = false, nil, false, nil
 		first, _ := s.Merge("trunk0", one.PR, "first attempt")
 		second, _ := s.Merge("trunk0", one.PR, "second attempt")
 		both, _ := s.Merge(first, two.PR, "")
