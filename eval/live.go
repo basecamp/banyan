@@ -339,7 +339,13 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		if sc.Good > 0 {
 			win.errored = float64(errored) / float64(sc.Good)
 		}
-		win.recorded(recs, ready, candidates, *opts.from, *opts.to)
+		pairs := ""
+		if opts.replays {
+			pairs = clone
+		}
+		if err := win.recorded(recs, ready, candidates, *opts.from, *opts.to, pairs); err != nil {
+			return Score{}, window{}, liveRow{}, fmt.Errorf("clone %s: %w", clone, err)
+		}
 	} else {
 		for _, at := range ready {
 			if len(ticks) > 0 && (opts.to == nil || at.Before(*opts.to)) {
@@ -428,6 +434,8 @@ type window struct {
 	unblamedRedCandidates, candidatesWithoutCulprit int
 	opening, left, withdrawn, settings              int
 	ignoredHolds                                    int
+	clashing                                        map[queue.SHA]map[queue.SHA]bool
+	clashingPairs                                   *int
 	unattributed, unconfirmedDepartures             int
 	flake, errored                                  float64
 	build                                           time.Duration
@@ -494,6 +502,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 		shape.Episodes, shape.Script, shape.Takes = nil, nil, nil
 		shape.Rerun, shape.Rescued, shape.Whole = 0, 0, 0
 		shape.Times, shape.Probe = w.times, w.probe
+		shape.Clashing = w.clashing
 	} else if was.Good > 0 {
 		shape.Flake = float64(was.Flaked) / float64(was.Good)
 	}
@@ -527,7 +536,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 		opening += s.opening
 		failures += len(s.Broken)
 		for _, p := range s.prs {
-			if p.queued && !p.landed && waitsOnTheQueue(p.PR) {
+			if s.leftWaiting(p) {
 				left++
 			}
 		}
@@ -555,7 +564,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 			QueueAddedP50Minutes: median(added), QueueAddedP90Minutes: quantile(added, 90), QueueAddedOver30: float64(over30) / seeds,
 			RedCandidates: float64(redCandidates) / seeds, RedPullRequests: float64(redPullRequests) / seeds,
 			UnblamedRedCandidates: w.unblamedRedCandidates, CandidatesWithoutACulprit: w.candidatesWithoutCulprit,
-			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, CulpritsUnattributed: w.unattributed, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
+			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
 		}
 		for _, a := range w.acts {
 			comparison.Acts[a.Do]++

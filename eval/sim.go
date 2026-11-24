@@ -47,6 +47,8 @@ type Shape struct {
 	Acts  []Act
 	Times []time.Duration
 	Whole time.Duration
+	// Clashing holds each head git was asked about, with the heads git cannot merge it with.
+	Clashing map[queue.SHA]map[queue.SHA]bool
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
 	Rerun   time.Duration
@@ -263,10 +265,33 @@ func (s *Sim) read(b queue.Build) queue.Build {
 
 func (s *Sim) Merge(parent queue.SHA, pr queue.PR, note string) (queue.SHA, bool) {
 	p := s.prs[pr.Number]
-	if p.conflict || s.shape.Recorded && p.ahead != 0 || p.ahead > 0 && s.holds[parent][p.ahead] {
+	if p.conflict || s.shape.Recorded && p.ahead != 0 || p.ahead > 0 && s.holds[parent][p.ahead] || s.clashes(parent, pr.Head) {
 		return "", false
 	}
 	return s.commit(parent, pr.Head, note, pr.Number), true
+}
+
+// clashes says the parent's tree holds a pull request, at the head it was merged at, that git
+// cannot merge with this head.
+func (s *Sim) clashes(parent, head queue.SHA) bool {
+	others := s.shape.Clashing[head]
+	for at := parent; len(others) > 0 && at != ""; at = s.under[at] {
+		if others[s.merges[at].Head] {
+			return true
+		}
+	}
+	return false
+}
+
+// leftWaiting says a pull request ends the run waiting on the queue. A refusal onto the trunk
+// that only a clashing head this simulation landed makes is the simulated order's, not its
+// author's, so it still waits on the queue.
+func (s *Sim) leftWaiting(p *simPR) bool {
+	pr := p.PR
+	if !p.conflict && p.ahead == 0 && s.clashes(s.trunk, p.Head) {
+		pr.Note = ""
+	}
+	return p.queued && !p.landed && waitsOnTheQueue(pr)
 }
 
 func (s *Sim) Mark(parent queue.SHA, note string) queue.SHA { return s.commit(parent, "", note, 0) }
