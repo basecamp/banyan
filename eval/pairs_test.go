@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -501,4 +502,22 @@ func heldActsOf(w window, n int) []Act {
 		}
 	}
 	return acts
+}
+
+func TestReplayPairsReadNoMergeDriverFromTheMachinesConfiguration(t *testing.T) {
+	g := newPairRepo(t)
+	driven := "x merge=machine\n"
+	a := pairPR(1, g.commit(map[string]string{"x": "A\n2\n3\n", ".gitattributes": driven}, "A"), 0)
+	q := pairPR(2, g.commit(map[string]string{"x": "Q\n2\n3\n", ".gitattributes": driven}, "Q"), 1)
+	config := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(config, []byte("[merge \"machine\"]\n\tdriver = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", config)
+	failed := replayTick(1, a, q)
+	failsOnto(&failed, q, a)
+	_, w, _ := pairWindow(t, []queue.Recording{replayTick(0, a, q), failed, replayTick(30, a, q)}, 60, g.dir)
+	if want := map[queue.SHA]map[queue.SHA]bool{q.Head: {a.Head: true}, a.Head: {q.Head: true}}; !reflect.DeepEqual(w.clashing, want) {
+		t.Fatalf("clashing %v, want Q and A: a merge driver the machine configures answered for git", w.clashing)
+	}
 }

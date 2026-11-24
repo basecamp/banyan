@@ -15,7 +15,8 @@ import (
 // clashingHeads asks git, pair by pair, which of the heads beside each held head it cannot merge
 // with. A held head is answered where its commit is in the clone, every one of its pairs has an
 // answer, and at least one of them clashes; only answered heads' pairs are kept, under both heads.
-// Git reads here with no lazy fetch and writes to a scratch object store, never to the clone.
+// Git reads here with none of the machine's own configuration, as the queue's merges do, with no
+// lazy fetch, and writes to a scratch object store, never to the clone.
 func clashingHeads(clone string, beside map[queue.SHA]map[queue.SHA]bool) (clashing map[queue.SHA]map[queue.SHA]bool, answered map[queue.SHA]bool, err error) {
 	clashing, answered = map[queue.SHA]map[queue.SHA]bool{}, map[queue.SHA]bool{}
 	if len(beside) == 0 {
@@ -30,7 +31,8 @@ func clashingHeads(clone string, beside map[queue.SHA]map[queue.SHA]bool) (clash
 		return nil, nil, err
 	}
 	defer os.RemoveAll(scratch)
-	env := append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_OBJECT_DIRECTORY="+scratch, "GIT_ALTERNATE_OBJECT_DIRECTORIES="+strings.TrimSpace(string(objects)))
+	env := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+		"GIT_NO_LAZY_FETCH=1", "GIT_OBJECT_DIRECTORY="+scratch, "GIT_ALTERNATE_OBJECT_DIRECTORIES="+strings.TrimSpace(string(objects)))
 	read := map[queue.SHA]bool{}
 	readable := func(sha queue.SHA) bool {
 		if _, ok := read[sha]; !ok {
