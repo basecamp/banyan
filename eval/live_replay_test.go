@@ -567,6 +567,19 @@ func TestReplayHeldHeadsConflictWithTheTrunkStandsWhereItsPullRequestHadNotLande
 		t.Fatal("a conflict with the trunk the pull request ahead did not bring was dropped")
 	}
 }
+func TestReplayHeldHeadsConflictWithTheTrunkStandsWhereItsPullRequestLandedBeforeTheWindow(t *testing.T) {
+	p, q := replayPR(1), replayPR(2)
+	recs := conflictAfterLanding(p, q, true)
+	later := replayTick(8, recs[2].World.PRs...)
+	later.World.Trunk = "land1"
+	recs = append(recs, later)
+	_, w, _ := recordedWindow(t, recs, replayStart.Add(7*time.Minute), replayStart.Add(30*time.Minute))
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: time.Minute}, w.cfg, 1)
+	s.play()
+	if _, ok := s.Merge(s.trunk, q, ""); ok {
+		t.Fatal("a conflict with the trunk brought by a landing before the window was dropped")
+	}
+}
 func TestReplayHeldHeadsConflictWithTheTrunkLastsAcrossARequeue(t *testing.T) {
 	p, q := replayPR(1), replayPR(2)
 	recs := conflictAfterLanding(p, q, true)

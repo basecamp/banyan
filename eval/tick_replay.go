@@ -83,7 +83,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	planned := map[headKey]bool{}
 	conflicted := map[int]queue.SHA{}
 	holding := map[int]recordedHead{}
-	ahead, landed := behind(recs, builds, confirmed), map[int]bool{}
+	ahead, landed := behind(recs, builds, confirmed, firstIndex), map[int]bool{}
 	var cfg queue.Config
 	for i, r := range recs {
 		at := max(r.World.Now.Sub(start), 0)
@@ -269,8 +269,8 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	}
 }
 
-// behind names the pull requests a held queueing of a head can conflict with, where the records say.
-func behind(recs []queue.Recording, builds map[queue.SHA]queue.Build, confirmed [][]queue.Member) map[recordedHead][]int {
+// behind names the pull requests a held queueing of a head can conflict with that land after the opening record.
+func behind(recs []queue.Recording, builds map[queue.SHA]queue.Build, confirmed [][]queue.Member, opening int) map[recordedHead][]int {
 	type tree struct {
 		chain []int
 		base  queue.SHA
@@ -359,6 +359,7 @@ func behind(recs []queue.Recording, builds map[queue.SHA]queue.Build, confirmed 
 		if last >= 0 {
 			names = slices.DeleteFunc(names, func(m int) bool { l, ok := landing[m]; return !ok || l != last })
 		}
+		names = slices.DeleteFunc(names, func(m int) bool { l, ok := landing[m]; return ok && l <= opening })
 		slices.Sort(names)
 		if len(names) > 0 {
 			ahead[h] = names
