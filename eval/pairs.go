@@ -15,7 +15,7 @@ import (
 // clashingHeads asks git, pair by pair, which of the heads beside each held head it cannot merge
 // with. A held head is answered where its commit is in the clone, every one of its pairs has an
 // answer, and at least one of them clashes; only answered heads' pairs are kept, under both heads.
-// The merges write to a scratch object store, never to the clone.
+// Git reads here with no lazy fetch and writes to a scratch object store, never to the clone.
 func clashingHeads(clone string, beside map[queue.SHA]map[queue.SHA]bool) (clashing map[queue.SHA]map[queue.SHA]bool, answered map[queue.SHA]bool, err error) {
 	clashing, answered = map[queue.SHA]map[queue.SHA]bool{}, map[queue.SHA]bool{}
 	if len(beside) == 0 {
@@ -30,12 +30,13 @@ func clashingHeads(clone string, beside map[queue.SHA]map[queue.SHA]bool) (clash
 		return nil, nil, err
 	}
 	defer os.RemoveAll(scratch)
-	env := append(os.Environ(), "GIT_OBJECT_DIRECTORY="+scratch, "GIT_ALTERNATE_OBJECT_DIRECTORIES="+strings.TrimSpace(string(objects)))
+	env := append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_OBJECT_DIRECTORY="+scratch, "GIT_ALTERNATE_OBJECT_DIRECTORIES="+strings.TrimSpace(string(objects)))
 	read := map[queue.SHA]bool{}
 	readable := func(sha queue.SHA) bool {
 		if _, ok := read[sha]; !ok {
-			_, err := gitRead(clone, nil, "cat-file", "-e", string(sha)+"^{commit}")
-			read[sha] = err == nil
+			cmd := exec.Command("git", "--no-optional-locks", "cat-file", "-e", string(sha)+"^{commit}")
+			cmd.Dir, cmd.Env = clone, env
+			read[sha] = cmd.Run() == nil
 		}
 		return read[sha]
 	}
@@ -75,10 +76,11 @@ func clashingHeads(clone string, beside map[queue.SHA]map[queue.SHA]bool) (clash
 }
 
 // mergeTree says whether git finds a conflict merging the two commits, or nil where it gives no
-// answer. Git also exits 1 on a commit it cannot read, so an answer is one that names the merged
-// tree.
+// answer. It reads the attributes a versions and no others, as the queue's own merge reads its
+// parent's. Git also exits 1 on a commit it cannot read, so an answer is one that names the
+// merged tree.
 func mergeTree(clone string, env []string, a, b queue.SHA) *bool {
-	cmd := exec.Command("git", "--no-optional-locks", "merge-tree", "--write-tree", "--no-messages", string(a)+"^{commit}", string(b)+"^{commit}")
+	cmd := exec.Command("git", "--no-optional-locks", "-c", "core.attributesFile=/dev/null", "--attr-source="+string(a), "merge-tree", "--write-tree", "--no-messages", string(a)+"^{commit}", string(b)+"^{commit}")
 	cmd.Dir, cmd.Env = clone, env
 	out, err := cmd.Output()
 	tree, _, _ := strings.Cut(string(out), "\n")
