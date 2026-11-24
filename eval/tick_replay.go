@@ -108,6 +108,11 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 		pairs := pairsIn(clashing)
 		w.clashing, w.clashingPairs, answered = clashing, &pairs, ok
+		for _, p := range recs[firstIndex].World.PRs {
+			if heldBehind(recs[firstIndex], p) {
+				delete(answered, p.Head)
+			}
+		}
 	}
 	previous := map[int]queue.PR{}
 	removed := map[recordedHead]bool{}
