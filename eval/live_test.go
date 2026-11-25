@@ -646,6 +646,10 @@ func TestLiveGapsRequireReadyTicksStrictlyBetweenLandings(t *testing.T) {
 				if row.ReadyGaps != 1 || row.LongestReadyGapMinutes == nil || *row.LongestReadyGapMinutes != 100 || row.ReadyGapsOver90 != 1 {
 					t.Fatalf("ready gap: %+v", row.liveMeasures)
 				}
+			} else if state == "empty then ready" {
+				if row.ReadyGaps != 1 || row.LongestReadyGapMinutes == nil || *row.LongestReadyGapMinutes != 50 || row.ReadyGapsOver90 != 0 {
+					t.Fatalf("wait from the ready tick: %+v", row.liveMeasures)
+				}
 			} else if row.ReadyGaps != 0 || row.LongestReadyGapMinutes != nil || row.ReadyGapsOver90 != 0 {
 				t.Fatalf("gap with %s: %+v", state, row.liveMeasures)
 			}
