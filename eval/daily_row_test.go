@@ -44,7 +44,7 @@ func standIns(t *testing.T) string {
 	for name, script := range map[string]string{
 		"fetch-ticks": "#!/bin/sh\nexit \"${FETCH_EXIT:-0}\"\n",
 		"eval": "#!/bin/sh\necho \"$*\" >> \"$T/asked\"\ncase \" $* \" in *\" -takeouts \"*) echo '{\"takeouts\":[],\"by_class\":{},\"comments_read\":0}' ;;\n" +
-			"*) echo \"{\\\"commit\\\":\\\"$COMMIT\\\",\\\"landed\\\":1,\\\"ticks\\\":2,\\\"red_candidates\\\":0,\\\"red_read_n\\\":0}\" ;; esac\n",
+			"*) echo \"{\\\"commit\\\":\\\"$COMMIT\\\",\\\"landed\\\":1,\\\"ticks\\\":2,\\\"red_candidates\\\":0,\\\"red_read_n\\\":0$LIVE}\" ;; esac\n",
 		"post": "#!/bin/sh\ncat > /dev/null; echo x >> \"$T/posts\"; [ \"${POST_EXIT:-0}\" = 0 ] || exit \"$POST_EXIT\"; echo posted\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
@@ -127,5 +127,31 @@ func TestDailyRowChecksEjectionsAgainstACloneAndSaysNoneForADayWithoutReds(t *te
 	row, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
 	if !strings.Contains(string(row), "| Red candidates | none |") {
 		t.Fatalf("a day without a red candidate reads:\n%s", row)
+	}
+}
+
+func TestDailyRowTripsOverThreePassingCandidatesThrownAway(t *testing.T) {
+	for _, c := range []struct {
+		thrown, line, trip string
+	}{
+		{"3", "| Passing candidates thrown away unlanded | 3: 2 with a member's head moved, 1 with a member gone from the queue |", ""},
+		{"4", "| Passing candidates thrown away unlanded | 4: 2 with a member's head moved, 1 with a member gone from the queue |", "4 passing candidates thrown away unlanded"},
+	} {
+		dir := standIns(t)
+		live := `LIVE=,"passing_candidates_thrown_away":` + c.thrown + `,"thrown_away_head_moved":2,"thrown_away_member_left":1`
+		if status, _ := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40), live); status != 0 {
+			t.Fatalf("status %d", status)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
+		row := string(data)
+		trips := ""
+		for _, line := range strings.Split(row, "\n") {
+			if strings.HasPrefix(line, "**Tripwires:** ") {
+				trips = line
+			}
+		}
+		if !strings.Contains(row, c.line+"\n") || strings.Contains(trips, "thrown away") != (c.trip != "") || !strings.Contains(trips, c.trip) {
+			t.Fatalf("%s thrown away reads:\n%s", c.thrown, row)
+		}
 	}
 }

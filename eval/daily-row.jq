@@ -17,6 +17,7 @@ def over($limit; $what): if . == null then "\($what) was not measured" elif . > 
 | ([ ($l.ready_gaps_over_90 | if . == null then "waits of a ready head were not measured" elif . > 0 then "\(.) wait(s) over 90 minutes of a ready head with no landing" else empty end),
      (if $repo == "basecamp/hey-native-apps" and ($l.landed // 0) > 0 then ($l.queue_added_p50_minutes | over(6; "minutes the queue adds at the median")) else empty end),
      (if ($l.landed // 0) > 0 then ($l.builds_per_landing | over(if $repo == "basecamp/hey2" then 1.3 else 0.60 end; "builds per landing")) else empty end),
+     ($l.passing_candidates_thrown_away | if . == null then "passing candidates thrown away were not measured" elif . > 3 then "\(.) passing candidates thrown away unlanded, over 3" else empty end),
      ($l.wrong_ejections | if . == null then "wrong ejections were not measured" elif . > 0 then "\(.) wrong ejection(s)" else empty end),
      (if $unjudged > 0 then "\($unjudged) landing(s) after an ejection could not be checked for a wrong one" else empty end),
      (if ($t.twice // [] | length) > 0 then "\($t.twice | length) head(s) taken out twice" else empty end) ]) as $trips
@@ -32,6 +33,7 @@ def over($limit; $what): if . == null then "\($what) was not measured" elif . > 
   "| Longest wait of a ready head with no landing | \(if $l.ready_gaps == null then "not measured" elif $l.longest_ready_gap_minutes == null then "none" else "\($l.longest_ready_gap_minutes | n1) min, \($l.longest_ready_gap_from | hm) to \($l.longest_ready_gap_to | hm)" end) |",
   "| Red candidates | \(if $l.red_candidates == null then "not measured" elif $l.red_candidates == 0 then "none" else "\($l.red_candidates), holding \($l.red_pull_requests | n1) pull requests; " + (if ($l.red_read_n // 0) > 0 then "failed job seen to read red \($l.red_read_median_minutes | n1) min at the median over \($l.red_read_n)" else "no failed job's time was recorded" end) end) |",
   "| Trunk moves no recorded tick planned | \($l.unplanned_trunk_moves | n1)\(if ($l.unplanned_trunk_moves // 0) > 0 then " (a merge outside the queue, or a tick whose record is missing; its landings are not counted)" else "" end) |",
+  "| Passing candidates thrown away unlanded | \(if $l.passing_candidates_thrown_away == null then "not measured" elif $l.passing_candidates_thrown_away == 0 then "none" else "\($l.passing_candidates_thrown_away): \($l.thrown_away_head_moved) with a member's head moved, \($l.thrown_away_member_left) with a member gone from the queue" end) |",
   (if ($l.unconfirmed_landing_plans // 0) > 0 then "| Landing plans in the window the records never confirm | \($l.unconfirmed_landing_plans) (a refused push, or a landing confirmed after the records end) |" else empty end),
   "| Wrong ejections by the engine | \($l.wrong_ejections | n1)\(if $unjudged > 0 then ", with \($unjudged) landing(s) not checked" else "" end) |",
   "| Take-outs | \($outs | length): \([classes[] as $k | "\($c[$k].count // 0) \($k)"] + [$others[] | "\(.count) \(.name)"] | join(", ")) |",
