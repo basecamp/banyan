@@ -32,7 +32,7 @@ The queue uses its own mark because the trunk's own builds report on the same co
 
 ## Blame
 
-A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too. Until then it may yet land them all. Where rounds are probes, which answer in a fraction of a build, the chain waits for that answer. Where they are whole builds it does not wait: it is built beside the candidates still running.
+A red candidate at the bottom of the chain is set aside with the pull requests it added, and the chain goes on without them, built on the tip. A candidate stacked on the red one is dropped once it fails too. Until then it may yet land them all. Where rounds are probes, which answer in a fraction of a build, the chain waits while a candidate stacked on the red one is still building, after the first round has answered too. Where they are whole builds it does not wait: it is built beside the candidates still running.
 
 The red candidate is narrowed by rounds: builds of some of its prefixes. A round's build never lands. What the rounds have said so far is a span, from the highest prefix that passed to the lowest above it that failed. The culprit is in it. A round is read once every build in it has reported, and the rounds are read in order.
 
@@ -116,7 +116,7 @@ The queue posts `pending` on everything it pushes, which gives each wait a start
 
 ## Dials
 
-`slots` is how many candidates are under test at once. A round's builds are beside them and are not counted. With `spare`, while a red candidate of several pull requests on the trunk has its first round running, the chain takes one slot fewer, so those the round clears are likelier to find one free. It limits how many slots the chain fills and does not push the cleared pull requests: `gather` may still hold one back, and a landing or an ejection in the same tick ends the plan first. The round's read ends the hold, whatever it says, as does the red candidate going. A round that never reports reads as lost after `timeout`; where `timeout` is zero nothing ends the round, and the slot stays held while the red stands. `max_batch` is how many pull requests a candidate adds, and `gather` how few it may add while another is building: fewer builds for each landing, for a wait of at most one build. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
+`slots` is how many candidates are under test at once. A round's builds are beside them and are not counted. With `spare` and two slots or more, while a red candidate of several pull requests built on the trunk's tip has its first round running, the chain takes one slot fewer, so those the round clears are likelier to find one free. It limits how many slots the chain fills and does not push the cleared pull requests: `gather` may still hold one back, and a landing or an ejection in the same tick ends the plan first. The round's read ends the hold, whatever it says, as does the red candidate going or the trunk moving past its base. A round that never reports reads as lost after `timeout`; where `timeout` is zero nothing ends the round, and the slot stays held until one of those. `max_batch` is how many pull requests a candidate adds, and `gather` how few it may add while another is building: fewer builds for each landing, for a wait of at most one build. `eval/main.go` holds the values each shape ships with, and the hillclimb moves them.
 
 ## Not in the engine
 

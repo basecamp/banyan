@@ -1114,7 +1114,8 @@ func TestASuspectALaterArrivalRepairsLeavesOnTheOldTreesOrLandsOnTheNewTrunk(t *
 // and #3 fail where that of all three passes. The candidate of all three is stacked on the red
 // one of #1 and #2 and builds slowly, while #2's own rounds outlast it. Probes keep the chain
 // waiting for it, with spare or without: #1 and #3 are never built without #2, nobody leaves,
-// and the stacked candidate lands all three at tick 20.
+// and the stacked candidate lands all three at tick 20. A candidate of #1 alone would build
+// slowly too, so that were #1 and #3 built without #2, #3 would leave before #1 landed.
 func TestTheChainWaitsForACandidateStackedOnARedOneWhereItMayLandAllOfThem(t *testing.T) {
 	takes := func(b Build) int {
 		switch {
@@ -1126,6 +1127,8 @@ func TestTheChainWaitsForACandidateStackedOnARedOneWhereItMayLandAllOfThem(t *te
 			return 18
 		case holds(b, 2):
 			return 2
+		case !holds(b, 3):
+			return 20
 		}
 		return 1
 	}
