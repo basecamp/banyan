@@ -300,15 +300,14 @@ func (p *plan) under(b Build) *red {
 
 // stackedOn keeps a candidate stacked on a red one while it may still land it, which is until
 // it fails. Where probes will say within a fraction of a build whether the red is real, the
-// chain waits for them before it goes on beside it: with spare, only until the first round
-// has read.
+// chain waits for them before it goes on beside it.
 func (p *plan) stackedOn(r *red, b Build) {
 	if b.Verdict == Failure || b.Verdict == Error {
 		p.drop(b)
 		return
 	}
 	r.passed = r.passed || b.Verdict == Success
-	p.wait = p.wait || (b.Verdict == Pending && !r.whole && (!p.c.Spare || r.read == 0))
+	p.wait = p.wait || (b.Verdict == Pending && !r.whole)
 	p.above = append(p.above, b)
 }
 
@@ -609,8 +608,8 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 // candidate again in their order, whatever commits now carry them. It waits while probes are
 // deciding whether a red candidate is real. While a candidate is still building, one that
 // would add fewer pull requests than gather waits for more, or for that build, unless it
-// holds one labelled to go first. With spare, it keeps a slot free for the pull requests a
-// red candidate's first round is about to clear.
+// holds one labelled to go first. With spare, it uses one slot fewer while a red candidate's
+// first round on the trunk runs.
 func (p *plan) fill() {
 	in := map[int]bool{}
 	for _, m := range p.chain {

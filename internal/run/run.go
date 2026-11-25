@@ -45,7 +45,7 @@ type Config struct {
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
 	Timeout  string   `json:"timeout"`
 	Keep     string   `json:"keep,omitzero"`
-	Spare    bool     `json:"spare,omitzero"` // a slot stays free for the pull requests a red candidate's first round clears
+	Spare    bool     `json:"spare,omitzero"` // one slot fewer is filled while a red candidate's first round runs
 	Recheck  string   `json:"recheck"`
 	Author   struct {
 		Name  string `json:"name"`

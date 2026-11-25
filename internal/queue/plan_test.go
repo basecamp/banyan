@@ -970,12 +970,13 @@ func TestSpareKeepsNoSlotWhereNoFirstRoundOnTheTrunkIsAboutToClearAnybody(t *tes
 
 // The slot spare keeps for #1, #2 and #3 is given back when the red candidate goes, as #3's
 // label comes off mid-round, and when its round outlives the timeout: the round then reads as
-// lost, so the hold lasts no longer than the timeout after the round was pushed.
+// lost, so the hold lasts no longer than the timeout after the round was pushed. With no
+// timeout, a round that never reports holds the slot for as long as the red stands.
 func TestTheSlotSpareKeepsIsGivenBackWhenTheRedGoesOrItsRoundOutlivesTheTimeout(t *testing.T) {
 	now := time.Date(2026, 11, 25, 3, 0, 0, 0, time.UTC)
 	three := []Member{member(1, "m1"), member(2, "m2"), member(3, "m3")}
-	cfg := Config{Slots: 3, MaxBatch: 1, Probes: true, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: true}
-	count := func(after time.Duration, numbers ...int) (n int) {
+	count := func(timeout, after time.Duration, numbers ...int) (n int) {
+		cfg := Config{Slots: 3, MaxBatch: 1, Probes: true, Timeout: timeout, Recheck: 10 * time.Minute, Spare: true}
 		w := World{Now: now.Add(after), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, numbers...),
 			Builds: []Build{{SHA: "m3", Base: "trunk", Chain: three, Verdict: Failure, Pushed: now, Started: now}}}
 		for j := range 3 {
@@ -989,120 +990,19 @@ func TestTheSlotSpareKeepsIsGivenBackWhenTheRedGoesOrItsRoundOutlivesTheTimeout(
 		return n
 	}
 	for _, tc := range []struct {
-		name    string
-		after   time.Duration
-		numbers []int
-		want    int
+		name           string
+		timeout, after time.Duration
+		numbers        []int
+		want           int
 	}{
-		{"the round running", 5 * time.Minute, []int{1, 2, 3, 4, 5, 6}, 2},
-		{"#3 gone", 5 * time.Minute, []int{1, 2, 4, 5, 6}, 3},
-		{"the round at the timeout", 90 * time.Minute, []int{1, 2, 3, 4, 5, 6}, 2},
-		{"the round past the timeout", 91 * time.Minute, []int{1, 2, 3, 4, 5, 6}, 3},
+		{"the round running", 90 * time.Minute, 5 * time.Minute, []int{1, 2, 3, 4, 5, 6}, 2},
+		{"#3 gone", 90 * time.Minute, 5 * time.Minute, []int{1, 2, 4, 5, 6}, 3},
+		{"the round at the timeout", 90 * time.Minute, 90 * time.Minute, []int{1, 2, 3, 4, 5, 6}, 2},
+		{"the round past the timeout", 90 * time.Minute, 91 * time.Minute, []int{1, 2, 3, 4, 5, 6}, 3},
+		{"the round a day old with no timeout", 0, 24 * time.Hour, []int{1, 2, 3, 4, 5, 6}, 2},
 	} {
-		if got := count(tc.after, tc.numbers...); got != tc.want {
+		if got := count(tc.timeout, tc.after, tc.numbers...); got != tc.want {
 			t.Errorf("%s: pushed %d candidates, want %d", tc.name, got, tc.want)
-		}
-	}
-}
-
-// #1, #2 and #3 failed together, and #4's candidate stacked on theirs is building. Probes
-// will say within a fraction of a build whether it is doomed, so nothing is pushed while the
-// first round runs, with spare or without. Once the round has read, clearing #1 and #3,
-// spare builds them beside the stacked candidate, where the queue otherwise waits for it.
-func TestWithSpareTheChainGoesOnBesideAStackedCandidateOnceTheFirstRoundReads(t *testing.T) {
-	now := time.Date(2026, 11, 25, 3, 0, 0, 0, time.UTC)
-	three := []Member{member(1, "m1"), member(2, "m2"), member(3, "m3")}
-	probe := func(sha SHA, j int, verdict Verdict) Build {
-		return Build{SHA: sha, Kind: Probe, Base: "trunk", Chain: three[:j], Round: 1, Of: "m3", Verdict: verdict, Pushed: now, Started: now}
-	}
-	stacked := Build{SHA: "m4", Base: "trunk", Chain: append(slices.Clone(three), member(4, "m4")), Verdict: Pending, Pushed: now, Started: now}
-	pushed := func(spare bool, verdicts ...Verdict) (chains [][]int) {
-		w := World{Now: now.Add(5 * time.Minute), Trunk: "trunk", Repo: commits{}, PRs: queuedAt(now, 1, 2, 3, 4, 5),
-			Builds: []Build{{SHA: "m3", Base: "trunk", Chain: three, Verdict: Failure, Pushed: now, Started: now}, stacked,
-				probe("p0", 0, verdicts[0]), probe("p1", 1, verdicts[1]), probe("p2", 2, verdicts[2])}}
-		for _, a := range Plan(w, Config{Slots: 3, MaxBatch: 3, Probes: true, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: spare}) {
-			if a.Do == "push" && a.Build.Round == 0 {
-				chains = append(chains, numbers(a.Build.Chain))
-			}
-		}
-		return chains
-	}
-	for _, spare := range []bool{false, true} {
-		if got := pushed(spare, Pending, Pending, Pending); len(got) > 0 {
-			t.Errorf("spare %v: pushed %v while the first round runs, where the chain waits for it", spare, got)
-		}
-	}
-	if got := pushed(false, Success, Success, Failure); len(got) > 0 {
-		t.Errorf("without spare pushed %v once the round read, where the chain waits for the stacked candidate", got)
-	}
-	if got := pushed(true, Success, Success, Failure); fmt.Sprint(got) != "[[1 3 4] [1 3 4 5]]" {
-		t.Errorf("with spare pushed %v once the round read, where #1 and #3 are built beside the stacked candidate", got)
-	}
-}
-
-// #1, #2 and #3's candidate failed by chance, and #4's stacked on it will land all four. With
-// spare, the first round's read clears #1 and #2, and they are built with #4 beside the stacked
-// candidate. Where the stacked one reports first, it lands all four at the same tick as without
-// spare, and the build of #1, #2 and #4 is one whole build more, thrown away before it reports.
-// Where it builds slowly, #1, #2 and #4 land at tick 23 and #3 at 34, where all four would
-// have landed at 36: two whole builds more, and the stacked candidate, which would have
-// passed, is thrown away.
-func TestWithSpareAFlakeBuildsTheClearedPullRequestsBesideTheCandidateThatLandsThem(t *testing.T) {
-	play := func(spare bool, slow int) *played {
-		var red, stacked SHA
-		takes := func(b Build) int {
-			switch {
-			case b.Kind == Probe:
-				return 2
-			case b.SHA == stacked:
-				return slow
-			}
-			return 10
-		}
-		c := Config{Slots: 2, MaxBatch: 3, Probes: true, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: spare}
-		q := newPlayed(t, c, takes, func(b Build) bool { return b.SHA == red }, 1, 2, 3)
-		q.tick()
-		red = q.pushed[0].SHA
-		q.ticks(4)
-		q.arrive(4)
-		q.tick()
-		stacked = q.pushed[1].SHA
-		q.ticks(60)
-		return q
-	}
-	landings := func(q *played) string {
-		var out []string
-		for i, acts := range q.acts {
-			for _, a := range acts {
-				if a.Do == "land" {
-					out = append(out, fmt.Sprintf("%v at %d", numbers(a.Members), i+1))
-				}
-			}
-		}
-		return strings.Join(out, ", ")
-	}
-	for _, tc := range []struct {
-		spare          bool
-		slow, whole    int
-		landed, thrown string
-	}{
-		{false, 10, 2, "[1 2 3 4] at 16", ""},
-		{true, 10, 3, "[1 2 3 4] at 16", "[1 2 4]"},
-		{false, 30, 3, "[1 2 3 4] at 36", ""},
-		{true, 30, 5, "[1 2 4] at 23, [3] at 34", "[1 2 3 4]"},
-	} {
-		q := play(tc.spare, tc.slow)
-		var thrown []string
-		for _, b := range q.pushed {
-			if b.Kind == Candidate && !slices.ContainsFunc(q.acts, func(acts []Action) bool {
-				return slices.ContainsFunc(acts, func(a Action) bool { return a.Do == "land" && a.SHA == b.SHA })
-			}) && b.SHA != q.pushed[0].SHA {
-				thrown = append(thrown, fmt.Sprint(numbers(b.Chain)))
-			}
-		}
-		if got := landings(q); got != tc.landed || q.whole() != tc.whole || strings.Join(thrown, " ") != tc.thrown {
-			t.Errorf("spare %v, stacked candidate %d ticks: landed %s on %d whole builds, throwing away %v, where it lands %s on %d, throwing away %q:\n%s",
-				tc.spare, tc.slow, got, q.whole(), thrown, tc.landed, tc.whole, tc.thrown, q.log())
 		}
 	}
 }
@@ -1131,32 +1031,226 @@ func TestASuspectWalksBackInWhenAPullRequestBelowItLandsBeforeItsFairTestEnds(t 
 	}
 }
 
+// lateArrivals plays #1 to #4 queued together, with #5, #6 and #7 arriving two ticks apart
+// while the first round of their red candidate runs.
+func lateArrivals(t *testing.T, spare bool, fails func(Build) bool) *played {
+	c := Config{Slots: 3, MaxBatch: 4, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: spare}
+	q := newPlayed(t, c, func(Build) int { return 10 }, fails, 1, 2, 3, 4)
+	q.ticks(12)
+	q.arrive(5)
+	q.ticks(2)
+	q.arrive(6)
+	q.ticks(2)
+	q.arrive(7)
+	q.ticks(50)
+	return q
+}
+
 // As above, with #5, #6 and #7 arriving while the first round runs. Without spare they fill
 // the slots, #1, #3 and #4 are pushed only at tick 24, and #2's fair test ends first: it leaves
 // at 32. With spare the third slot waits for them, they are pushed at 21 and land at 31, and
 // #2 walks back in at 32 and leaves at 54.
 func TestSpareLetsTheClearedLandBeforeTheSuspectsFairTestEnds(t *testing.T) {
-	play := func(spare bool) *played {
-		c := Config{Slots: 3, MaxBatch: 4, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: spare}
-		q := newPlayed(t, c, func(Build) int { return 10 }, func(b Build) bool { return holds(b, 2) }, 1, 2, 3, 4)
-		q.ticks(12)
-		q.arrive(5)
-		q.ticks(2)
-		q.arrive(6)
-		q.ticks(2)
-		q.arrive(7)
-		q.ticks(50)
-		return q
-	}
 	for _, tc := range []struct {
 		spare                bool
 		cleared, again, left int
 	}{{false, 24, 0, 32}, {true, 21, 32, 54}} {
-		q := play(tc.spare)
+		q := lateArrivals(t, tc.spare, func(b Build) bool { return holds(b, 2) })
 		again := q.when(func(a Action) bool { return a.Do == "push" && fmt.Sprint(numbers(a.Build.Chain)) == "[2]" })
 		if q.when(q.pushedAgain(1)) != tc.cleared || again != tc.again || q.when(ejected(2)) != tc.left {
 			t.Errorf("spare %v: #1 pushed at %d, #2 pushed again at %d and ejected at %d, where %d, %d and %d:\n%s",
 				tc.spare, q.when(q.pushedAgain(1)), again, q.when(ejected(2)), tc.cleared, tc.again, tc.left, q.log())
+		}
+	}
+}
+
+// inTree says pull request n is in the tree b builds: in its chain, or already in its base.
+func inTree(b Build, n int) bool {
+	return holds(b, n) || strings.Contains(b.Base, fmt.Sprintf(",%d,", n))
+}
+
+// As above, but #7 repairs #2: every tree with #2 fails unless it also holds #7. Without spare,
+// #7 lands at 27, yet the red candidate's rounds stand on the trunk they were built on, and #2
+// leaves on them at 32. With spare, #7 lands with #1, #3 and #4 at 31, the red candidate goes,
+// and #2's next candidate, built on a trunk that holds #7, passes and lands at 42.
+func TestASuspectALaterArrivalRepairsLeavesOnTheOldTreesOrLandsOnTheNewTrunk(t *testing.T) {
+	fails := func(b Build) bool { return inTree(b, 2) && !inTree(b, 7) }
+	for _, tc := range []struct {
+		spare bool
+		want  string
+	}{
+		{false, `1: push [1 2 3 4]
+11: round 1 of 1, round 1 of 2, round 1 of 0
+13: push [5]
+15: push [5 6]
+17: push [5 6 7]
+21: round 2 of 1
+22: round 3 of 2
+23: land [5]
+24: push [6 7 1 3 4]
+25: land [6]
+27: land [7]
+32: eject 2
+34: land [1 3 4]`},
+		{true, `1: push [1 2 3 4]
+11: round 1 of 1, round 1 of 2, round 1 of 0
+13: push [5]
+15: push [5 6]
+21: round 2 of 1, push [5 6 1 3 4 7]
+22: round 3 of 2
+23: land [5]
+25: land [6]
+31: land [1 3 4 7]
+32: push [2]
+42: land [2]`},
+	} {
+		if got := lateArrivals(t, tc.spare, fails).log(); got != tc.want {
+			t.Errorf("spare %v: the queue did\n%s\nwhere it does\n%s", tc.spare, got, tc.want)
+		}
+	}
+}
+
+// #2 breaks a test and #3, queued next, repairs it, so the candidates of #1 and #2 and of #1
+// and #3 fail where that of all three passes. The candidate of all three is stacked on the red
+// one of #1 and #2 and builds slowly, while #2's own rounds outlast it. Probes keep the chain
+// waiting for it, with spare or without: #1 and #3 are never built without #2, nobody leaves,
+// and the stacked candidate lands all three at tick 20.
+func TestTheChainWaitsForACandidateStackedOnARedOneWhereItMayLandAllOfThem(t *testing.T) {
+	takes := func(b Build) int {
+		switch {
+		case b.Kind == Probe && b.Round > 1 && holds(b, 2):
+			return 25
+		case b.Kind == Probe:
+			return 1
+		case holds(b, 2) && holds(b, 3):
+			return 18
+		case holds(b, 2):
+			return 2
+		}
+		return 1
+	}
+	want := `1: push [1 2]
+2: push [1 2 3]
+3: round 1 of 1, round 1 of 0
+4: round 2 of 2
+5: round 3 of 1
+6: round 4 of 2
+20: land [1 2 3]`
+	for _, spare := range []bool{false, true} {
+		c := Config{Slots: 2, MaxBatch: 2, Probes: true, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: spare}
+		q := newPlayed(t, c, takes, func(b Build) bool { return holds(b, 2) != holds(b, 3) }, 1, 2)
+		q.tick()
+		q.arrive(3)
+		q.ticks(40)
+		if got := q.log(); got != want {
+			t.Errorf("spare %v: the queue did\n%s\nwhere it does\n%s", spare, got, want)
+		}
+	}
+}
+
+// Spare limits how many slots fill uses; it does not push the cleared at the read. #1 and #2
+// failed together, and #3 and #4 arrive as the first round of whole builds begins, so their
+// candidate takes the one slot fill may use. The round's read at tick 21 clears #1, and the
+// second slot is free again, but with gather at 2 a candidate of #1 alone waits for #3 and
+// #4's build, which lands at 22. Without gather, #1 is built on theirs at 21.
+func TestWithSpareAndGatherAPullRequestTheFirstRoundClearsAloneWaitsForTheCandidateBuilding(t *testing.T) {
+	for _, tc := range []struct {
+		gather int
+		want   string
+	}{
+		{2, `1: push [1 2]
+11: round 1 of 2, round 1 of 1
+12: round 2 of 1, round 2 of 0, push [3 4]
+13: round 3 of 2, round 3 of 1
+22: land [3 4]
+23: eject 2
+24: push [1]
+34: land [1]`},
+		{0, `1: push [1 2]
+11: round 1 of 2, round 1 of 1
+12: round 2 of 1, round 2 of 0, push [3 4]
+13: round 3 of 2, round 3 of 1
+21: push [3 4 1]
+22: land [3 4]
+23: eject 2
+31: land [1]`},
+	} {
+		c := Config{Slots: 2, MaxBatch: 2, Gather: tc.gather, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: true}
+		q := newPlayed(t, c, func(Build) int { return 10 }, func(b Build) bool { return holds(b, 2) }, 1, 2)
+		q.ticks(11)
+		q.arrive(3, 4)
+		q.ticks(30)
+		if got := q.log(); got != tc.want {
+			t.Errorf("gather %d: the queue did\n%s\nwhere it does\n%s", tc.gather, got, tc.want)
+		}
+	}
+}
+
+// #1, #2 and #3's candidate failed by chance, and #4, #5 and #6 arrive a tick apart as the first
+// round of whole builds begins. The round's build of all three passes at tick 21 and clears
+// them. Without spare, #4 to #6 take every slot, and #1 to #3 wait for #6 to land at 24 and land
+// at 35. With spare, #6 waits for the slot, #1 to #3 are built at the read and land at 31, and
+// #6 lands at 34: the same whole builds in another order. Where rounds are probes, the first
+// reads at tick 13, before a third candidate is wanted, and spare builds the same as without.
+func TestWithSpareAFlakeOfWholeBuildsLandsTheClearedFirstOnAsManyBuilds(t *testing.T) {
+	probed := `1: push [1 2 3]
+11: round 1 of 1, round 1 of 2, round 1 of 0
+12: push [4]
+13: round 2 of 3, push [4 1 2 5]
+14: round 3 of 2, push [4 1 2 5 6]
+16: round 4 of 3
+22: land [4]
+23: land [1 2 5]
+24: land [6]
+25: push [3]
+35: land [3]`
+	for _, tc := range []struct {
+		probes, spare bool
+		whole         int
+		want          string
+	}{
+		{false, false, 14, `1: push [1 2 3]
+11: round 1 of 3, round 1 of 2, round 1 of 1
+12: round 2 of 2, round 2 of 1, round 2 of 0, push [4]
+13: round 3 of 3, round 3 of 2, round 3 of 1, push [4 5]
+14: push [4 5 6]
+22: land [4]
+23: land [5]
+24: land [6]
+25: push [1 2 3]
+35: land [1 2 3]`},
+		{false, true, 14, `1: push [1 2 3]
+11: round 1 of 3, round 1 of 2, round 1 of 1
+12: round 2 of 2, round 2 of 1, round 2 of 0, push [4]
+13: round 3 of 3, round 3 of 2, round 3 of 1, push [4 5]
+21: push [4 5 1 2 3]
+22: land [4]
+23: land [5]
+24: push [1 2 3 6]
+31: land [1 2 3]
+34: land [6]`},
+		{true, false, 6, probed},
+		{true, true, 6, probed},
+	} {
+		var red SHA
+		takes := func(b Build) int {
+			if b.Kind == Probe {
+				return 2
+			}
+			return 10
+		}
+		c := Config{Slots: 3, MaxBatch: 3, Probes: tc.probes, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute, Spare: tc.spare}
+		q := newPlayed(t, c, takes, func(b Build) bool { return b.SHA == red }, 1, 2, 3)
+		q.tick()
+		red = q.pushed[0].SHA
+		q.ticks(10)
+		for _, n := range []int{4, 5, 6} {
+			q.arrive(n)
+			q.tick()
+		}
+		q.ticks(58)
+		if got := q.log(); got != tc.want || q.whole() != tc.whole {
+			t.Errorf("probes %v, spare %v: the queue did on %d whole builds\n%s\nwhere it does on %d\n%s", tc.probes, tc.spare, q.whole(), got, tc.whole, tc.want)
 		}
 	}
 }

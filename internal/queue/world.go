@@ -153,9 +153,8 @@ type Config struct {
 	Recheck time.Duration
 	// Keep is how long a candidate's branch stands after the queue marks it landed.
 	Keep time.Duration `json:",omitzero"`
-	// Spare keeps a slot free while a red candidate of several pull requests on the trunk has
-	// its first round running, for those the round clears, and lets the chain go on beside a
-	// candidate stacked on it once that round has read.
+	// Spare has fill use one slot fewer while a red candidate of several pull requests on the
+	// trunk has its first round running, so those the round clears are likelier to find one.
 	Spare bool `json:",omitzero"`
 }
 
