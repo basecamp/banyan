@@ -269,7 +269,7 @@ func TestLiveGapBelongsToEndingLandingWindow(t *testing.T) {
 	}
 }
 
-func TestLiveNoGapAcrossEmptyQueue(t *testing.T) {
+func TestLiveWaitAfterAnEmptyQueueStartsAtTheFirstReadyTick(t *testing.T) {
 	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	ready := []queue.PR{{Number: 1, Queued: start, Checks: queue.Success, Note: "in the queue, waiting"}}
 	recs := []queue.Recording{
@@ -280,8 +280,70 @@ func TestLiveNoGapAcrossEmptyQueue(t *testing.T) {
 		{World: queue.World{Now: start.Add(101 * time.Minute), Trunk: "c"}},
 	}
 	row := windowRow(t, recs, start, start.Add(102*time.Minute))
-	if row.ReadyGaps != 0 || row.LongestReadyGapMinutes != nil {
-		t.Fatalf("gap across empty queue: %+v", row.liveMeasures)
+	if row.ReadyGaps != 1 || *row.LongestReadyGapMinutes != 50 || !row.LongestReadyGapFrom.Equal(start.Add(50*time.Minute)) || row.ReadyGapsOver90 != 0 {
+		t.Fatalf("wait after an empty queue: %+v", row.liveMeasures)
+	}
+}
+
+func TestLiveWaitOutlastsTicksThatWereNotRecorded(t *testing.T) {
+	day := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	at := func(h, m, s int) time.Time {
+		return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute + time.Duration(s)*time.Second)
+	}
+	ready := []queue.PR{{Number: 2, Queued: at(9, 0, 0), Checks: queue.Success}}
+	held := []queue.PR{{Number: 2, Queued: at(9, 0, 0), Checks: queue.Success, Wait: "hold"}}
+	recs := []queue.Recording{
+		{World: queue.World{Now: at(9, 38, 45), Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "a", Members: []queue.Member{{Number: 1}}}}},
+		{World: queue.World{Now: at(9, 40, 0), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: at(9, 42, 0), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: at(11, 33, 0), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: at(12, 6, 50), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: at(12, 12, 10), Trunk: "a", PRs: held}},
+		{World: queue.World{Now: at(13, 0, 0), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: at(13, 30, 0), Trunk: "a", PRs: held}},
+		{World: queue.World{Now: at(14, 25, 25), Trunk: "a"}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: []queue.Member{{Number: 3}}}}},
+		{World: queue.World{Now: at(14, 26, 0), Trunk: "b"}},
+	}
+	row := windowRow(t, recs, at(1, 17, 0), at(21, 17, 0))
+	if row.ReadyGaps != 1 || row.ReadyGapsOver90 != 1 || *row.LongestReadyGapMinutes != at(12, 6, 50).Sub(at(9, 38, 45)).Minutes() ||
+		!row.LongestReadyGapFrom.Equal(at(9, 38, 45)) || !row.LongestReadyGapTo.Equal(at(12, 6, 50)) {
+		t.Fatalf("wait across unrecorded ticks: %+v", row.liveMeasures)
+	}
+}
+
+func TestLiveWaitStartsWhenAHeadTurnsReadyAndEndsAtTheLanding(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	pending := []queue.PR{{Number: 2, Queued: start, Checks: queue.Pending}}
+	ready := []queue.PR{{Number: 2, Queued: start, Checks: queue.Success}}
+	recs := []queue.Recording{
+		{World: queue.World{Now: start, Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "a", Members: []queue.Member{{Number: 1}}}}},
+		{World: queue.World{Now: start.Add(10 * time.Minute), Trunk: "a", PRs: pending}},
+		{World: queue.World{Now: start.Add(30 * time.Minute), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: start.Add(60 * time.Minute), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: start.Add(70 * time.Minute), Trunk: "a"}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: []queue.Member{{Number: 2}}}}},
+		{World: queue.World{Now: start.Add(71 * time.Minute), Trunk: "b"}},
+	}
+	row := windowRow(t, recs, start, start.Add(72*time.Minute))
+	if row.ReadyGaps != 1 || *row.LongestReadyGapMinutes != 40 || !row.LongestReadyGapFrom.Equal(start.Add(30*time.Minute)) || !row.LongestReadyGapTo.Equal(start.Add(70*time.Minute)) {
+		t.Fatalf("wait of a head that turned ready: %+v", row.liveMeasures)
+	}
+}
+
+func TestLiveCountsEachWaitBetweenTwoLandings(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	ready := []queue.PR{{Number: 2, Queued: start, Checks: queue.Success}}
+	recs := []queue.Recording{
+		{World: queue.World{Now: start, Trunk: "t"}, Actions: []queue.Action{{Do: "land", SHA: "a", Members: []queue.Member{{Number: 1}}}}},
+		{World: queue.World{Now: start.Add(5 * time.Minute), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: start.Add(20 * time.Minute), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: start.Add(25 * time.Minute), Trunk: "a"}},
+		{World: queue.World{Now: start.Add(40 * time.Minute), Trunk: "a", PRs: ready}},
+		{World: queue.World{Now: start.Add(80 * time.Minute), Trunk: "a"}, Actions: []queue.Action{{Do: "land", SHA: "b", Members: []queue.Member{{Number: 2}}}}},
+		{World: queue.World{Now: start.Add(81 * time.Minute), Trunk: "b"}},
+	}
+	row := windowRow(t, recs, start, start.Add(82*time.Minute))
+	if row.ReadyGaps != 2 || *row.LongestReadyGapMinutes != 40 || !row.LongestReadyGapFrom.Equal(start.Add(40*time.Minute)) {
+		t.Fatalf("two waits between landings: %+v", row.liveMeasures)
 	}
 }
 
