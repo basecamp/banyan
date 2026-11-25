@@ -81,6 +81,10 @@ type red struct {
 
 func (r *red) suspects() []Member { return r.chain[max(r.lo, 0):r.hi] }
 
+// clearing says the red candidate sits on the trunk with several pull requests and its first
+// round has yet to read, so some of them may be cleared to go back on the chain at any tick.
+func (p *plan) clearing(r *red) bool { return r.base == p.w.Trunk && len(r.chain) > 1 && r.read == 0 }
+
 func (p *plan) act(a Action) { p.acts = append(p.acts, a) }
 
 // admit sorts the queue into those that may join the chain and those that wait in place.
@@ -296,14 +300,15 @@ func (p *plan) under(b Build) *red {
 
 // stackedOn keeps a candidate stacked on a red one while it may still land it, which is until
 // it fails. Where probes will say within a fraction of a build whether the red is real, the
-// chain waits for them before it goes on beside it.
+// chain waits for them before it goes on beside it: with spare, only until the first round
+// has read.
 func (p *plan) stackedOn(r *red, b Build) {
 	if b.Verdict == Failure || b.Verdict == Error {
 		p.drop(b)
 		return
 	}
 	r.passed = r.passed || b.Verdict == Success
-	p.wait = p.wait || (b.Verdict == Pending && !r.whole)
+	p.wait = p.wait || (b.Verdict == Pending && !r.whole && (!p.c.Spare || r.read == 0))
 	p.above = append(p.above, b)
 }
 
@@ -604,7 +609,8 @@ func (p *plan) evidence(r *red, j int, whole bool) Build {
 // candidate again in their order, whatever commits now carry them. It waits while probes are
 // deciding whether a red candidate is real. While a candidate is still building, one that
 // would add fewer pull requests than gather waits for more, or for that build, unless it
-// holds one labelled to go first.
+// holds one labelled to go first. With spare, it keeps a slot free for the pull requests a
+// red candidate's first round is about to clear.
 func (p *plan) fill() {
 	in := map[int]bool{}
 	for _, m := range p.chain {
@@ -617,7 +623,11 @@ func (p *plan) fill() {
 	if p.wait {
 		return
 	}
-	for p.pending < p.c.Slots {
+	slots := p.c.Slots
+	if p.c.Spare && slots > 1 && slices.ContainsFunc(p.reds, p.clearing) {
+		slots--
+	}
+	for p.pending < slots {
 		parent, added, held, first := p.prefix(len(p.chain)), 0, len(p.chain), false
 		for _, pr := range p.order {
 			if !free(pr) {

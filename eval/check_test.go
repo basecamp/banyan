@@ -246,6 +246,20 @@ func TestCheckerCurrentPlanner(t *testing.T) {
 	}
 }
 
+func TestCheckerCurrentPlannerWithSpare(t *testing.T) {
+	worlds := defaultWorlds()
+	for i := range worlds {
+		worlds[i].Config.Spare = true
+	}
+	sum := checkSuite(worlds, mutant{plan: queue.Plan, verify: queue.Verify})
+	t.Logf("queue.Plan with spare: %d of %d whole, %d capped, %d states, %d broken",
+		sum.whole, sum.worlds, sum.capped, sum.states, sum.brokenWorlds)
+	for _, inv := range sum.brokenInvs {
+		sample := sum.bestByInv[inv]
+		t.Errorf("%s is broken in %s:\n%s", inv, sample.world.Name, formatTrace(sample.result))
+	}
+}
+
 func TestCheckerCounterexample(t *testing.T) {
 	w := checkWorld{
 		Name:   "2 PRs crashes+stale (good+breaks, 2 of 2)",

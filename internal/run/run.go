@@ -45,6 +45,7 @@ type Config struct {
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
 	Timeout  string   `json:"timeout"`
 	Keep     string   `json:"keep,omitzero"`
+	Spare    bool     `json:"spare,omitzero"` // a slot stays free for the pull requests a red candidate's first round clears
 	Recheck  string   `json:"recheck"`
 	Author   struct {
 		Name  string `json:"name"`
@@ -123,7 +124,7 @@ func (c Config) dials() queue.Config {
 	timeout, _ := time.ParseDuration(c.Timeout)
 	recheck, _ := time.ParseDuration(c.Recheck)
 	keep, _ := time.ParseDuration(c.Keep)
-	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Gather: c.Gather, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck, Keep: keep}
+	return queue.Config{Slots: c.Slots, MaxBatch: c.MaxBatch, Gather: c.Gather, Probes: c.Probe != "", Cancels: c.Cancels, Timeout: timeout, Recheck: recheck, Keep: keep, Spare: c.Spare}
 }
 
 // Queue is one repository's queue, ready to tick.
