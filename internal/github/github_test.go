@@ -9,8 +9,11 @@ import (
 )
 
 func TestOnlyTheConfiguredAppsCheckRunsCountForNamedContexts(t *testing.T) {
-	if !strings.Contains(contextFields, "checkSuite { app { databaseId } }") {
-		t.Errorf("contextFields = %q, want checkSuite { app { databaseId } }", contextFields)
+	if asked := (Names{App: 7}).contextFields(); !strings.Contains(asked, "checkSuite { app { databaseId } }") {
+		t.Errorf("with App=7 the queue asks %q, want checkSuite { app { databaseId } }", asked)
+	}
+	if asked := (Names{}).contextFields(); strings.Contains(asked, "checkSuite") {
+		t.Errorf("with no App the queue asks %q, want nothing of a check run's suite", asked)
 	}
 	var r rollup
 	err := json.Unmarshal([]byte(`{"contexts": {"nodes": [
