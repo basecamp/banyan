@@ -293,8 +293,8 @@ func describe(b queue.Build) string {
 	return what + " of " + strings.Join(ns, ", ")
 }
 
-// Tick reads, plans and acts until the plan is empty: a landing changes the world, so the
-// tick reads it again and goes on, six times at most.
+// Tick says what landed unsaid, then does the queue's work. A landing it could not say fails
+// the tick and keeps it from none of that work, unless GitHub is failing or limiting the queue.
 func (q *Queue) Tick() (err error) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -308,9 +308,19 @@ func (q *Queue) Tick() (err error) {
 			fmt.Fprintln(q.Log, string(line))
 		}
 	}()
-	if err := q.settle(); err != nil {
+	unsaid := q.settle()
+	if github.Unavailable(unsaid) {
+		return unsaid
+	}
+	if err := q.work(); err != nil {
 		return err
 	}
+	return unsaid
+}
+
+// work reads, plans and acts until the plan is empty: a landing changes the world, so it
+// reads it again and goes on, six times at most.
+func (q *Queue) work() error {
 	q.refused, q.ejected = "", map[int]bool{}
 	for pass := 0; pass < 6; pass++ {
 		r, err := q.Read()

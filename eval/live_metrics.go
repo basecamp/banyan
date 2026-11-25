@@ -16,6 +16,7 @@ import (
 type liveOptions struct {
 	from, to *time.Time
 	row      bool
+	replays  bool // a shape replays the window, so git is asked which heads clash
 }
 
 func liveBounds(from, to string, row bool) (liveOptions, error) {
@@ -104,6 +105,7 @@ type simulatedMeasures struct {
 	SettingsInWindow                 int            `json:"settings_in_window"`
 	Acts                             map[string]int `json:"acts"`
 	UnattributedHolds                int            `json:"unattributed_holds"`
+	ClashingPairs                    *int           `json:"clashing_pairs,omitempty"`
 	WaitP50Minutes                   *float64       `json:"wait_p50_minutes"`
 	WaitP90Minutes                   *float64       `json:"wait_p90_minutes"`
 	WholeBuilds                      float64        `json:"whole_builds"`
@@ -257,34 +259,63 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 	}
 	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
 	times = slices.CompactFunc(times, func(a, b time.Time) bool { return a.Equal(b) })
-	for i := 1; i < len(times); i++ {
-		from, to := times[i-1], times[i]
-		if !opts.contains(to) {
-			continue
+	type tick struct {
+		at    time.Time
+		ready bool
+	}
+	var ticks []tick
+	for _, rec := range recs {
+		ready := false
+		for _, pr := range rec.World.PRs {
+			ready = ready || waitsOnTheQueue(pr)
 		}
-		between, allReady := false, true
-		for _, rec := range recs {
-			if !rec.World.Now.After(from) || !rec.World.Now.Before(to) {
-				continue
-			}
-			between = true
-			ready := false
-			for _, pr := range rec.World.PRs {
-				ready = ready || waitsOnTheQueue(pr)
-			}
-			allReady = allReady && ready
+		ticks = append(ticks, tick{rec.World.Now, ready})
+	}
+	slices.SortStableFunc(ticks, func(a, b tick) int { return a.at.Compare(b.at) })
+	wait := func(from, to time.Time) {
+		if !to.After(from) || !opts.contains(to) {
+			return
 		}
-		if !between || !allReady {
-			continue
-		}
-		gap := to.Sub(from).Minutes()
+		minutes := to.Sub(from).Minutes()
 		m.ReadyGaps++
-		if m.LongestReadyGapMinutes == nil || gap >= *m.LongestReadyGapMinutes {
-			m.LongestReadyGapMinutes, m.LongestReadyGapFrom, m.LongestReadyGapTo = number(gap), timeValue(from), timeValue(to)
+		if m.LongestReadyGapMinutes == nil || minutes >= *m.LongestReadyGapMinutes {
+			m.LongestReadyGapMinutes, m.LongestReadyGapFrom, m.LongestReadyGapTo = number(minutes), timeValue(from), timeValue(to)
 		}
-		if gap > 90 {
+		if minutes > 90 {
 			m.ReadyGapsOver90++
 		}
+	}
+	var start, lastReady, landed time.Time
+	waiting, next := false, 0
+	land := func(at time.Time) {
+		if waiting {
+			wait(start, at)
+		}
+		waiting, landed = false, at
+	}
+	for _, t := range ticks {
+		for ; next < len(times) && !times[next].After(t.at); next++ {
+			land(times[next])
+		}
+		switch {
+		case next > 0 && t.at.Equal(times[next-1]):
+		case t.ready && !waiting:
+			waiting, start = true, landed
+			if start.IsZero() {
+				start = t.at
+			}
+			landed, lastReady = time.Time{}, t.at
+		case t.ready:
+			lastReady = t.at
+		case waiting:
+			wait(start, lastReady)
+			waiting, landed = false, time.Time{}
+		default:
+			landed = time.Time{}
+		}
+	}
+	for ; next < len(times); next++ {
+		land(times[next])
 	}
 
 	failed, red := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
@@ -433,7 +464,7 @@ func printLive(sc Score, row liveRow) {
 		measured(row.QueueAddedP50Minutes), measured(row.QueueAddedP90Minutes), measured(row.QueueAddedP95Minutes), measured(row.QueueAddedSumMinutes), row.QueueAddedOver30, measured(row.QueueAddedOver30SumMinutes))
 	fmt.Printf("landing candidate's build: %s min at the median\n", measured(row.LandingBuildMedianMinutes))
 	fmt.Printf("ready to landed, split landings: %s min at the median, %s at p90\n", measured(row.SplitReadyToLandedP50Minutes), measured(row.SplitReadyToLandedP90Minutes))
-	fmt.Printf("gaps between landings with a ready head waiting: %d; longest %s min, %s to %s; over 90 min: %d\n",
+	fmt.Printf("waits of a ready head with no landing: %d; longest %s min, %s to %s; over 90 min: %d\n",
 		row.ReadyGaps, measured(row.LongestReadyGapMinutes), measuredTime(row.LongestReadyGapFrom), measuredTime(row.LongestReadyGapTo), row.ReadyGapsOver90)
 	fmt.Printf("red candidates: %d, holding %d pull requests; failed job seen to read red: n=%d, %s min at the median, %s in all\n",
 		row.RedCandidates, row.RedPullRequests, row.RedReadN, measured(row.RedReadMedianMinutes), measured(row.RedReadSumMinutes))
@@ -462,6 +493,7 @@ func runLive(dir, clone, like, from, to string, rowOnly bool, perturb string) er
 			return fmt.Errorf("unknown shape %q", like)
 		}
 	}
+	opts.replays = shape != nil
 	sc, win, row, err := scoreLive(dir, clone, opts)
 	if err != nil {
 		return err
