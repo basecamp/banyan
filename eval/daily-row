@@ -30,7 +30,7 @@ recorded() {
 
 if [ ! -s "$rows/$day.json" ]; then
   [ "$(date -u +%s)" -ge "$(date -u -d "$to" +%s)" ] || { echo "daily-row: $day's window is still open" >&2; exit 2; }
-  "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$from - 72 hours" +%FT%TZ)" "$(date -u -d "$to + 5 minutes" +%FT%TZ)" >&2
+  "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$before - 72 hours" +%FT%TZ)" "$(date -u -d "$to + 5 minutes" +%FT%TZ)" >&2
   tmp=$(mktemp -d "$rows/.$day.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   like=(); [ -n "$shape" ] && like=(-like "$shape")
   clone=(); [ -z "${BANYAN_CLONE:-}" ] || clone=(-clone "$BANYAN_CLONE")

@@ -58,7 +58,7 @@ func standIns(t *testing.T) string {
 		}
 	}
 	for name, script := range map[string]string{
-		"fetch-ticks": "#!/bin/sh\nexit \"${FETCH_EXIT:-0}\"\n",
+		"fetch-ticks": "#!/bin/sh\necho \"$*\" >> \"$T/fetched\"\nexit \"${FETCH_EXIT:-0}\"\n",
 		"eval": "#!/bin/sh\necho \"$*\" >> \"$T/asked\"\nBEFORE_NONE='" + beforeTakeouts + "'\ncase \" $* \" in\n" +
 			"*\" -takeouts \"*\" -from 2026-11-17T21:17:00Z \"*) [ \"${BEFORE_TAKEOUTS_EXIT:-0}\" = 0 ] || exit \"$BEFORE_TAKEOUTS_EXIT\"; echo \"${BEFORE_TAKEOUTS:-$BEFORE_NONE}\" ;;\n" +
 			"*\" -takeouts \"*) echo '" + dayTakeouts + "' ;;\n" +
@@ -305,6 +305,18 @@ func TestDailyRowGivesTheFourHoursBeforeItsWindow(t *testing.T) {
 	}
 	if again, _ := os.ReadFile(filepath.Join(rows, "2026-11-18.md")); string(again) != string(md) {
 		t.Fatal("a second run replaced the day's Markdown")
+	}
+}
+
+func TestDailyRowFetchesTheRecordsBothWindowsReadBackOver(t *testing.T) {
+	dir := standIns(t)
+	if status, _ := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40)); status != 0 {
+		t.Fatalf("status %d", status)
+	}
+	fetched, _ := os.ReadFile(filepath.Join(dir, "fetched"))
+	want := "o/app " + filepath.Join(dir, "state", "app") + " 2026-11-14T21:17:00Z 2026-11-18T21:22:00Z\n"
+	if string(fetched) != want {
+		t.Errorf("fetched %q, want one fetch from 72 hours before the four hours open: %q", fetched, want)
 	}
 }
 
