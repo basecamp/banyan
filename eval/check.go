@@ -1140,8 +1140,7 @@ func (t *checkTick) delete(a queue.Action) bool {
 }
 
 func (t *checkTick) eject(pulls map[int]pullRequest, a queue.Action) (string, bool) {
-	prs := t.c.checkedPulls(t.state)
-	culprit := a.Cause == "culprit" && culpritPR(a.PR, prs)
+	culprit := a.Cause == "culprit" && culpritPR(a.PR, t.c.drainPulls(t.state))
 	flaked := t.state.flaked || t.state.episodes > 1
 	if broken := checkEject(a, culprit, flaked, t.c.checkedBuild(t.state)); len(broken) > 0 {
 		return strings.Join(broken, "; "), false
