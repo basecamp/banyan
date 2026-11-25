@@ -395,6 +395,30 @@ func TestReplayLeavesOutABuildAnsweredAfterAnUnrecordedStretch(t *testing.T) {
 		t.Fatalf("live build median %v, whole builds %d, window build %v", row.BuildMedianMinutes, row.WholeBuilds, w.build)
 	}
 }
+func TestReplayLeavesOutABuildFirstReadLandedAfterAnUnrecordedStretch(t *testing.T) {
+	pending := queue.Build{SHA: "lower", Pushed: replayStart}
+	recs := []queue.Recording{replayTick(0), replayTick(10), replayTick(110)}
+	recs[1].World.Builds = []queue.Build{pending}
+	landed := pending
+	landed.Verdict, landed.Landed = queue.Success, recs[2].World.Now
+	recs[2].World.Builds = []queue.Build{landed}
+	_, w, row := replayWindow(t, recs, 120)
+	if len(w.times) != 0 || row.WholeBuilds != 1 {
+		t.Fatalf("pool %v, whole builds %d", w.times, row.WholeBuilds)
+	}
+}
+func TestReplayKeepsABuildWhoseLandingWasMarkedInsideAnUnrecordedStretch(t *testing.T) {
+	pending := queue.Build{SHA: "lower", Pushed: replayStart}
+	recs := []queue.Recording{replayTick(0), replayTick(10), replayTick(110)}
+	recs[1].World.Builds = []queue.Build{pending}
+	landed := pending
+	landed.Verdict, landed.Landed = queue.Success, replayStart.Add(40*time.Minute)
+	recs[2].World.Builds = []queue.Build{landed}
+	_, w, _ := replayWindow(t, recs, 120)
+	if !slices.Equal(w.times, []time.Duration{40 * time.Minute}) {
+		t.Fatalf("pool %v", w.times)
+	}
+}
 func TestReplayKeepsABuildAnsweredSoonAfterThePreviousTick(t *testing.T) {
 	b := queue.Build{SHA: "b", Pushed: replayStart, Verdict: queue.Success}
 	recs := []queue.Recording{replayTick(0), replayTick(30), replayTick(40)}

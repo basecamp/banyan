@@ -172,7 +172,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			answered[b.SHA] = answerAt
 			if opts.contains(answerAt) {
 				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
-				if !b.Landed.IsZero() || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch {
+				if (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch {
 					timed[b.Kind] = append(timed[b.Kind], answerAt.Sub(pushedAt).Minutes())
 				}
 				if b.Kind == queue.Candidate {
@@ -423,7 +423,8 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 
 // unrecordedStretch is the longest time between two recorded ticks that still times a build
 // by the tick that first read its verdict. A verdict first read after a longer stretch came at
-// some unknown time within it, so the replay draws nothing from that build's time.
+// some unknown time within it, so the replay draws nothing from that build's time. A landing
+// marked by that same tick is no earlier a time; one marked before it is.
 const unrecordedStretch = 30 * time.Minute
 
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
