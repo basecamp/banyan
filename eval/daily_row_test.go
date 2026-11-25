@@ -12,7 +12,12 @@ import (
 // and returns its exit status and how often the post was called.
 func dailyRow(t *testing.T, dir string, env ...string) (status, posts int) {
 	t.Helper()
-	cmd := exec.Command("bash", filepath.Join(dir, "daily-row"), "o/app", "2026-11-18")
+	return dailyRowOf(t, dir, "o/app", env...)
+}
+
+func dailyRowOf(t *testing.T, dir, repo string, env ...string) (status, posts int) {
+	t.Helper()
+	cmd := exec.Command("bash", filepath.Join(dir, "daily-row"), repo, "2026-11-18")
 	cmd.Env = append(append(os.Environ(), "T="+dir, "BANYAN_EVAL="+filepath.Join(dir, "eval"), "BANYAN_ROWS="+filepath.Join(dir, "state")), env...)
 	out, err := cmd.CombinedOutput()
 	if exit, ok := err.(*exec.ExitError); ok {
@@ -130,19 +135,20 @@ func TestDailyRowChecksEjectionsAgainstACloneAndSaysNoneForADayWithoutReds(t *te
 	}
 }
 
-func TestDailyRowTripsOverThreePassingCandidatesThrownAway(t *testing.T) {
+func TestDailyRowTripsOverThreePassingCandidatesThrownAwayInHeyNativeApps(t *testing.T) {
 	for _, c := range []struct {
-		thrown, line, trip string
+		repo, thrown, trip string
 	}{
-		{"3", "| Passing candidates thrown away unlanded | 3: 2 with a member's head moved, 1 with a member gone from the queue |", ""},
-		{"4", "| Passing candidates thrown away unlanded | 4: 2 with a member's head moved, 1 with a member gone from the queue |", "4 passing candidates thrown away unlanded"},
+		{"basecamp/hey-native-apps", "3", ""},
+		{"basecamp/hey-native-apps", "4", "4 passing candidates thrown away unlanded, over 3"},
+		{"basecamp/hey2", "4", ""},
 	} {
 		dir := standIns(t)
 		live := `LIVE=,"passing_candidates_thrown_away":` + c.thrown + `,"thrown_away_head_moved":2,"thrown_away_member_left":1`
-		if status, _ := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40), live); status != 0 {
+		if status, _ := dailyRowOf(t, dir, c.repo, "COMMIT="+strings.Repeat("a", 40), live); status != 0 {
 			t.Fatalf("status %d", status)
 		}
-		data, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
+		data, _ := os.ReadFile(filepath.Join(dir, "state", filepath.Base(c.repo), "rows", "2026-11-18.md"))
 		row := string(data)
 		trips := ""
 		for _, line := range strings.Split(row, "\n") {
@@ -150,8 +156,9 @@ func TestDailyRowTripsOverThreePassingCandidatesThrownAway(t *testing.T) {
 				trips = line
 			}
 		}
-		if !strings.Contains(row, c.line+"\n") || strings.Contains(trips, "thrown away") != (c.trip != "") || !strings.Contains(trips, c.trip) {
-			t.Fatalf("%s thrown away reads:\n%s", c.thrown, row)
+		line := "| Passing candidates thrown away unlanded | " + c.thrown + ": 2 with a member's head moved, 1 with a member gone from the queue |\n"
+		if !strings.Contains(row, line) || strings.Contains(trips, "thrown away") != (c.trip != "") || !strings.Contains(trips, c.trip) {
+			t.Fatalf("%s, %s thrown away reads:\n%s", c.repo, c.thrown, row)
 		}
 	}
 }
