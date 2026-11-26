@@ -51,9 +51,9 @@ type Shape struct {
 	Whole time.Duration
 	// Clashing holds each head git was asked about, with the heads git cannot merge it with.
 	Clashing map[queue.SHA]map[queue.SHA]bool
-	// Failing holds how long each recorded whole build that a guilty head failed took, by the
-	// head. A whole build of a tree that holds such a head takes one of its times in place of one
-	// from Times, the shortest drawn where it holds more than one.
+	// Failing holds how long each recorded whole build that a guilty head failed took, push to
+	// answered as in Times, by the head. A whole build of a tree that holds such a head takes one
+	// of its times in place of one from Times.
 	Failing map[queue.SHA][]time.Duration
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
@@ -712,15 +712,14 @@ func (s *Sim) push(b queue.Build) {
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
 	}
-	if len(s.shape.Times) > 0 && b.Kind != queue.Probe {
-		d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
-		if b.Kind == queue.Check && s.shape.Whole > 0 {
-			d = s.shape.Whole
-		}
-	}
 	if b.Kind != queue.Probe {
 		if fails, ok := s.failing(b.SHA); ok {
 			d = fails
+		} else if len(s.shape.Times) > 0 {
+			d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
+			if b.Kind == queue.Check && s.shape.Whole > 0 {
+				d = s.shape.Whole
+			}
 		}
 	}
 
@@ -747,19 +746,29 @@ func (s *Sim) push(b queue.Build) {
 	s.builds[b.SHA] = sb
 }
 
-// failing is how long a whole build of this tree takes to fail by the recorded times of the
-// guilty heads it holds, where it holds one the record timed.
+// failing is how long a whole build of this tree takes to fail by the recorded failing times of
+// the guilty heads it holds, where it holds one the record timed. It takes one draw in place of
+// the shared sample's, the shortest of the times it picks where the tree holds more than one.
+// It leaves two things as they were: where two guilty heads failed in the same recorded build,
+// that build's time is each of theirs, and a failing time runs from push to answered.
 func (s *Sim) failing(sha queue.SHA) (time.Duration, bool) {
-	var d time.Duration
-	found := false
+	if len(s.shape.Failing) == 0 {
+		return 0, false
+	}
+	var timed [][]time.Duration
 	for _, n := range slices.Sorted(maps.Keys(s.holds[sha])) {
-		if p, times := s.prs[n], s.shape.Failing[s.prs[n].Head]; p.breaks && len(times) > 0 {
-			if fails := times[s.rng.Intn(len(times))]; !found || fails < d {
-				d, found = fails, true
-			}
+		if times := s.shape.Failing[s.prs[n].Head]; s.prs[n].breaks && len(times) > 0 {
+			timed = append(timed, times)
 		}
 	}
-	return d, found
+	if len(timed) == 0 {
+		return 0, false
+	}
+	d, draw := never, s.rng.Int63()
+	for _, times := range timed {
+		d = min(d, times[draw%int64(len(times))])
+	}
+	return d, true
 }
 
 // pickup is how long after its push the CI takes a build up: one to ten seconds, by the commit
