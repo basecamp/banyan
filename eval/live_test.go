@@ -517,8 +517,9 @@ func TestLiveSplitsALanding(t *testing.T) {
 		{World: queue.World{Now: at(33), Trunk: "last", Builds: []queue.Build{confirmed}}},
 	}
 	dir := writeLive(t, recs)
-	parts, skipped := splitLive(recs, []liveLanding{{at: at(32), ready: at(-10), sha: "last"}}, liveOptions{})
-	want := []landingParts{{added: 30, build: 10, toLand: 2, total: 42}}
+	landing := liveLanding{at: at(32), ready: at(-10), sha: "last"}
+	parts, skipped := splitLive(recs, []liveLanding{landing}, liveOptions{})
+	want := []landingParts{{added: 30, build: 10, toLand: 2, total: 42, landing: landing}}
 	if !reflect.DeepEqual(parts, want) || skipped != 0 {
 		t.Fatalf("parts=%+v skipped=%d, want %+v and zero", parts, skipped, want)
 	}
