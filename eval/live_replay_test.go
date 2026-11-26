@@ -937,55 +937,171 @@ func heldGuilty(w window, n int, head queue.SHA) bool {
 	return slices.ContainsFunc(w.acts, func(a Act) bool { return a.Do == "head" && a.Number == n && a.Head == head && a.Breaks })
 }
 
-func TestReplayHoldsGuiltyAHeadThatFailedTwiceNeverPassedAndLeft(t *testing.T) {
-	_, w, _ := replayWindow(t, breakersDay(), 60)
-	if !heldGuilty(w, 3, "d") || heldGuilty(w, 3, "fix") || heldGuilty(w, 1, "b") {
-		t.Fatalf("guilt: d %v, fix %v, b %v", heldGuilty(w, 3, "d"), heldGuilty(w, 3, "fix"), heldGuilty(w, 1, "b"))
+// plannedDay runs the planner tick by tick from replayStart against the simulated CI, and keeps
+// every pass as the live queue records it. change acts on the world before each tick.
+func plannedDay(shape Shape, cfg queue.Config, minutes int, change func(*Sim)) []queue.Recording {
+	s := NewSim(shape, cfg, 1)
+	s.epoch = replayStart
+	var recs []queue.Recording
+	s.plan = func(w queue.World, c queue.Config) []queue.Action {
+		rec := queue.Record(w, c)
+		recs = append(recs, *rec)
+		return rec.Actions
 	}
-	if w.unblamedRedCandidates != 0 || w.candidatesWithoutCulprit != 2 || w.flake != 0 {
+	for s.now < time.Duration(minutes)*time.Minute {
+		change(s)
+		s.Step()
+	}
+	return recs
+}
+
+// movesHead has the author of a pull request push a new head at a time; the builds of its old
+// head fail while they stand, and the new one breaks nothing.
+func movesHead(n int, head queue.SHA, at time.Duration) func(*Sim) {
+	return func(s *Sim) {
+		switch p := s.prs[n]; {
+		case s.now == at:
+			p.Head = head
+			s.byHead[head] = n
+		case s.now == at+tick:
+			p.breaks = false
+		}
+	}
+}
+
+func threeQueued(breaks ...int) Shape {
+	shape := Shape{Build: 10 * time.Minute, Probe: 4 * time.Minute}
+	for n := 1; n <= 3; n++ {
+		shape.Queue = append(shape.Queue, Queued{At: tick, Number: n, Breaks: slices.Contains(breaks, n)})
+	}
+	return shape
+}
+
+// guiltDay is the planner's own day: #3 breaks the build of #1, #2 and #3, the round on the
+// red candidate fails it again, and its author pushes a new head before the fair test that
+// would eject it ends.
+func guiltDay() []queue.Recording {
+	return plannedDay(threeQueued(3), dials(1, 3, false), 70, movesHead(3, "fix3", 32*time.Minute))
+}
+
+// readAt is the record read at that time with a pass of its planner.
+func readAt(recs []queue.Recording, minutes int) *queue.Recording {
+	for i := range recs {
+		if recs[i].World.Now.Equal(replayStart.Add(time.Duration(minutes) * time.Minute)) {
+			return &recs[i]
+		}
+	}
+	panic(fmt.Sprintf("no record at %dm", minutes))
+}
+
+// holdingHead3 is a build of #1, #2 and #3's breaking head on the trunk it opened on.
+func holdingHead3(recs []queue.Recording, sha queue.SHA, kind queue.Kind, v queue.Verdict) queue.Build {
+	chain := slices.Clone(readAt(recs, 12).World.Builds[0].Chain)
+	return queue.Build{SHA: sha, Kind: kind, Base: recs[0].World.Trunk, Chain: chain, Verdict: v}
+}
+
+func TestReplayHoldsGuiltyAHeadThatFailedTwiceNeverPassedAndLeft(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	if !heldGuilty(w, 3, "head3") || heldGuilty(w, 3, "fix3") || heldGuilty(w, 1, "head1") || heldGuilty(w, 2, "head2") {
+		t.Fatalf("guilt: head3 %v, fix3 %v", heldGuilty(w, 3, "head3"), heldGuilty(w, 3, "fix3"))
+	}
+	if w.unblamedRedCandidates != 0 || w.candidatesWithoutCulprit != 3 || w.flake != 0 {
 		t.Fatalf("unblamed red candidates %d of %d, flake %g", w.unblamedRedCandidates, w.candidatesWithoutCulprit, w.flake)
 	}
 }
 
-func TestReplayHoldsNoHeadGuiltyThatTheRecordClears(t *testing.T) {
+func TestReplayHoldsNoHeadGuiltyWithoutEvidenceAgainstIt(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		change func(recs []queue.Recording)
+		name string
+		day  func() []queue.Recording
 	}{
-		{"a whole build passed it", func(recs []queue.Recording) {
-			recs[4].World.Builds = append(recs[4].World.Builds, queue.Build{SHA: "C", Kind: queue.Check, Base: "A", Verdict: queue.Success, Chain: []queue.Member{{Number: 3, Head: "d", Merge: "C"}}})
+		{"a candidate holding it passed", func() []queue.Recording {
+			recs := guiltDay()
+			r := readAt(recs, 30)
+			r.World.Builds = append(r.World.Builds, holdingHead3(recs, "green", queue.Candidate, queue.Success))
+			return recs
 		}},
-		{"it failed once", func(recs []queue.Recording) {
-			recs[3].Actions, recs[4].World.Builds = nil, nil
+		{"a check holding it passed", func() []queue.Recording {
+			recs := guiltDay()
+			r := readAt(recs, 30)
+			r.World.Builds = append(r.World.Builds, holdingHead3(recs, "green", queue.Check, queue.Success))
+			return recs
 		}},
-		{"it failed once and in a probe", func(recs []queue.Recording) {
-			recs[3].Actions = nil
-			recs[4].World.Builds = []queue.Build{{SHA: "P", Kind: queue.Probe, Base: "A", Verdict: queue.Failure, Chain: []queue.Member{{Number: 3, Head: "d", Merge: "P"}}}}
+		{"a probe holding it passed", func() []queue.Recording {
+			recs := guiltDay()
+			r := readAt(recs, 30)
+			r.World.Builds = append(r.World.Builds, holdingHead3(recs, "green", queue.Probe, queue.Success))
+			return recs
 		}},
-		{"an ejected culprit failed beside it", func(recs []queue.Recording) {
-			for _, r := range recs[3:5] {
-				r.World.Builds[0].Chain = append([]queue.Member{{Number: 4, Head: "e", Merge: "m4"}}, r.World.Builds[0].Chain...)
+		{"it failed once", func() []queue.Recording {
+			return plannedDay(threeQueued(3), dials(1, 3, false), 70, movesHead(3, "fix3", 12*time.Minute))
+		}},
+		{"its second failure was a probe", func() []queue.Recording {
+			return plannedDay(threeQueued(3), dials(1, 3, true), 70, movesHead(3, "fix3", 20*time.Minute))
+		}},
+		{"an ejected culprit failed beside it", func() []queue.Recording {
+			return plannedDay(threeQueued(2, 3), dials(1, 3, false), 90, movesHead(3, "fix3", 42*time.Minute))
+		}},
+		{"its landing was confirmed", func() []queue.Recording {
+			recs := guiltDay()
+			for i, a := range readAt(recs, 32).Actions {
+				if a.Do == "land" {
+					readAt(recs, 32).Actions[i].Members = append(slices.Clone(a.Members), queue.Member{Number: 3, Head: "head3"})
+				}
 			}
-			recs[4].Actions = []queue.Action{{Do: "eject", PR: 4, Cause: "culprit", Evidence: []queue.SHA{"F1", "F2"}}}
+			return recs
 		}},
-		{"it landed", func(recs []queue.Recording) {
-			recs[4].Actions = []queue.Action{{Do: "land", SHA: "L", Members: []queue.Member{{Number: 3, Head: "d"}}}}
-			recs[5].World.Trunk = "L"
+		{"it was still queued at the last record", func() []queue.Recording {
+			return plannedDay(threeQueued(3), dials(1, 3, false), 32, movesHead(3, "fix3", 32*time.Minute))
 		}},
-		{"it was still queued at the last record", func(recs []queue.Recording) {
-			for i := 5; i < len(recs); i++ {
-				recs[i].World.PRs = recs[4].World.PRs
+		{"the trunk was read red beside its failures", innocentPassengerDay},
+		{"a build that failed it was read green first", func() []queue.Recording {
+			recs := guiltDay()
+			for i, b := range readAt(recs, 30).World.Builds {
+				if b.Kind == queue.Check && len(b.Chain) == 3 && b.Round == 2 {
+					readAt(recs, 30).World.Builds[i].Verdict = queue.Success
+				}
 			}
+			return recs
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			recs := breakersDay()
-			tc.change(recs)
-			_, w, _ := replayWindow(t, recs, 60)
-			if heldGuilty(w, 3, "d") {
-				t.Fatal("head d held guilty")
+			_, w, _ := replayWindow(t, tc.day(), 100)
+			if heldGuilty(w, 3, "head3") {
+				t.Fatal("head3 held guilty")
 			}
 		})
+	}
+}
+
+func TestReplayHoldsGuiltyAHeadWhoseTrunkFailedOnlyBesideAPassingPrefix(t *testing.T) {
+	recs := guiltDay()
+	for _, rec := range recs {
+		for i, b := range rec.World.Builds {
+			if len(b.Chain) == 0 && b.Round == 1 && b.Verdict == queue.Success {
+				rec.World.Builds[i].Verdict = queue.Failure
+			}
+		}
+	}
+	_, w, _ := replayWindow(t, recs, 100)
+	if !heldGuilty(w, 3, "head3") {
+		t.Fatal("head3 not held guilty where the round that failed the trunk passed #1")
+	}
+}
+
+// innocentPassengerDay has the trunk fail by itself for its first 25 minutes, so the candidate
+// of #1, #2 and #3 and its round fail, and the round's build of the trunk alone with them, until
+// #3's author pushes a new head; none of the three breaks anything.
+func innocentPassengerDay() []queue.Recording {
+	shape := threeQueued()
+	shape.Episodes = []Episode{{At: 0, For: 25 * time.Minute}}
+	return plannedDay(shape, dials(1, 3, false), 70, movesHead(3, "fix3", 32*time.Minute))
+}
+
+func TestReplayInnocentPassengersRedsStayUnblamed(t *testing.T) {
+	_, w, _ := replayWindow(t, innocentPassengerDay(), 80)
+	if heldGuilty(w, 3, "head3") || w.unblamedRedCandidates != 1 || w.candidatesWithoutCulprit != 2 {
+		t.Fatalf("guilty %v, unblamed red candidates %d of %d", heldGuilty(w, 3, "head3"), w.unblamedRedCandidates, w.candidatesWithoutCulprit)
 	}
 }
 
