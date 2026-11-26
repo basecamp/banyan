@@ -18,7 +18,7 @@ def backlog_judged: (.backlog_longest_minutes // 0) >= 60;
 def busiest_row($target; $day):
   "| Landings in the busiest hour | \(if .busiest_hour_landings == null or .backlog_longest_minutes == null then "not measured"
     elif ($day | not) then "\(.busiest_hour_landings), not judged outside the day's window (the longest backlog stood \(.backlog_longest_minutes | floor) min)"
-    elif backlog_judged then "\(.busiest_hour_landings)\(if $target == null then ", with no target for this queue" else " against a target of \($target)" end), a backlog standing for \(.backlog_longest_minutes | floor) min"
+    elif backlog_judged then "\(.busiest_hour_landings)\(if $target == null then ", with no target for this queue" else " against a target of \($target)" end), judged: a backlog stood for \(.backlog_longest_minutes | floor) min that day"
     else "\(.busiest_hour_landings), not judged: no backlog stood for an hour (the longest stood \(.backlog_longest_minutes | floor) min)" end) |";
 def thrown_row: "| Passing candidates thrown away unlanded | \(if .passing_candidates_thrown_away == null then "not measured" elif .passing_candidates_thrown_away == 0 then "none" else "\(.passing_candidates_thrown_away): \(.thrown_away_head_moved) with a member's head moved, \(.thrown_away_member_left) with a member gone from the queue" end) |";
 def takeouts_row:
@@ -37,7 +37,7 @@ def later_row:
 | busiest_target($repo) as $target
 | ([ ($l.ready_gaps_over_90 | if . == null then "waits of a ready head were not measured" elif . > 0 then "\(.) wait(s) over 90 minutes of a ready head with no landing" else empty end),
      (if $repo == "basecamp/hey-native-apps" and ($l.landed // 0) > 0 then ($l.queue_added_p50_minutes | over(6; "minutes the queue adds at the median")) else empty end),
-     (if $target != null and $l.busiest_hour_landings != null and ($l | backlog_judged) and $l.busiest_hour_landings < $target then "\($l.busiest_hour_landings) landings in the busiest hour while a backlog stood, under \($target)" else empty end),
+     (if $target != null and $l.busiest_hour_landings != null and ($l | backlog_judged) and $l.busiest_hour_landings < $target then "\($l.busiest_hour_landings) landings in the busiest hour of a day a backlog stood an hour, under \($target)" else empty end),
      (if $repo == "basecamp/hey-native-apps" then ($l.passing_candidates_thrown_away | if . == null then "passing candidates thrown away were not measured" elif . > 3 then "\(.) passing candidates thrown away unlanded, over 3" else empty end) else empty end),
      ($l.wrong_ejections | if . == null then "wrong ejections were not measured" elif . > 0 then "\(.) wrong ejection(s)" else empty end),
      (if $unjudged > 0 then "\($unjudged) landing(s) after an ejection could not be checked for a wrong one" else empty end),
