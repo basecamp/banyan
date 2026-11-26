@@ -162,3 +162,16 @@ func TestDailyRowTripsOverThreePassingCandidatesThrownAwayInHeyNativeApps(t *tes
 		}
 	}
 }
+
+func TestDailyRowHoldsNoLimitOnBuildsPerLanding(t *testing.T) {
+	for _, repo := range []string{"basecamp/hey-native-apps", "basecamp/hey2"} {
+		dir := standIns(t)
+		if status, _ := dailyRowOf(t, dir, repo, "COMMIT="+strings.Repeat("a", 40), `LIVE=,"builds_per_landing":2.5,"passing_candidates_thrown_away":0,"ready_gaps_over_90":0,"queue_added_p50_minutes":1,"wrong_ejections":0`); status != 0 {
+			t.Fatalf("status %d", status)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "state", filepath.Base(repo), "rows", "2026-11-18.md"))
+		if row := string(data); !strings.Contains(row, "| Builds per landing | 2.5 |\n") || !strings.Contains(row, "No tripwire breached") {
+			t.Fatalf("%s reads:\n%s", repo, row)
+		}
+	}
+}

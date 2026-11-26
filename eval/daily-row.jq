@@ -16,7 +16,6 @@ def over($limit; $what): if . == null then "\($what) was not measured" elif . > 
 | (($l.unchecked // 0) + ($l.unreadable // 0)) as $unjudged
 | ([ ($l.ready_gaps_over_90 | if . == null then "waits of a ready head were not measured" elif . > 0 then "\(.) wait(s) over 90 minutes of a ready head with no landing" else empty end),
      (if $repo == "basecamp/hey-native-apps" and ($l.landed // 0) > 0 then ($l.queue_added_p50_minutes | over(6; "minutes the queue adds at the median")) else empty end),
-     (if ($l.landed // 0) > 0 then ($l.builds_per_landing | over(if $repo == "basecamp/hey2" then 1.3 else 0.60 end; "builds per landing")) else empty end),
      (if $repo == "basecamp/hey-native-apps" then ($l.passing_candidates_thrown_away | if . == null then "passing candidates thrown away were not measured" elif . > 3 then "\(.) passing candidates thrown away unlanded, over 3" else empty end) else empty end),
      ($l.wrong_ejections | if . == null then "wrong ejections were not measured" elif . > 0 then "\(.) wrong ejection(s)" else empty end),
      (if $unjudged > 0 then "\($unjudged) landing(s) after an ejection could not be checked for a wrong one" else empty end),
