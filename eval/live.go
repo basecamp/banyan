@@ -92,6 +92,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		unconfirmed  = map[queue.SHA]bool{}
 		took         = map[queue.Kind][]float64{}
 		timed        = map[queue.Kind][]timedBuild{}   // took, less the builds whose verdict was first read after an unrecorded stretch
+		failedBefore []timedBuild                      // the failed whole builds answered before the window, timed as timed is
 		verdicts     = map[queue.SHA][]queue.Verdict{} // each tree's whole builds, by the prefix they test
 		good         = map[queue.SHA]bool{}            // the trees a whole build passed, each prefix of its chain among them
 		waits        []time.Duration
@@ -170,14 +171,18 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				answerAt, pushedAt = b.Landed, firstPush[b.SHA]
 			}
 			answered[b.SHA] = answerAt
+			kept := (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch
+			timing := timedBuild{b.SHA, b.Verdict == queue.Failure, time.Duration(answerAt.Sub(pushedAt).Minutes() * float64(time.Minute)), answerAt}
 			if opts.contains(answerAt) {
 				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
-				if (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch {
-					timed[b.Kind] = append(timed[b.Kind], timedBuild{b.SHA, b.Verdict == queue.Failure, time.Duration(answerAt.Sub(pushedAt).Minutes() * float64(time.Minute))})
+				if kept {
+					timed[b.Kind] = append(timed[b.Kind], timing)
 				}
 				if b.Kind == queue.Candidate {
 					candidates[b.SHA] = b
 				}
+			} else if kept && timing.failed && b.Kind != queue.Probe && opts.from != nil && answerAt.Before(*opts.from) {
+				failedBefore = append(failedBefore, timing)
 			}
 			if b.Kind != queue.Probe {
 				if opts.contains(answerAt) {
@@ -329,7 +334,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	if opts.from != nil && opts.to != nil {
 		win.stop = opts.to.Sub(*opts.from)
-		win.timed = append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...)
+		win.timed, win.failedBefore = append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...), failedBefore
 		win.probe = win.build
 		if len(took[queue.Probe]) > 0 {
 			win.probe = time.Duration(percentile(took[queue.Probe], 50) * float64(time.Minute))
@@ -429,8 +434,9 @@ const unrecordedStretch = 30 * time.Minute
 type window struct {
 	arrivals                                        []time.Duration
 	timed                                           []timedBuild                  // a bounded window's whole builds whose time the record holds
+	failedBefore                                    []timedBuild                  // the same of the failed ones answered before it
 	times                                           []time.Duration               // the same, each as long as it took, less those a guilty head failed
-	failing                                         map[queue.SHA][]time.Duration // each guilty head's failed builds among them, each as long as it took
+	failing                                         map[queue.SHA][]time.Duration // each guilty head's failed builds among both, answered from the replay's opening record on, each as long as it took
 	acts                                            []Act
 	unblamedRedCandidates, candidatesWithoutCulprit int
 	opening, left, withdrawn, settings              int
@@ -446,11 +452,13 @@ type window struct {
 	cfg                                             queue.Config
 }
 
-// timedBuild is a whole build whose time the record holds, and whether it failed.
+// timedBuild is a whole build whose time the record holds, whether it failed, and when it was
+// answered.
 type timedBuild struct {
-	sha    queue.SHA
-	failed bool
-	took   time.Duration
+	sha      queue.SHA
+	failed   bool
+	took     time.Duration
+	answered time.Time
 }
 
 // perturb changes only the replay's build times or recorded settings.

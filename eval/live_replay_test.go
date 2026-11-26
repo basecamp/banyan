@@ -1413,6 +1413,37 @@ func withTimes(shared []time.Duration, failing map[queue.SHA][]time.Duration) fu
 
 var twoShared = []time.Duration{5 * time.Minute, 17 * time.Minute}
 
+// leadInGuiltDay is a replay of the planner's own day on which #3 breaks the build of #1, #2 and
+// #3 twice, in 6 and then 8 minutes, the round between them passing in 4, and its author pushes
+// a clean head at 22m. Every later build takes 30, and the window opens at 30m.
+func leadInGuiltDay(t *testing.T) window {
+	shape := threeQueued(3)
+	shape.Takes = slices.Repeat([]time.Duration{30 * time.Minute}, 40)
+	shape.Takes[0], shape.Takes[1], shape.Takes[2], shape.Takes[3] = 6*time.Minute, 4*time.Minute, 4*time.Minute, 8*time.Minute
+	recs := plannedDay(shape, dials(1, 3, false), 150, func(s *Sim) {
+		if p := s.prs[3]; s.now == 22*time.Minute {
+			p.Head, p.breaks = "fix3", false
+			s.byHead[p.Head] = 3
+		}
+	})
+	_, w, _ := recordedWindow(t, recs, replayStart.Add(30*time.Minute), replayStart.Add(150*time.Minute))
+	return w
+}
+
+func TestReplayGuiltyHeadFailsInTheTimesItFailedInTheLeadIn(t *testing.T) {
+	w := leadInGuiltDay(t)
+	failing := slices.Sorted(slices.Values(w.failing["head3"]))
+	if !heldGuilty(w, 3, "head3") || !slices.Equal(failing, []time.Duration{6 * time.Minute, 8 * time.Minute}) || len(w.failing) != 1 {
+		t.Fatalf("guilty %v, failing times %v", heldGuilty(w, 3, "head3"), w.failing)
+	}
+	if !slices.Equal(w.times, []time.Duration{30 * time.Minute, 30 * time.Minute}) {
+		t.Fatalf("shared sample %v, want the window's two builds of 30m", w.times)
+	}
+	if s, sha := firstTreeHolding(t, w, 3, func(*Shape) {}); s.now >= 0 || !slices.Contains(failing, s.builds[sha].end-s.now) {
+		t.Fatalf("the tree #3 breaks, pushed at %v, took %v, want one of %v", s.now, s.builds[sha].end-s.now, failing)
+	}
+}
+
 func TestReplayGuiltyHeadFailsInItsOwnRecordedTime(t *testing.T) {
 	_, w, _ := replayWindow(t, guiltDay(), 80)
 	s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": {3 * time.Minute}}))

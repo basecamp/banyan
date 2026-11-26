@@ -66,7 +66,26 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	for k := range left {
 		broken[k] = true
 	}
+	firstIndex, windowIndex := 0, 0
+	for i, r := range recs {
+		if r.World.Now.After(start) {
+			break
+		}
+		if windowIndex = i; !r.World.Now.After(start.Add(-leadIn)) {
+			firstIndex = i
+		}
+	}
 	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
+	for _, b := range w.failedBefore {
+		if b.answered.Before(recs[firstIndex].World.Now) {
+			continue
+		}
+		for _, m := range builds[b.sha].Chain {
+			if broken[headKey{m.Number, m.Head}] {
+				w.failing[m.Head] = append(w.failing[m.Head], b.took)
+			}
+		}
+	}
 	for _, b := range w.timed {
 		guilty := false
 		for _, m := range builds[b.sha].Chain {
@@ -95,15 +114,6 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	}
 	if w.candidatesWithoutCulprit > 0 {
 		w.flake = float64(w.unblamedRedCandidates) / float64(w.candidatesWithoutCulprit)
-	}
-	firstIndex, windowIndex := 0, 0
-	for i, r := range recs {
-		if r.World.Now.After(start) {
-			break
-		}
-		if windowIndex = i; !r.World.Now.After(start.Add(-leadIn)) {
-			firstIndex = i
-		}
 	}
 	answered := map[queue.SHA]bool{}
 	if clone != "" {
