@@ -39,7 +39,7 @@ func TestReplayQueueAddedIncludesWaitForReplacementAfterRed(t *testing.T) {
 		added    *float64
 	}{
 		{"whole window", 0, 80, 1, 1, number(40)},
-		{"opens during red build", 33, 80, 0, 0, nil},
+		{"opens during red build", 33, 80, 0, 1, nil},
 		{"landing after window", 0, 70, 0, 1, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1299,6 +1299,19 @@ func TestReplayTreeOfTwoGuiltyHeadsFailsInTheShorterTime(t *testing.T) {
 		if took := s.builds[sha].end - s.now; took != 3*time.Minute {
 			t.Fatalf("the tree #2 and #3 break took %v with %v, want the shorter 3m", took, failing)
 		}
+	}
+}
+
+func TestReplayBuildKeepsTheGuiltOfTheHeadsItWasPushedWith(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	s, sha := firstTreeHolding(t, w, 3, func(*Shape) {})
+	s.act(Act{At: s.now, Number: 3, Do: "head", Head: "clean3"})
+	s.plan = func(queue.World, queue.Config) []queue.Action { return nil }
+	for s.now < s.builds[sha].end {
+		s.Step()
+	}
+	if b := s.builds[sha]; b.Verdict != queue.Failure || b.flake || b.errored || s.Red != 1 {
+		t.Fatalf("the tree pushed with head3 read %d after #3 moved to a clean head (flake %v, errored %v, red builds %d)", b.Verdict, b.flake, b.errored, s.Red)
 	}
 }
 

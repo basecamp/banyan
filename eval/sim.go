@@ -129,6 +129,7 @@ type simBuild struct {
 	lost       bool
 	flake      bool
 	errored    bool
+	guilty     bool // its tree, at the heads it was pushed with, fails for a pull request's own reason
 }
 
 // Sim is one simulated world: the repository, its CI and the hidden facts that decide
@@ -436,7 +437,7 @@ func (s *Sim) flakes() bool {
 func (s *Sim) verdict(b *simBuild) queue.Verdict {
 	tree := s.holds[b.SHA]
 	switch {
-	case s.red(b.SHA, tree, b.start), s.guilty(tree):
+	case s.red(b.SHA, tree, b.start), b.guilty:
 		return queue.Failure
 	case b.flake:
 		return queue.Failure
@@ -512,7 +513,7 @@ func (s *Sim) step(at time.Duration) {
 					s.RedPullRequests += len(b.Chain)
 				}
 			}
-			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
+			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), b.guilty, b.flake)
 		}
 	}
 	s.tick()
@@ -693,7 +694,7 @@ func (s *Sim) push(b queue.Build) {
 		return
 	}
 	s.seen[b.SHA] = true
-	d, flake := s.shape.Build, s.shape.Flake
+	d, flake, guilty := s.shape.Build, s.shape.Flake, s.guilty(s.holds[b.SHA])
 	if b.Kind == queue.Probe {
 		flake = s.shape.ProbeFlake
 		if s.shape.Probe > 0 {
@@ -706,7 +707,7 @@ func (s *Sim) push(b queue.Build) {
 	if s.shape.Spread > 0 {
 		d += time.Duration(float64(d) * s.shape.Spread * (2*s.rng.Float64() - 1))
 	}
-	if s.shape.Fails > 0 && b.Kind != queue.Probe && s.guilty(s.holds[b.SHA]) {
+	if s.shape.Fails > 0 && b.Kind != queue.Probe && guilty {
 		d = time.Duration(float64(d) * s.shape.Fails)
 	}
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
@@ -723,7 +724,7 @@ func (s *Sim) push(b queue.Build) {
 		}
 	}
 
-	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
+	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost), guilty: guilty}
 	s.Minutes += d.Minutes()
 	if s.pool != nil {
 		sb.end = never
@@ -738,7 +739,7 @@ func (s *Sim) push(b queue.Build) {
 	} else {
 		sb.flake = s.chance(flake)
 	}
-	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || s.guilty(s.holds[b.SHA])) {
+	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || guilty) {
 		sb.end, sb.flake = sb.end+s.shape.Rerun, sb.flake && !s.chance(s.shape.Rescued)
 		s.Minutes += s.shape.Rerun.Minutes()
 	}
