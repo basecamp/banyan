@@ -248,7 +248,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			} else {
 				delete(holding, p.Number)
 			}
-			if !exists || old.Queued != p.Queued || old.First != p.First || old.Head != p.Head && left[headKey{p.Number, old.Head}] {
+			if !exists || old.Queued != p.Queued || old.First != p.First || old.Head != p.Head && broken[headKey{p.Number, old.Head}] {
 				q := p.Queued.Sub(start)
 				add(p.Number, Act{Do: "label", First: p.First, Queued: &q})
 			}
@@ -320,9 +320,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 //
 // It takes no account of a red trunk, as no record yet holds a head that only a red trunk's
 // rounds failed. Two heads failing in the same builds are both held guilty; a head that fails
-// only beside another, or in most of its builds, is not. The record's queue never ejected
-// one, so the replay labels its pull request again at the next head the record queues it at, as
-// the replay's queue may have ejected it.
+// only beside another, or in most of its builds, is not. The replay labels the pull request of
+// any guilty head, these and those the record ejected, again at the next head the record queues
+// it at, as the replay's queue may have ejected it there.
 func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, green, red map[queue.SHA]bool, ejected map[headKey]bool, confirmed [][]queue.Member) map[headKey]bool {
 	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
 	for _, members := range confirmed {

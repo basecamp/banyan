@@ -1094,6 +1094,24 @@ func TestReplayLeavesAPullRequestTheRecordEjectedOutUntilItIsLabelledAgain(t *te
 	}
 }
 
+func TestReplayRequeuesAtItsNextHeadAPullRequestTheRecordEjectedAndLabelledAgain(t *testing.T) {
+	move := movesHead(3, "fix3", 56*time.Minute)
+	recs := plannedDay(threeQueued(3), dials(1, 3, false), 100, func(s *Sim) {
+		if p := s.prs[3]; s.now == 40*time.Minute {
+			p.queued, p.Queued = true, s.epoch.Add(s.now)
+		}
+		move(s)
+	})
+	_, w, _ := replayWindow(t, recs, 110)
+	if labels := labelled(w, 3); !heldGuilty(w, 3, "head3") || !slices.Equal(labels, []time.Duration{2 * time.Minute, 42 * time.Minute, 58 * time.Minute}) {
+		t.Fatalf("guilty %v, labelled at %v", heldGuilty(w, 3, "head3"), labels)
+	}
+	s := fastReplay(w)
+	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || p.at < 58*time.Minute {
+		t.Fatalf("#3 left for %q, landed %v at head %s at %v", s.Left[3], p.landed, p.Head, p.at)
+	}
+}
+
 // firstTreeHolding opens the replay, lets mark change the simulated queue, runs the planner's
 // first tick, and gives the first tree it pushed that holds this pull request.
 func firstTreeHolding(t *testing.T, w window, n int, change func(*Shape)) (*Sim, queue.SHA) {
