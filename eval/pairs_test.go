@@ -493,6 +493,18 @@ func TestReplayPairsKeepMainsHoldOnAHeadHeldAtTheOpening(t *testing.T) {
 	if !merges(s, onto(t, s, s.trunk, b.Number), q.Number) || merges(s, onto(t, s, s.trunk, a.Number), q.Number) {
 		t.Error("after its recorded hold, Q was not refused onto A alone")
 	}
+	cleared := replayTick(-10, a, b, q, r)
+	failsOnto(&cleared, q, a)
+	recs = []queue.Recording{cleared, replayTick(-5, a, b, q, r), replayTick(0, a, b, q, r), replayTick(10, a, b, q, r)}
+	_, w, _ = pairWindow(t, recs, 60, g.dir)
+	_, recorded, _ = pairWindow(t, recs, 60, "")
+	if heldActs(w, q.Number) != 1 || len(heldActsOf(w, q.Number)) != 2 || !reflect.DeepEqual(heldActsOf(w, q.Number), heldActsOf(recorded, q.Number)) || w.ignoredHolds != 0 {
+		t.Fatalf("a hold at the opening cleared before the window: Q's hold acts %v, want main's %v; %d unattributed", heldActsOf(w, q.Number), heldActsOf(recorded, q.Number), w.ignoredHolds)
+	}
+	s = pairSim(w, 0)
+	if !merges(s, s.trunk, q.Number) || !merges(s, onto(t, s, s.trunk, b.Number), q.Number) || merges(s, onto(t, s, s.trunk, a.Number), q.Number) {
+		t.Error("after its hold cleared before the window, Q was not refused onto A alone")
+	}
 }
 
 func TestReplayPairsAnswerAHeadFirstHeldInTheLeadInFromGit(t *testing.T) {
@@ -507,6 +519,10 @@ func TestReplayPairsAnswerAHeadFirstHeldInTheLeadInFromGit(t *testing.T) {
 	_, recorded, _ := pairWindow(t, recs, 60, "")
 	if heldActs(recorded, q.Number) != 1 || heldActs(w, q.Number) != 0 || w.ignoredHolds != 0 {
 		t.Fatalf("Q's hold acts %d, recorded %d, unattributed holds %d", heldActs(w, q.Number), heldActs(recorded, q.Number), w.ignoredHolds)
+	}
+	s := pairSim(w, -5*time.Minute)
+	if !merges(s, s.trunk, q.Number) || merges(s, onto(t, s, s.trunk, a.Number), q.Number) {
+		t.Error("Q, first held in the lead-in, was not refused onto A alone")
 	}
 }
 

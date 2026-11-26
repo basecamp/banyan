@@ -17,33 +17,36 @@ func TestReplayQueueAddedIncludesWaitForReplacementAfterRed(t *testing.T) {
 	p, q := replayPR(1), replayPR(2)
 	next := p
 	next.Head, next.Checks = "replacement", queue.Pending
-	red := queue.Build{SHA: "red", Pushed: replayStart, Chain: []queue.Member{{Number: 1, Head: p.Head, Merge: "p"}, {Number: 2, Head: q.Head, Merge: "red"}}}
 	green := queue.Build{SHA: "green", Pushed: replayStart.Add(40 * time.Minute), Verdict: queue.Success, Chain: []queue.Member{{Number: 2, Head: q.Head, Merge: "green"}}}
-	recs := []queue.Recording{replayTick(0, p, q), replayTick(32, p, q), replayTick(40, next, q), replayTick(72, next, q), replayTick(73, next)}
-	for i := range recs {
-		recs[i].Config = dials(1, 2, true)
+	day := func(redAt int) []queue.Recording {
+		red := queue.Build{SHA: "red", Pushed: replayStart, Chain: []queue.Member{{Number: 1, Head: p.Head, Merge: "p"}, {Number: 2, Head: q.Head, Merge: "red"}}}
+		recs := []queue.Recording{replayTick(0, p, q), replayTick(redAt, p, q), replayTick(40, next, q), replayTick(72, next, q), replayTick(73, next)}
+		for i := range recs {
+			recs[i].Config = dials(1, 2, true)
+		}
+		recs[0].Actions = []queue.Action{{Do: "push", Build: red}}
+		red.Verdict = queue.Failure
+		recs[1].World.Builds = []queue.Build{red}
+		recs[1].Actions = []queue.Action{{Do: "eject", PR: p.Number, Cause: "culprit", Evidence: []queue.SHA{red.SHA}}}
+		recs[2].Actions = []queue.Action{{Do: "push", Build: green}}
+		recs[3].World.Builds = []queue.Build{green}
+		recs[3].Actions = []queue.Action{{Do: "land", SHA: green.SHA, Members: green.Chain}}
+		recs[4].World.Trunk = green.SHA
+		return recs
 	}
-	recs[0].Actions = []queue.Action{{Do: "push", Build: red}}
-	red.Verdict = queue.Failure
-	recs[1].World.Builds = []queue.Build{red}
-	recs[1].Actions = []queue.Action{{Do: "eject", PR: p.Number, Cause: "culprit", Evidence: []queue.SHA{red.SHA}}}
-	recs[2].Actions = []queue.Action{{Do: "push", Build: green}}
-	recs[3].World.Builds = []queue.Build{green}
-	recs[3].Actions = []queue.Action{{Do: "land", SHA: green.SHA, Members: green.Chain}}
-	recs[4].World.Trunk = green.SHA
 	for _, tc := range []struct {
-		name     string
-		from, to int
-		landed   float64
-		red      float64
-		added    *float64
+		name            string
+		redAt, from, to int
+		landed          float64
+		red             float64
+		added           *float64
 	}{
-		{"whole window", 0, 80, 1, 1, number(40)},
-		{"opens after the red build was answered", 33, 80, 1, 0, number(40)},
-		{"landing after window", 0, 70, 0, 1, nil},
+		{"whole window", 32, 0, 80, 1, 1, number(40)},
+		{"opens after a red build shorter than the green one was answered", 10, 20, 80, 1, 0, number(40)},
+		{"landing after window", 32, 0, 70, 0, 1, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			was, w, row := recordedWindow(t, recs, replayStart.Add(time.Duration(tc.from)*time.Minute), replayStart.Add(time.Duration(tc.to)*time.Minute))
+			was, w, row := recordedWindow(t, day(tc.redAt), replayStart.Add(time.Duration(tc.from)*time.Minute), replayStart.Add(time.Duration(tc.to)*time.Minute))
 			_, sim := w.simulate(Shape{}, was)
 			if *sim.Landed != tc.landed || sim.InvariantFailures != 0 {
 				t.Fatalf("landings %v, invariant failures %d", *sim.Landed, sim.InvariantFailures)
@@ -54,7 +57,7 @@ func TestReplayQueueAddedIncludesWaitForReplacementAfterRed(t *testing.T) {
 			if sim.RedCandidates != tc.red || sim.RedPullRequests != 2*tc.red {
 				t.Errorf("red candidates=%v pull requests=%v, want %v / %v", sim.RedCandidates, sim.RedPullRequests, tc.red, 2*tc.red)
 			}
-			if tc.from == 0 && (!reflect.DeepEqual(sim.QueueAddedP90Minutes, row.QueueAddedP90Minutes) || sim.QueueAddedOver30 != float64(row.QueueAddedOver30) || sim.RedCandidates != float64(row.RedCandidates) || sim.RedPullRequests != float64(row.RedPullRequests)) {
+			if *sim.Landed != float64(row.Landed) || (!reflect.DeepEqual(sim.QueueAddedP90Minutes, row.QueueAddedP90Minutes) || sim.QueueAddedOver30 != float64(row.QueueAddedOver30) || sim.RedCandidates != float64(row.RedCandidates) || sim.RedPullRequests != float64(row.RedPullRequests)) {
 				t.Error("simulated measures differ from the recorded clocks")
 			}
 		})
@@ -300,13 +303,15 @@ func TestReplayFirstRecordFailedMergePushesNoBuild(t *testing.T) {
 	}
 }
 func TestReplayOpensFourHoursBeforeTheWindowOrAtTheFirstRecord(t *testing.T) {
-	p, q := replayPR(1), replayPR(2)
+	p, q, gone := replayPR(1), replayPR(2), replayPR(4)
+	p.Queued = replayStart.Add(-400 * time.Minute)
 	for _, tc := range []struct {
 		name                 string
 		recs                 []queue.Recording
 		opens, first, second time.Duration
 	}{
 		{"a record before the lead-in", []queue.Recording{replayTick(-360, p), replayTick(-180, p, q), replayTick(0, p, q)}, -4 * time.Hour, -4 * time.Hour, -3 * time.Hour},
+		{"two records before the lead-in", []queue.Recording{replayTick(-360, p, gone), replayTick(-300, p), replayTick(-180, p, q), replayTick(0, p, q)}, -4 * time.Hour, -4 * time.Hour, -3 * time.Hour},
 		{"the first record within it", []queue.Recording{replayTick(-120, p), replayTick(-60, p, q), replayTick(0, p, q)}, -2 * time.Hour, -2 * time.Hour, -time.Hour},
 		{"no record before the window", []queue.Recording{replayTick(3, p), replayTick(5, p, q)}, 0, 3 * time.Minute, 5 * time.Minute},
 	} {
@@ -317,6 +322,15 @@ func TestReplayOpensFourHoursBeforeTheWindowOrAtTheFirstRecord(t *testing.T) {
 			}
 			if label := labelled(w, 2); !slices.Equal(label, []time.Duration{tc.second}) {
 				t.Fatalf("#2 labelled at %v, want %v", label, tc.second)
+			}
+			if kinds := replayKinds(w, gone.Number); len(kinds) != 0 {
+				t.Fatalf("#4, gone by the last record before the lead-in, has acts %v", kinds)
+			}
+			s := NewSim(replayShape(w), w.cfg, 1)
+			s.now = tc.first
+			s.play()
+			if o := s.prs[1]; o.arrived != -400*time.Minute || !o.Queued.Equal(s.epoch.Add(-400*time.Minute)) || o.ready != -400*time.Minute {
+				t.Fatalf("#1 opened arrived at %v, queued at %v, ready at %v, want its recorded -6h40m", o.arrived, o.Queued.Sub(s.epoch), o.ready)
 			}
 		})
 	}
@@ -340,6 +354,22 @@ func TestReplayLandsACandidateBuildingAtTheWindowsStartWhenTheRecordDoes(t *test
 	if _, sim := w.simulate(Shape{}, Score{}); *sim.Landed != float64(row.Landed) || sim.WholeBuilds != float64(row.WholeBuilds) || sim.WholeBuilds != 0 {
 		t.Fatalf("landed %v of %d, whole builds %v of %d", *sim.Landed, row.Landed, sim.WholeBuilds, row.WholeBuilds)
 	}
+	shape := threeQueued()
+	shape.Queue = append(shape.Queue, Queued{At: 14 * time.Minute, Number: 4})
+	recs := plannedDay(shape, dials(1, 3, false), 60, func(*Sim) {})
+	_, w, row = recordedWindow(t, recs, replayStart.Add(12*time.Minute), replayStart.Add(60*time.Minute))
+	s = runReplay(w)
+	for n, at := range map[int]time.Duration{1: 0, 2: 0, 3: 0, 4: 12 * time.Minute} {
+		if p := s.prs[n]; !p.landed || p.at != at {
+			t.Fatalf("#%d landed %v at %v, want at %v as recorded", n, p.landed, p.at, at)
+		}
+	}
+	if !slices.Equal(s.Lands, []time.Duration{0, 0, 0, 12 * time.Minute}) || s.LastLand != 12*time.Minute {
+		t.Fatalf("counted landings at %v, the last at %v", s.Lands, s.LastLand)
+	}
+	if _, sim := w.simulate(Shape{}, Score{}); *sim.Landed != float64(row.Landed) || row.Landed != 4 || sim.WholeBuilds != float64(row.WholeBuilds) || sim.WholeBuilds != 1 {
+		t.Fatalf("landed %v of %d, whole builds %v of %d", *sim.Landed, row.Landed, sim.WholeBuilds, row.WholeBuilds)
+	}
 }
 
 func TestReplayCountsTheWaitOfAPullRequestReadyBeforeTheWindowFromItsOwnReadyClock(t *testing.T) {
@@ -351,22 +381,65 @@ func TestReplayCountsTheWaitOfAPullRequestReadyBeforeTheWindowFromItsOwnReadyClo
 	if _, sim := w.simulate(Shape{}, Score{}); *sim.WaitP50Minutes != *row.WaitP50Minutes || *row.WaitP50Minutes != 10 {
 		t.Fatalf("simulated wait %v, live %v", *sim.WaitP50Minutes, *row.WaitP50Minutes)
 	}
+	readyAt := map[int]time.Duration{1: -12 * time.Minute, 2: -8 * time.Minute, 3: -3 * time.Minute}
+	var prs []queue.PR
+	for n := 1; n <= 3; n++ {
+		p := replayPR(n)
+		p.Checks = queue.Pending
+		prs = append(prs, p)
+	}
+	tick := func(minutes int) queue.Recording {
+		var at []queue.PR
+		for _, p := range prs {
+			if readyAt[p.Number] <= time.Duration(minutes-30)*time.Minute {
+				p.Checks = queue.Success
+			}
+			at = append(at, p)
+		}
+		return replayTick(minutes, at...)
+	}
+	build := queue.Build{SHA: "all", Pushed: replayStart.Add(27 * time.Minute), Chain: []queue.Member{{Number: 1, Head: prs[0].Head, Merge: "m1"}, {Number: 2, Head: prs[1].Head, Merge: "m2"}, {Number: 3, Head: prs[2].Head, Merge: "all"}}}
+	recs := []queue.Recording{tick(0), tick(18), tick(22), tick(27), tick(42), replayTick(43)}
+	for i := range recs {
+		recs[i].Config = dials(1, 3, false)
+	}
+	recs[3].Actions = []queue.Action{{Do: "push", Build: build}}
+	build.Verdict = queue.Success
+	recs[4].World.Builds = []queue.Build{build}
+	recs[4].Actions = []queue.Action{{Do: "land", SHA: build.SHA, Members: build.Chain}}
+	recs[5].World.Trunk = build.SHA
+	_, w, _ = recordedWindow(t, recs, replayStart.Add(30*time.Minute), replayStart.Add(60*time.Minute))
+	s = runReplay(w)
+	for n, ready := range readyAt {
+		if p := s.prs[n]; !p.landed || p.at < 0 || p.arrived != -30*time.Minute || p.ready != ready || !slices.Contains(s.Waits, float64(p.at-ready)/float64(w.build)) {
+			t.Fatalf("#%d landed %v, labelled at %v, ready at %v, want %v; waits %v", n, p.landed, p.arrived, p.ready, ready, s.Waits)
+		}
+	}
+	if len(s.Waits) != 3 {
+		t.Fatalf("waits %v, want the three", s.Waits)
+	}
 }
 
 func TestReplayCountsNothingOfALandingBeforeTheWindow(t *testing.T) {
-	shape := threeQueued()
-	shape.Queue = append(shape.Queue, Queued{At: 24 * time.Minute, Number: 4})
-	recs := plannedDay(shape, dials(1, 3, false), 60, func(*Sim) {})
-	_, w, row := recordedWindow(t, recs, replayStart.Add(20*time.Minute), replayStart.Add(60*time.Minute))
+	shape := threeQueued(3)
+	shape.Queue = append(shape.Queue, Queued{At: 40 * time.Minute, Number: 4})
+	recs := plannedDay(shape, dials(1, 3, true), 90, func(*Sim) {})
+	_, w, row := recordedWindow(t, recs, replayStart.Add(34*time.Minute), replayStart.Add(90*time.Minute))
 	s := runReplay(w)
-	if p := s.prs[1]; p == nil || !p.landed || p.at >= 0 || !s.prs[4].landed {
-		t.Fatalf("#1 %+v, #4 landed %v", p, s.prs[4].landed)
+	for n, at := range map[int]time.Duration{1: -2 * time.Minute, 2: -2 * time.Minute, 4: 16 * time.Minute} {
+		if p := s.prs[n]; !p.landed || p.at != at {
+			t.Fatalf("#%d landed %v at %v, want at %v", n, p.landed, p.at, at)
+		}
 	}
-	if s.Landed != 1 || len(s.Lands) != 1 || len(s.Waits) != 1 || len(s.Labelled) != 1 || len(s.QueueAdded) != 1 || s.LastLand != s.prs[4].at || s.Whole != 1 || s.Probes != 0 {
-		t.Fatalf("counted %d landings %v, waits %v, labelled %v, added %v, last %v, %d whole builds, %d probes", s.Landed, s.Lands, s.Waits, s.Labelled, s.QueueAdded, s.LastLand, s.Whole, s.Probes)
+	if s.prs[4].ready != 6*time.Minute || s.Landed != 1 || !slices.Equal(s.Lands, []time.Duration{16 * time.Minute}) || !slices.Equal(s.Waits, []float64{1}) || !slices.Equal(s.Labelled, []float64{1}) || !slices.Equal(s.QueueAdded, []float64{0}) || s.LastLand != 16*time.Minute || s.Whole != 1 || s.Probes != 0 || s.RedCandidates != 0 {
+		t.Fatalf("counted %d landings %v, waits %v, labelled %v, added %v, last %v, %d whole builds, %d probes, %d red candidates", s.Landed, s.Lands, s.Waits, s.Labelled, s.QueueAdded, s.LastLand, s.Whole, s.Probes, s.RedCandidates)
 	}
 	if _, sim := w.simulate(Shape{}, Score{}); *sim.Landed != float64(row.Landed) || sim.WholeBuilds != float64(row.WholeBuilds) {
 		t.Fatalf("landed %v of %d, whole builds %v of %d", *sim.Landed, row.Landed, sim.WholeBuilds, row.WholeBuilds)
+	}
+	_, w, _ = recordedWindow(t, recs, replayStart.Add(34*time.Minute), replayStart.Add(39*time.Minute))
+	if s := runReplay(w); s.Landed != 0 || len(s.Lands) != 0 || s.LastLand != 0 || s.Probes != 0 {
+		t.Fatalf("a window landing nothing counted %d landings %v, the last at %v, %d probes", s.Landed, s.Lands, s.LastLand, s.Probes)
 	}
 }
 
@@ -419,15 +492,24 @@ func TestReplayCountsNoRedCandidateAnsweredBeforeTheWindow(t *testing.T) {
 	if _, sim := w.simulate(Shape{}, Score{}); *sim.Landed != float64(row.Landed) || sim.WholeBuilds != float64(row.WholeBuilds) {
 		t.Fatalf("landed %v of %d, whole builds %v of %d", *sim.Landed, row.Landed, sim.WholeBuilds, row.WholeBuilds)
 	}
+	_, w, row = recordedWindow(t, guiltDay(), replayStart.Add(8*time.Minute), replayStart.Add(80*time.Minute))
+	s = runReplay(w)
+	if s.RedCandidates != 1 || s.RedPullRequests != 3 || row.RedCandidates != 1 || row.RedPullRequests != 3 || s.Whole != 11 || row.WholeBuilds != 11 {
+		t.Fatalf("a candidate pushed before the window and red in it: red candidates %d holding %d, live %d holding %d; whole builds %d, live %d", s.RedCandidates, s.RedPullRequests, row.RedCandidates, row.RedPullRequests, s.Whole, row.WholeBuilds)
+	}
 }
 
 func TestReplayCountsWhatWaitsAtTheWindowsStart(t *testing.T) {
 	p, q, r := replayPR(1), replayPR(2), replayPR(3)
 	p.Queued, r.Queued = replayStart.Add(-3*time.Minute), replayStart.Add(-3*time.Minute)
-	recs := durationBuild([]queue.Recording{replayTick(-3, p, r), replayTick(-1, p), replayTick(1, p, q)}, 10)
-	_, w, row := replayWindow(t, recs, 30)
-	if _, sim := w.simulate(Shape{}, Score{}); *row.WaitingAtOpen != 1 || sim.WaitingAtOpen != 1 {
-		t.Fatalf("waiting at the window's start: live %d, simulated %v", *row.WaitingAtOpen, sim.WaitingAtOpen)
+	for _, recs := range [][]queue.Recording{
+		{replayTick(-3, p, r), replayTick(-1, p), replayTick(1, p, q)},
+		{replayTick(-3, p, r), replayTick(-1, p, r), replayTick(0, p), replayTick(1, p, q)},
+	} {
+		_, w, row := replayWindow(t, durationBuild(recs, 10), 30)
+		if _, sim := w.simulate(Shape{}, Score{}); *row.WaitingAtOpen != 1 || sim.WaitingAtOpen != 1 {
+			t.Fatalf("waiting at the window's start: live %d, simulated %v", *row.WaitingAtOpen, sim.WaitingAtOpen)
+		}
 	}
 }
 
@@ -444,15 +526,28 @@ func TestReplayCountsTheWindowsOwnActsDeparturesAndHolds(t *testing.T) {
 	if want := map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 1, "ejected": 0, "settings": 0}; !reflect.DeepEqual(sim.Acts, want) {
 		t.Fatalf("acts %v, want %v", sim.Acts, want)
 	}
+	recs = []queue.Recording{replayTick(-20, p, held, r), replayTick(-10, p, q, r), replayTick(0, p, held), replayTick(10, p, held)}
+	_, w, row = replayWindow(t, recs, 30)
+	_, sim = w.simulate(Shape{}, Score{})
+	if *row.Withdrawn != 0 || sim.Acts["unlabel"] != 1 || sim.Acts["label"] != 0 {
+		t.Fatalf("a withdrawal first seen at the window's start: withdrawn %d, acts %v", *row.Withdrawn, sim.Acts)
+	}
 }
 
 func TestReplayLabelsAgainBeforeTheWindowAPullRequestEjectedInError(t *testing.T) {
 	_, w, _ := replayWindow(t, []queue.Recording{replayTick(-30, replayPR(1)), replayTick(0, replayPR(1))}, 30)
-	s := NewSim(Shape{Recorded: true, Acts: w.acts, Build: 10 * time.Minute}, w.cfg, 1)
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: 2 * time.Minute, Flake: 0.5}, w.cfg, 27)
 	s.play()
-	s.prs[1].queued, s.prs[1].back = false, s.now+2*time.Minute
-	s.step(s.now + 2*time.Minute)
-	if s.now >= 0 || !s.prs[1].queued {
+	for s.now < 0 && s.Wrong == 0 {
+		s.Step()
+	}
+	if s.now != -20*time.Minute || s.Wrong != 1 || s.Left[1] != "culprit" || s.prs[1].queued {
+		t.Fatalf("at %v %d wrong ejections, #1 left %q, queued %v", s.now, s.Wrong, s.Left[1], s.prs[1].queued)
+	}
+	for s.now < 0 && !s.prs[1].queued {
+		s.Step()
+	}
+	if s.now != -10*time.Minute || !s.prs[1].queued {
 		t.Fatalf("at %v #1 queued %v", s.now, s.prs[1].queued)
 	}
 }
@@ -1380,8 +1475,11 @@ func TestReplayRowCountsTheGuiltyHeadsTheRecordDidNotEject(t *testing.T) {
 		})
 	}
 	was, w, _ := recordedWindow(t, guiltDay(), replayStart.Add(40*time.Minute), replayStart.Add(80*time.Minute))
-	if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != 1 {
-		t.Fatalf("a window whose lead-in plays head3 counts %d unejected guilty heads", sim.UnejectedGuiltyHeads)
+	if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != 1 || !slices.Equal(w.failing["head3"], []time.Duration{10 * time.Minute, 10 * time.Minute}) {
+		t.Fatalf("a window whose lead-in plays head3 counts %d unejected guilty heads, failing in %v", sim.UnejectedGuiltyHeads, w.failing["head3"])
+	}
+	if w := leadInGuiltDay(t); w.unejectedGuilty != 1 || !slices.Equal(slices.Sorted(slices.Values(w.failing["head3"])), []time.Duration{6 * time.Minute, 8 * time.Minute}) {
+		t.Fatalf("a lead-in whose guilty head fails faster than its green builds counts %d unejected guilty heads, failing in %v", w.unejectedGuilty, w.failing["head3"])
 	}
 	was, w, _ = recordedWindow(t, guiltDay(), replayStart.Add(leadIn+40*time.Minute), replayStart.Add(leadIn+80*time.Minute))
 	if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != 0 {
