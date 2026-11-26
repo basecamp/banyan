@@ -24,14 +24,14 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	broken := map[headKey]bool{}
 	for _, r := range recs {
 		for _, b := range r.World.Builds {
-			if old, ok := builds[b.SHA]; !ok || len(b.Chain) > len(old.Chain) {
+			if len(b.Chain) > len(builds[b.SHA].Chain) {
 				builds[b.SHA] = b
 			}
 			green[b.SHA] = green[b.SHA] || b.Verdict == queue.Success
 			red[b.SHA] = red[b.SHA] || b.Verdict == queue.Failure
 		}
 		for _, a := range r.Actions {
-			if old, ok := builds[a.Build.SHA]; a.Do == "push" && (!ok || len(a.Build.Chain) > len(old.Chain)) {
+			if a.Do == "push" && len(a.Build.Chain) > len(builds[a.Build.SHA].Chain) {
 				builds[a.Build.SHA] = a.Build
 			}
 		}
@@ -316,17 +316,13 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 // brokeAndLeft is each head, beside those ejected as the cause, that the records hold to have
 // broken the build: no build of any kind that held it was ever read green, no landing of it
 // was confirmed, two or more whole builds that held it were read red and never green, with no
-// ejected culprit among their members and on a base whose trunk the record does not read red,
-// and a later record no longer queues it at that head.
+// ejected culprit among their members, and a later record no longer queues it at that head.
 //
-// The record reads a base's trunk red as the planner does: a red candidate's blame round in
-// which the build of that base alone was read red and never green, and no build was read green.
-// It reads every round the record holds, where the planner reads them pass by pass and holds the
-// trunk red only until a later round passes, and it sees neither when the trunk failed nor which
-// jobs did, so every failure on that base counts for nothing. Two such heads failing in the same
-// builds are both held guilty; a head that fails only beside another, or in most of its builds,
-// is not. The record's queue never ejected one, so the replay labels its pull request again at
-// the next head the record queues it at, as the replay's queue may have ejected it.
+// It takes no account of a red trunk, as no record yet holds a head that only a red trunk's
+// rounds failed. Two heads failing in the same builds are both held guilty; a head that fails
+// only beside another, or in most of its builds, is not. The record's queue never ejected
+// one, so the replay labels its pull request again at the next head the record queues it at, as
+// the replay's queue may have ejected it.
 func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, green, red map[queue.SHA]bool, ejected map[headKey]bool, confirmed [][]queue.Member) map[headKey]bool {
 	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
 	for _, members := range confirmed {
@@ -334,22 +330,8 @@ func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, gree
 			landed[headKey{m.Number, m.Head}] = true
 		}
 	}
-	type round struct {
-		of queue.SHA
-		n  int
-	}
-	passedIn := map[round]bool{}
 	for sha, b := range builds {
-		passedIn[round{b.Of, b.Round}] = passedIn[round{b.Of, b.Round}] || green[sha]
-	}
-	redTrunk := map[queue.SHA]bool{}
-	for sha, b := range builds {
-		if len(b.Chain) == 0 && red[sha] && !green[sha] && !passedIn[round{b.Of, b.Round}] {
-			redTrunk[b.Base] = true
-		}
-	}
-	for sha, b := range builds {
-		evidence := b.Kind != queue.Probe && red[sha] && !green[sha] && !redTrunk[b.Base] &&
+		evidence := b.Kind != queue.Probe && red[sha] && !green[sha] &&
 			!slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return ejected[headKey{m.Number, m.Head}] })
 		for _, m := range b.Chain {
 			k := headKey{m.Number, m.Head}

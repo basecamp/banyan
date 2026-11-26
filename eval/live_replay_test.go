@@ -1013,7 +1013,6 @@ func TestReplayHoldsNoHeadGuiltyWithoutEvidenceAgainstIt(t *testing.T) {
 		{"it was still queued at the last record", func() []queue.Recording {
 			return plannedDay(threeQueued(3), dials(1, 3, false), 32, movesHead(3, "fix3", 32*time.Minute))
 		}},
-		{"the trunk was read red beside its failures", innocentPassengerDay},
 		{"a build that failed it was read green first", func() []queue.Recording {
 			recs := guiltDay()
 			for i, b := range readAt(recs, 30).World.Builds {
@@ -1026,41 +1025,10 @@ func TestReplayHoldsNoHeadGuiltyWithoutEvidenceAgainstIt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, w, _ := replayWindow(t, tc.day(), 100)
-			if heldGuilty(w, 3, "head3") {
-				t.Fatal("head3 held guilty")
+			if heldGuilty(w, 3, "head3") || len(labelled(w, 3)) != 1 {
+				t.Fatalf("head3 held guilty %v, labelled at %v", heldGuilty(w, 3, "head3"), labelled(w, 3))
 			}
 		})
-	}
-}
-
-func TestReplayHoldsGuiltyAHeadWhoseTrunkFailedOnlyBesideAPassingPrefix(t *testing.T) {
-	recs := guiltDay()
-	for _, rec := range recs {
-		for i, b := range rec.World.Builds {
-			if len(b.Chain) == 0 && b.Round == 1 && b.Verdict == queue.Success {
-				rec.World.Builds[i].Verdict = queue.Failure
-			}
-		}
-	}
-	_, w, _ := replayWindow(t, recs, 100)
-	if !heldGuilty(w, 3, "head3") {
-		t.Fatal("head3 not held guilty where the round that failed the trunk passed #1")
-	}
-}
-
-// innocentPassengerDay has the trunk fail by itself for its first 25 minutes, so the candidate
-// of #1, #2 and #3 and its round fail, and the round's build of the trunk alone with them, until
-// #3's author pushes a new head; none of the three breaks anything.
-func innocentPassengerDay() []queue.Recording {
-	shape := threeQueued()
-	shape.Episodes = []Episode{{At: 0, For: 25 * time.Minute}}
-	return plannedDay(shape, dials(1, 3, false), 70, movesHead(3, "fix3", 32*time.Minute))
-}
-
-func TestReplayInnocentPassengersRedsStayUnblamed(t *testing.T) {
-	_, w, _ := replayWindow(t, innocentPassengerDay(), 80)
-	if heldGuilty(w, 3, "head3") || w.unblamedRedCandidates != 1 || w.candidatesWithoutCulprit != 2 || len(labelled(w, 3)) != 1 {
-		t.Fatalf("guilty %v, unblamed red candidates %d of %d, labelled at %v", heldGuilty(w, 3, "head3"), w.unblamedRedCandidates, w.candidatesWithoutCulprit, labelled(w, 3))
 	}
 }
 
@@ -1145,21 +1113,22 @@ func firstBuildHolding(t *testing.T, w window, n int) time.Duration {
 	return s.builds[sha].end - s.now
 }
 
-// timedGuiltDay is guiltDay with the first and fourth builds pushed, two that fail #3, taking 6
-// and 8 minutes.
+// timedGuiltDay is guiltDay with the three builds that fail #3 taking 6, 8 and 4 minutes, the
+// first, fourth and ninth pushed, and every other build its 10.
 func timedGuiltDay() []queue.Recording {
 	shape := threeQueued(3)
-	shape.Takes = []time.Duration{6 * time.Minute, 0, 0, 8 * time.Minute}
+	shape.Takes = make([]time.Duration, 9)
+	shape.Takes[0], shape.Takes[3], shape.Takes[8] = 6*time.Minute, 8*time.Minute, 4*time.Minute
 	return plannedDay(shape, dials(1, 3, false), 70, movesHead(3, "fix3", 32*time.Minute))
 }
 
 func TestReplayGuiltyHeadsFailingTimesLeaveTheSharedSample(t *testing.T) {
 	_, w, _ := replayWindow(t, timedGuiltDay(), 80)
-	failing := w.failing["head3"]
-	if !heldGuilty(w, 3, "head3") || !slices.Contains(failing, 6*time.Minute) || !slices.Contains(failing, 8*time.Minute) || len(w.failing) != 1 {
+	failing := slices.Sorted(slices.Values(w.failing["head3"]))
+	if !heldGuilty(w, 3, "head3") || !slices.Equal(failing, []time.Duration{4 * time.Minute, 6 * time.Minute, 8 * time.Minute}) || len(w.failing) != 1 {
 		t.Fatalf("guilty %v, failing times %v", heldGuilty(w, 3, "head3"), w.failing)
 	}
-	if len(w.times) == 0 || slices.Contains(w.times, 6*time.Minute) || slices.Contains(w.times, 8*time.Minute) {
+	if len(w.times) == 0 || slices.ContainsFunc(w.times, func(d time.Duration) bool { return d != 10*time.Minute }) {
 		t.Fatalf("shared sample %v", w.times)
 	}
 	if took := firstBuildHolding(t, w, 3); !slices.Contains(failing, took) {
