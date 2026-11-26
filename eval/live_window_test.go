@@ -662,9 +662,22 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 		{"the record's own push takes the last free slot", []queue.Recording{
 			record(0, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: candidate("d", queue.Pending, 1, 2)}),
 			record(7, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)})}, 7},
-		{"a pending probe holds a slot", []queue.Recording{
-			record(0, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Pending)}),
-			record(7, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Pending)})}, 7},
+		{"a pending probe holds no slot", func() []queue.Recording {
+			var recs []queue.Recording
+			for m := 0; m <= 60; m += 10 {
+				recs = append(recs, record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Pending)}))
+			}
+			return recs
+		}(), 0},
+		{"the record's own probe holds no slot", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: probe(queue.Pending)}),
+			record(7, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: probe(queue.Pending)})}, 0},
+		{"two pending candidates fill two slots", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)}),
+			record(7, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)})}, 7},
+		{"a deleted candidate's members are not started", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)}, queue.Action{Do: "delete", SHA: "d"})}, 7},
 		{"a probe with a verdict holds none, nor a candidate with one", []queue.Recording{
 			record(0, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Failure), candidate("e", queue.Success, 3)}),
 			record(7, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Failure), candidate("e", queue.Success, 3)})}, 0},
