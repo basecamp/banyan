@@ -590,18 +590,26 @@ func TestLiveCountsCandidatesDroppedWhileBuildingForAMember(t *testing.T) {
 		}
 		return rec
 	}
+	unpushed := func(b queue.Build) queue.Build {
+		b.Pushed = time.Time{}
+		return b
+	}
+	read := func(m int, prs []queue.PR, builds []queue.Build, actions ...queue.Action) queue.Recording {
+		return queue.Recording{World: queue.World{Now: at(m), Trunk: "t", PRs: prs, Builds: builds}, Actions: actions}
+	}
 	all := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2"}, {Number: 3, Head: "h3"}}
 	moved := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2-pushed-again"}, {Number: 3, Head: "h3"}}
+	building := candidate("c", queue.Pending, 0, one, two)
 	for _, c := range []struct {
-		name                                string
-		recs                                []queue.Recording
-		from, to                            int
-		dropped, headMoved, left, restarted int
-		longest                             float64
+		name                                  string
+		recs                                  []queue.Recording
+		from, to                              int
+		dropped, headMoved, left, stillQueued int
+		longest                               float64
 	}{
 		{"a member's head moved", []queue.Recording{deleted(22, moved, candidate("c", queue.Pending, 0, one, two))}, 0, 30, 1, 1, 0, 1, 22},
 		{"a member left", []queue.Recording{deleted(9, all[:1], candidate("c", queue.Pending, 2, one, two))}, 0, 30, 1, 0, 1, 1, 7},
-		{"stacked candidates restart each member once", []queue.Recording{deleted(22, moved,
+		{"stacked candidates count each member still queued once", []queue.Recording{deleted(22, moved,
 			candidate("c", queue.Pending, 0, one, two), candidate("d", queue.Pending, 6, one, two, three))}, 0, 30, 2, 2, 0, 2, 22},
 		{"every member still queued at its head", []queue.Recording{deleted(22, all, candidate("c", queue.Pending, 0, one, two))}, 0, 30, 0, 0, 0, 0, 0},
 		{"passed before it was dropped", []queue.Recording{deleted(22, moved, candidate("c", queue.Success, 0, one, two))}, 0, 30, 0, 0, 0, 0, 0},
@@ -609,14 +617,50 @@ func TestLiveCountsCandidatesDroppedWhileBuildingForAMember(t *testing.T) {
 		{"an empty chain", []queue.Recording{deleted(22, moved, candidate("c", queue.Pending, 0))}, 0, 30, 0, 0, 0, 0, 0},
 		{"deleted twice, counted once", []queue.Recording{deleted(22, moved, candidate("c", queue.Pending, 0, one, two)), deleted(23, moved, candidate("c", queue.Pending, 0, one, two))}, 0, 30, 1, 1, 0, 1, 22},
 		{"deleted before the window", []queue.Recording{deleted(1, moved, candidate("c", queue.Pending, 0, one, two)), {World: queue.World{Now: at(5), Trunk: "t"}}}, 2, 30, 0, 0, 0, 0, 0},
+		{"a member the queue ejected as the culprit", []queue.Recording{
+			read(10, all, []queue.Build{building}, queue.Action{Do: "eject", PR: 1, Cause: "culprit"}),
+			deleted(12, all[1:], building)}, 0, 30, 0, 0, 0, 0, 0},
+		{"a member that landed in another candidate", []queue.Recording{
+			read(10, all, []queue.Build{candidate("d", queue.Success, 0, one), building}, queue.Action{Do: "land", SHA: "d", Members: []queue.Member{one}}),
+			read(12, all[1:], nil),
+			deleted(14, all[1:], building)}, 0, 30, 0, 0, 0, 0, 0},
+		{"a member whose label was removed", []queue.Recording{
+			read(10, all, []queue.Build{building}),
+			deleted(12, all[1:], building)}, 0, 30, 1, 0, 1, 1, 12},
+		{"a member ejected, queued again and gone again", []queue.Recording{
+			read(10, all, []queue.Build{building}, queue.Action{Do: "eject", PR: 1, Cause: "culprit"}),
+			read(12, all, []queue.Build{building}),
+			deleted(14, all[1:], building)}, 0, 30, 1, 0, 1, 1, 14},
+		{"a member ejected before the window", []queue.Recording{
+			read(1, all, []queue.Build{building}, queue.Action{Do: "eject", PR: 1, Cause: "culprit"}),
+			deleted(12, all[1:], building)}, 5, 30, 0, 0, 0, 0, 0},
+		{"no push time, no age", []queue.Recording{deleted(22, moved, unpushed(building))}, 0, 30, 1, 1, 0, 1, 0},
+		{"an age only from a push time", []queue.Recording{deleted(22, moved, unpushed(building), candidate("d", queue.Pending, 6, one, two, three))}, 0, 30, 2, 2, 0, 2, 16},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := windowRow(t, c.recs, at(c.from), at(c.to)).liveMeasures
-			got := [4]int{m.BuildingCandidatesDropped, m.DroppedHeadMoved, m.DroppedMemberLeft, m.DroppedMembersRestarted}
-			if want := [4]int{c.dropped, c.headMoved, c.left, c.restarted}; got != want || m.DroppedLongestBuiltMinutes != c.longest {
-				t.Fatalf("dropped, head moved, member left, restarted %v, longest built %v min; want %v, %v", got, m.DroppedLongestBuiltMinutes, want, c.longest)
+			got := [4]int{m.BuildingCandidatesDropped, m.DroppedHeadMoved, m.DroppedMemberLeft, m.DroppedMembersStillQueued}
+			if want := [4]int{c.dropped, c.headMoved, c.left, c.stillQueued}; got != want || m.DroppedLongestBuiltMinutes != c.longest {
+				t.Fatalf("dropped, head moved, member left, still queued %v, longest built %v min; want %v, %v", got, m.DroppedLongestBuiltMinutes, want, c.longest)
 			}
 		})
+	}
+}
+
+func TestLiveCountsACandidateDroppedWhileBuildingThatPassedAndWasThrownAway(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	one, two := queue.Member{Number: 1, Head: "h1"}, queue.Member{Number: 2, Head: "h2"}
+	moved := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2-pushed-again"}}
+	c := queue.Build{SHA: "c", Kind: queue.Candidate, Verdict: queue.Pending, Pushed: at(0), Chain: []queue.Member{one, two}}
+	recs := []queue.Recording{{World: queue.World{Now: at(10), Trunk: "t", PRs: moved, Builds: []queue.Build{c}}, Actions: []queue.Action{{Do: "delete", SHA: "c"}}}}
+	c.Verdict = queue.Success
+	recs = append(recs, queue.Recording{World: queue.World{Now: at(12), Trunk: "t", PRs: moved, Builds: []queue.Build{c}}, Actions: []queue.Action{{Do: "delete", SHA: "c"}}})
+	m := windowRow(t, recs, at(0), at(30)).liveMeasures
+	thrown := [3]int{m.PassingCandidatesThrownAway, m.ThrownAwayHeadMoved, m.ThrownAwayMemberLeft}
+	dropped := [4]int{m.BuildingCandidatesDropped, m.DroppedHeadMoved, m.DroppedMemberLeft, m.DroppedMembersStillQueued}
+	if thrown != [3]int{1, 1, 0} || dropped != [4]int{1, 1, 0, 1} || m.DroppedLongestBuiltMinutes != 10 {
+		t.Fatalf("thrown away %v, dropped %v, longest built %v min", thrown, dropped, m.DroppedLongestBuiltMinutes)
 	}
 }
 
