@@ -884,35 +884,64 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 	}
 }
 
+// overtakenWindow is a stacked landing on two slots with cancels on: the lower candidate holds
+// pull request 1, the upper holds 1 and 2, passes at minute 40 and lands, and the next record,
+// at minute 50, reads the lower still building on a chain the trunk holds and plans its delete.
+// Two checks of the trunk answer at minutes 20 and 30.
 func overtakenWindow(change func(recs []queue.Recording) []queue.Recording) []queue.Recording {
-	fast := queue.Build{SHA: "fast", Pushed: replayStart, Verdict: queue.Success}
-	slow := queue.Build{SHA: "slow", Pushed: replayStart, Verdict: queue.Success}
-	slower := queue.Build{SHA: "slower", Pushed: replayStart, Verdict: queue.Success}
-	over := queue.Build{SHA: "over", Base: "t", Chain: []queue.Member{{Number: 1, Head: "b", Merge: "over"}}}
-	recs := []queue.Recording{replayTick(0), replayTick(10), replayTick(20), replayTick(30), replayTick(40), replayTick(50)}
+	p, q := replayPR(1), replayPR(2)
+	lower := queue.Build{SHA: "lower", Base: "t", Chain: []queue.Member{{Number: 1, Head: p.Head, Merge: "lower"}}}
+	upper := queue.Build{SHA: "upper", Base: "t", Chain: []queue.Member{{Number: 1, Head: p.Head, Merge: "lower"}, {Number: 2, Head: q.Head, Merge: "upper"}}}
+	fast := queue.Build{SHA: "fast", Kind: queue.Check, Base: "t", Pushed: replayStart, Verdict: queue.Success}
+	slow := queue.Build{SHA: "slow", Kind: queue.Check, Base: "t", Pushed: replayStart, Verdict: queue.Success}
+	recs := []queue.Recording{replayTick(0, p, q), replayTick(10, p, q), replayTick(20, p, q), replayTick(30, p, q), replayTick(40, p, q), replayTick(50)}
 	for i := range recs {
+		recs[i].Config = dials(2, 2, false)
 		recs[i].Config.Cancels = true
 	}
-	recs[0].Actions = []queue.Action{{Do: "push", Build: over}}
-	over.Pushed = replayStart
-	recs[1].World.Builds = []queue.Build{over}
-	recs[2].World.Builds = []queue.Build{fast}
-	recs[3].World.Builds = []queue.Build{slow}
-	recs[4].World.Builds = []queue.Build{slower}
-	recs[4].Actions = []queue.Action{{Do: "land", SHA: "later", Members: over.Chain}}
-	over.Base, over.Chain = over.SHA, nil
-	recs[5].World.Trunk, recs[5].World.Builds = "later", []queue.Build{over}
-	recs[5].Actions = []queue.Action{{Do: "delete", SHA: over.SHA}}
+	recs[0].Actions = []queue.Action{{Do: "push", Build: lower}, {Do: "push", Build: upper}}
+	lower.Pushed, upper.Pushed = replayStart, replayStart
+	for i := 1; i < 5; i++ {
+		recs[i].World.Builds = []queue.Build{lower, upper}
+	}
+	recs[2].World.Builds = append(recs[2].World.Builds, fast)
+	recs[3].World.Builds = append(recs[3].World.Builds, slow)
+	recs[4].World.Builds[1].Verdict = queue.Success
+	recs[4].Actions = []queue.Action{{Do: "land", SHA: upper.SHA, Members: upper.Chain}}
+	lower.Base, lower.Chain = lower.SHA, nil
+	upper.Base, upper.Chain, upper.Verdict = upper.SHA, nil, queue.Success
+	recs[5].World.Trunk, recs[5].World.Builds = upper.SHA, []queue.Build{lower, upper}
+	recs[5].Actions = []queue.Action{{Do: "delete", SHA: lower.SHA}, {Do: "delete", SHA: upper.SHA}}
 	if change != nil {
 		recs = change(recs)
 	}
 	return recs
 }
 
+func eachLower(recs []queue.Recording, change func(b *queue.Build)) {
+	for i := range recs {
+		for j := range recs[i].Actions {
+			if recs[i].Actions[j].Build.SHA == "lower" {
+				change(&recs[i].Actions[j].Build)
+			}
+		}
+		for j := range recs[i].World.Builds {
+			if recs[i].World.Builds[j].SHA == "lower" {
+				change(&recs[i].World.Builds[j])
+			}
+		}
+	}
+}
+
 func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
 	answered := []time.Duration{20 * time.Minute, 30 * time.Minute, 40 * time.Minute}
 	with := func(more ...time.Duration) []time.Duration {
 		return slices.Sorted(slices.Values(append(slices.Clone(answered), more...)))
+	}
+	untimed := func(recs []queue.Recording) {
+		for i := range recs {
+			recs[i].Config.Timeout = 0
+		}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -924,47 +953,48 @@ func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
 			moved := replayPR(1)
 			moved.Head = "moved"
 			recs[4].Actions = nil
-			recs[5].World.Trunk, recs[5].World.PRs = "t", []queue.PR{moved}
-			recs[5].World.Builds[0].Base, recs[5].World.Builds[0].Chain = "t", recs[1].World.Builds[0].Chain
+			recs[5].World.Trunk, recs[5].World.PRs = "t", []queue.PR{moved, replayPR(2)}
+			recs[5].World.Builds = recs[4].World.Builds[:1]
+			recs[5].Actions = recs[5].Actions[:1]
 			return recs
 		}, answered},
-		{"no push time", func(recs []queue.Recording) []queue.Recording {
-			recs[0].Actions = nil
-			recs[1].World.Builds[0].Pushed, recs[5].World.Builds[0].Pushed = time.Time{}, time.Time{}
+		{"no push time anywhere", func(recs []queue.Recording) []queue.Recording {
+			untimed(recs)
+			recs[0].Actions = recs[0].Actions[1:]
+			eachLower(recs, func(b *queue.Build) { b.Pushed = time.Time{} })
 			return recs
 		}, answered},
+		{"aged from the recorded push where the deleting record reads none", func(recs []queue.Recording) []queue.Recording {
+			untimed(recs)
+			eachLower(recs, func(b *queue.Build) { b.Pushed = time.Time{} })
+			return recs
+		}, with(50 * time.Minute)},
 		{"aged from the push the deleting record reads", func(recs []queue.Recording) []queue.Recording {
-			recs[1].World.Builds = nil
+			recs[0].Actions = recs[0].Actions[1:]
+			for i := 1; i < 5; i++ {
+				recs[i].World.Builds = recs[i].World.Builds[1:]
+			}
+			recs[0].Actions = append(recs[0].Actions, queue.Action{Do: "push", Build: queue.Build{SHA: "lower", Base: "t", Chain: recs[0].Actions[0].Build.Chain[:1]}})
 			recs[5].World.Builds[0].Pushed = replayStart.Add(20 * time.Minute)
 			return recs
 		}, with(30 * time.Minute)},
-		{"a trunk check that never had members", func(recs []queue.Recording) []queue.Recording {
-			check := queue.Build{SHA: "over", Kind: queue.Check, Base: "t", Pushed: replayStart}
-			recs[0].Actions = []queue.Action{{Do: "push", Build: check}}
-			recs[1].World.Builds = []queue.Build{check}
-			recs[5].World.Builds = []queue.Build{check}
+		{"stamped after the deleting record's time, by a read mending an unmarked push", func(recs []queue.Recording) []queue.Recording {
+			recs[5].World.Builds[0].Pushed = recs[5].World.Now.Add(time.Second)
 			return recs
 		}, answered},
-		{"a check with members", func(recs []queue.Recording) []queue.Recording {
-			for _, i := range []int{0, 1, 5} {
-				for j := range recs[i].Actions {
-					recs[i].Actions[j].Build.Kind = queue.Check
-				}
-				for j := range recs[i].World.Builds {
-					recs[i].World.Builds[j].Kind = queue.Check
-				}
-			}
+		{"a candidate never read with members", func(recs []queue.Recording) []queue.Recording {
+			eachLower(recs, func(b *queue.Build) { b.Base, b.Chain = b.SHA, nil })
 			return recs
 		}, answered},
-		{"a probe", func(recs []queue.Recording) []queue.Recording {
-			for _, i := range []int{0, 1, 5} {
-				for j := range recs[i].Actions {
-					recs[i].Actions[j].Build.Kind = queue.Probe
+		{"a round's check", func(recs []queue.Recording) []queue.Recording {
+			eachLower(recs, func(b *queue.Build) {
+				b.Kind, b.Round, b.Of = queue.Check, 1, "red"
+				if len(b.Chain) > 0 {
+					b.Chain = []queue.Member{{Number: 1, Head: "b", Merge: "merged"}}
+				} else {
+					b.Base = "merged"
 				}
-				for j := range recs[i].World.Builds {
-					recs[i].World.Builds[j].Kind = queue.Probe
-				}
-			}
+			})
 			return recs
 		}, answered},
 		{"at the timeout", func(recs []queue.Recording) []queue.Recording {
@@ -975,8 +1005,13 @@ func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
 			recs[5].Config.Timeout = 50*time.Minute - time.Second
 			return recs
 		}, answered},
-		{"marked landed", func(recs []queue.Recording) []queue.Recording {
-			recs[5].World.Builds[0].Landed = recs[4].World.Now
+		{"marked landed and kept past its keep", func(recs []queue.Recording) []queue.Recording {
+			for i := range recs {
+				recs[i].Config.Keep = 3 * time.Minute
+			}
+			recs[5].World.Builds[0].Landed = replayStart.Add(45 * time.Minute)
+			recs[5].World.Builds[1].Landed = recs[5].World.Now
+			recs[5].Actions = recs[5].Actions[:1]
 			return recs
 		}, answered},
 		{"deleted after the window", func(recs []queue.Recording) []queue.Recording {
@@ -984,24 +1019,19 @@ func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
 			return recs
 		}, answered},
 		{"answered, then read building and deleted", func(recs []queue.Recording) []queue.Recording {
-			slow := recs[3].World.Builds[0]
-			recs[0].Actions = []queue.Action{{Do: "push", Build: queue.Build{SHA: "slow", Chain: []queue.Member{{Number: 1, Head: "b", Merge: "slow"}}}}}
-			recs[1].World.Builds = nil
-			slow.Verdict, slow.Base = queue.Pending, slow.SHA
-			recs[5].World.Builds = []queue.Build{slow}
-			recs[5].Actions = []queue.Action{{Do: "delete", SHA: slow.SHA}}
+			recs[5].World.Builds[1].Verdict = queue.Pending
 			return recs
-		}, answered},
+		}, with(50 * time.Minute)},
 		{"deleted again where the first delete failed", func(recs []queue.Recording) []queue.Recording {
 			again := recs[5]
 			again.World.Now = replayStart.Add(55 * time.Minute)
 			return append(recs, again)
 		}, with(50 * time.Minute)},
 		{"deleted, then read answered", func(recs []queue.Recording) []queue.Recording {
-			done := recs[5].World.Builds[0]
-			done.Verdict = queue.Success
 			last := replayTick(55)
-			last.World.Trunk, last.World.Builds = "later", []queue.Build{done}
+			last.Config = recs[5].Config
+			last.World.Trunk, last.World.Builds = "upper", []queue.Build{recs[5].World.Builds[0]}
+			last.World.Builds[0].Verdict = queue.Success
 			return append(recs, last)
 		}, with(55 * time.Minute)},
 	} {
@@ -1015,17 +1045,40 @@ func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
 	}
 }
 
-func TestReplayCountsAnOvertakenCandidateWhereItsDeleteWasFirstPlanned(t *testing.T) {
-	recs := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
-		recs[5].World.Now = replayStart.Add(59 * time.Minute)
-		again := recs[5]
-		again.World.Now = replayStart.Add(61 * time.Minute)
-		return append(recs, again)
-	})
-	_, w, _ := recordedWindow(t, recs, replayStart.Add(60*time.Minute), replayStart.Add(90*time.Minute))
-	if len(w.times) != 0 {
-		t.Fatalf("pool %v", w.times)
+func TestReplayNeverTimesAProbeOvertaken(t *testing.T) {
+	rec := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
+		eachLower(recs, func(b *queue.Build) { b.Kind, b.Round, b.Of = queue.Probe, 1, "red" })
+		return recs
+	})[5]
+	if _, ok := buildingOnLandedChain(rec, "lower"); ok {
+		t.Fatal("a probe counted as an overtaken candidate")
 	}
+}
+
+func TestReplayCountsAnOvertakenCandidateWhereItsDeleteWasFirstPlanned(t *testing.T) {
+	window := func(t *testing.T, building []queue.Member) []time.Duration {
+		recs := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
+			first := recs[5]
+			first.World.Now = replayStart.Add(59 * time.Minute)
+			first.World.Builds = slices.Clone(first.World.Builds)
+			first.World.Builds[0].Chain = building
+			again := recs[5]
+			again.World.Now = replayStart.Add(61 * time.Minute)
+			return append(recs[:5], first, again)
+		})
+		_, w, _ := recordedWindow(t, recs, replayStart.Add(60*time.Minute), replayStart.Add(90*time.Minute))
+		return w.times
+	}
+	t.Run("first planned before the window", func(t *testing.T) {
+		if got := window(t, nil); len(got) != 0 {
+			t.Fatalf("pool %v", got)
+		}
+	})
+	t.Run("first planned before the window on a chain not yet landed", func(t *testing.T) {
+		if got := window(t, []queue.Member{{Number: 1, Head: "b", Merge: "lower"}}); !slices.Equal(got, []time.Duration{61 * time.Minute}) {
+			t.Fatalf("pool %v", got)
+		}
+	})
 }
 
 func TestReplayOvertakenCandidateLeavesTheLiveHalfAsItWas(t *testing.T) {
@@ -1049,7 +1102,7 @@ func TestReplayOvertakenCandidateLeavesTheLiveHalfAsItWas(t *testing.T) {
 		t.Fatalf("no overtaken candidate in the pool %v", w.times)
 	}
 	control := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
-		recs[5].Actions = nil
+		recs[5].Actions = recs[5].Actions[1:]
 		return recs
 	})
 	got, want := liveHalf(overtaken), liveHalf(control)

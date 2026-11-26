@@ -214,7 +214,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				pushedAt := cmp.Or(b.Pushed, pushTimes[a.SHA])
 				if ok && hadMembers[a.SHA] && !pushedAt.IsZero() {
 					deleted[a.SHA] = true
-					if opts.contains(now) {
+					if opts.contains(now) && now.After(pushedAt) {
 						overtaken = append(overtaken, overtakenBuild{b.SHA, b.Kind, now.Sub(pushedAt).Minutes()})
 					}
 				}
@@ -631,7 +631,9 @@ type overtakenBuild struct {
 // buildingOnLandedChain says whether the record plans to delete a candidate still building, not
 // yet late, once the trunk holds every member of its chain, which the record reads as an empty
 // chain. The record only plans the delete: the remote can refuse it, and a later record plan it
-// again.
+// again. It does not see a retry that keeps its member in its chain though the trunk holds it,
+// nor a build that answers more than an hour after the window's end, which that window never
+// reads.
 func buildingOnLandedChain(rec queue.Recording, sha queue.SHA) (queue.Build, bool) {
 	for _, b := range rec.World.Builds {
 		if b.SHA == sha {
