@@ -195,7 +195,8 @@ const (
 		`"queue_added_p50_minutes":9,"queue_added_p90_minutes":20,"queue_added_over_30":1,"split_landings":3,"unsplit_landings":0,"builds_per_landing":0.5,` +
 		`"ready_gaps":2,"longest_ready_gap_minutes":95,"longest_ready_gap_from":"2026-11-17T22:00:00Z","longest_ready_gap_to":"2026-11-17T23:35:00Z","ready_gaps_over_90":1,` +
 		`"red_candidates":1,"red_pull_requests":4,"red_read_n":1,"red_read_median_minutes":12,` +
-		`"passing_candidates_thrown_away":5,"thrown_away_head_moved":4,"thrown_away_member_left":1,"wrong_ejections":3,"unchecked":2`
+		`"passing_candidates_thrown_away":5,"thrown_away_head_moved":4,"thrown_away_member_left":1,"wrong_ejections":3,"unchecked":2,` +
+		`"busiest_hour_landings":9,"backlog_longest_minutes":75`
 	beforeOuts = `{"takeouts":[{"at":"2026-11-17T23:00:00Z","number":7,"head":"abc","attributed":"checks","class":"own check","failed_then_passed":["build"],"landed_same_head":false},` +
 		`{"at":"2026-11-17T23:30:00Z","number":7,"head":"abc","attributed":"bob","class":"bob","failed_then_passed":[],"landed_same_head":false}],` +
 		`"by_class":{"own check":{"count":1}},"twice":[{"number":7,"head":"abc"}],"comments_read":40}`
@@ -207,6 +208,7 @@ const (
 		"| Ready to landed, median / p90 | 40 / 80 min (1.25 / 2.5 builds of 32 min) |\n" +
 		"| Landings held over 30 minutes | 1 of 3 (0 more could not be split) |\n" +
 		"| Builds per landing | 0.5 |\n" +
+		"| Landings in the busiest hour | 9, not judged outside the day's window (the longest backlog stood 75 min) |\n" +
 		"| Longest wait of a ready head with no landing | 95 min, 22:00Z to 23:35Z |\n" +
 		"| Red candidates | 1, holding 4 pull requests; failed job seen to read red 12 min at the median over 1 |\n" +
 		"| Passing candidates thrown away unlanded | 5: 4 with a member's head moved, 1 with a member gone from the queue |\n" +
@@ -379,6 +381,34 @@ func TestDailyRowIsNotMadeWhenAReadOfTheFourHoursBeforeFails(t *testing.T) {
 		status, posts := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40), "BANYAN_ROW_POST="+filepath.Join(dir, "post"), failing)
 		if rows := filepath.Join(dir, "state", "app", "rows"); status == 0 || posts != 0 || exists(rows, "2026-11-18.json") || exists(rows, "2026-11-18.md") || exists(dir, "state", "app", "rows.tsv") {
 			t.Fatalf("%s: status %d, posts %d", failing, status, posts)
+		}
+	}
+}
+
+func TestDailyRowJudgesTheBusiestHourOnlyOnADayABacklogStoodAnHour(t *testing.T) {
+	clean := `,"passing_candidates_thrown_away":0,"ready_gaps_over_90":0,"queue_added_p50_minutes":1,"wrong_ejections":0`
+	for _, c := range []struct {
+		repo, busiest, backlog, line, trips string
+	}{
+		{"basecamp/hey-native-apps", "22", "179", "22 against a target of 16, judged: a backlog stood for 179 min that day", "No tripwire breached."},
+		{"basecamp/hey-native-apps", "12", "67.4", "12 against a target of 16, judged: a backlog stood for 67 min that day", "**Tripwires:** 12 landings in the busiest hour of a day a backlog stood an hour, under 16."},
+		{"basecamp/hey2", "11", "60", "11 against a target of 12, judged: a backlog stood for 60 min that day", "**Tripwires:** 11 landings in the busiest hour of a day a backlog stood an hour, under 12."},
+		{"basecamp/hey-native-apps", "16", "90", "16 against a target of 16, judged: a backlog stood for 90 min that day", "No tripwire breached."},
+		{"basecamp/hey2", "12", "90", "12 against a target of 12, judged: a backlog stood for 90 min that day", "No tripwire breached."},
+		{"o/app", "2", "65", "2, with no target for this queue", "No tripwire breached."},
+		{"basecamp/hey2", "5", "59.96", "5, not judged: no backlog stood for an hour (the longest stood 59 min)", "No tripwire breached."},
+		{"basecamp/hey-native-apps", "0", "0", "0, not judged: no backlog stood for an hour (the longest stood 0 min)", "No tripwire breached."},
+	} {
+		dir := standIns(t)
+		live := "LIVE=" + clean + `,"busiest_hour_landings":` + c.busiest + `,"backlog_longest_minutes":` + c.backlog
+		if status, _ := dailyRowOf(t, dir, c.repo, "COMMIT="+strings.Repeat("a", 40), live); status != 0 {
+			t.Fatalf("status %d", status)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "state", filepath.Base(c.repo), "rows", "2026-11-18.md"))
+		row := string(data)
+		want := "| Builds per landing | not measured |\n| Landings in the busiest hour | " + c.line + " |\n| Longest wait"
+		if !strings.Contains(row, want) || !strings.Contains(row, "\n"+c.trips+"\n") {
+			t.Fatalf("%s, %s in the busiest hour with a backlog of %s minutes, reads:\n%s", c.repo, c.busiest, c.backlog, row)
 		}
 	}
 }

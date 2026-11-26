@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -569,6 +571,157 @@ func TestLiveCountsPassingCandidatesThrownAwayUnlanded(t *testing.T) {
 			if m.PassingCandidatesThrownAway != c.thrown || m.ThrownAwayHeadMoved != c.headMoved || m.ThrownAwayMemberLeft != c.left {
 				t.Fatalf("thrown away %d, head moved %d, member left %d; want %d, %d, %d",
 					m.PassingCandidatesThrownAway, m.ThrownAwayHeadMoved, m.ThrownAwayMemberLeft, c.thrown, c.headMoved, c.left)
+			}
+		})
+	}
+}
+
+func TestLiveBusiestHourCountsEachMemberLandedInTheWindow(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	landings := func(members map[int]int) []queue.Recording {
+		var recs []queue.Recording
+		trunk := queue.SHA("t")
+		for _, m := range slices.Sorted(maps.Keys(members)) {
+			var landed []queue.Member
+			for n := range members[m] {
+				landed = append(landed, queue.Member{Number: 100*m + n})
+			}
+			sha := queue.SHA(fmt.Sprintf("l%d", m))
+			recs = append(recs, queue.Recording{World: queue.World{Now: at(m), Trunk: trunk}, Actions: []queue.Action{{Do: "land", SHA: sha, Members: landed}}})
+			trunk = sha
+		}
+		return append(recs, queue.Recording{World: queue.World{Now: at(125), Trunk: trunk}})
+	}
+	for _, c := range []struct {
+		name            string
+		members         map[int]int
+		busiest, landed int
+	}{
+		{"the best 60 minutes is not a clock hour, and one exactly 60 minutes on is outside it", map[int]int{30: 1, 45: 3, 80: 1, 90: 1}, 5, 6},
+		{"landings before and after the window do not count", map[int]int{-10: 2, 30: 1, 45: 3, 80: 1, 90: 1, 120: 4}, 5, 6},
+		{"the busiest hour is not the first", map[int]int{0: 1, 70: 3}, 3, 4},
+		{"no landing", map[int]int{}, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := windowRow(t, landings(c.members), at(0), at(120))
+			if row.BusiestHourLandings != c.busiest || row.Landed != c.landed {
+				t.Fatalf("busiest hour %d of %d landed, want %d of %d", row.BusiestHourLandings, row.Landed, c.busiest, c.landed)
+			}
+		})
+	}
+}
+
+func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	ready := func(n int) queue.PR {
+		return queue.PR{Number: n, Head: queue.SHA(fmt.Sprintf("h%d", n)), Checks: queue.Success}
+	}
+	member := func(n int) queue.Member { return queue.Member{Number: n, Head: queue.SHA(fmt.Sprintf("h%d", n))} }
+	candidate := func(sha queue.SHA, verdict queue.Verdict, members ...int) queue.Build {
+		b := queue.Build{SHA: sha, Kind: queue.Candidate, Verdict: verdict}
+		for _, n := range members {
+			b.Chain = append(b.Chain, member(n))
+		}
+		return b
+	}
+	probe := func(verdict queue.Verdict) queue.Build {
+		return queue.Build{SHA: "p", Kind: queue.Probe, Verdict: verdict, Chain: []queue.Member{member(1)}}
+	}
+	record := func(m, slots int, prs []queue.PR, builds []queue.Build, actions ...queue.Action) queue.Recording {
+		return queue.Recording{World: queue.World{Now: at(m), Trunk: "t", PRs: prs, Builds: builds}, Config: queue.Config{Slots: slots}, Actions: actions}
+	}
+	full := func(m int) queue.Recording {
+		return record(m, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)})
+	}
+	free := func(m int) queue.Recording {
+		return record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)})
+	}
+	run := func(ms ...int) []queue.Recording {
+		var recs []queue.Recording
+		for _, m := range ms {
+			if m < 0 {
+				recs = append(recs, free(-m))
+			} else {
+				recs = append(recs, full(m))
+			}
+		}
+		return recs
+	}
+	for _, c := range []struct {
+		name    string
+		recs    []queue.Recording
+		minutes float64
+	}{
+		{"every slot held", []queue.Recording{full(0), full(7)}, 7},
+		{"one slot free", []queue.Recording{free(0), free(7)}, 0},
+		{"the record's own push takes the last ready pull request", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Pending)}),
+			record(7, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: candidate("d", queue.Pending, 1, 2)})}, 0},
+		{"the record's own push takes the last free slot", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: candidate("d", queue.Pending, 1, 2)}),
+			record(7, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)})}, 7},
+		{"a pending probe holds no slot", func() []queue.Recording {
+			var recs []queue.Recording
+			for m := 0; m <= 60; m += 10 {
+				recs = append(recs, record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Pending)}))
+			}
+			return recs
+		}(), 0},
+		{"the record's own probe holds no slot", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: probe(queue.Pending)}),
+			record(7, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "push", Build: probe(queue.Pending)})}, 0},
+		{"two pending candidates fill two slots", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)}),
+			record(7, 2, []queue.PR{ready(1), ready(2), ready(3)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)})}, 7},
+		{"a deleted candidate's members are not started", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("d", queue.Pending, 1, 2)}, queue.Action{Do: "delete", SHA: "d"})}, 7},
+		{"a probe with a verdict holds none, nor a candidate with one", []queue.Recording{
+			record(0, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Failure), candidate("e", queue.Success, 3)}),
+			record(7, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), probe(queue.Failure), candidate("e", queue.Success, 3)})}, 0},
+		{"a pull request held by a wait or by its checks is not ready", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Wait: "it is labelled merge-queue-hold"}, {Number: 3, Head: "h3", Checks: queue.Pending}}, []queue.Build{candidate("c", queue.Pending, 1)}),
+			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Wait: "it is labelled merge-queue-hold"}, {Number: 3, Head: "h3", Checks: queue.Pending}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 0},
+		{"a pull request that conflicts with the trunk cannot be built", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}),
+			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 0},
+		{"a pull request at a head no chain holds is not started", []queue.Recording{
+			record(0, 1, []queue.PR{{Number: 1, Head: "pushed-again", Checks: queue.Success}}, []queue.Build{candidate("c", queue.Pending, 1)}),
+			record(7, 1, []queue.PR{{Number: 1, Head: "pushed-again", Checks: queue.Success}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 7},
+		{"the record's own delete frees the slot", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "delete", SHA: "c"})}, 0},
+		{"the record's own landing takes the waiter", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("e", queue.Success, 2)}, queue.Action{Do: "land", SHA: "e", Members: []queue.Member{member(2)}})}, 0},
+		{"the record's own ejection takes the waiter", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "eject", PR: 2, Cause: "culprit"})}, 0},
+		{"the record's own note that a pull request conflicts with the trunk", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: trunkConflict}),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: trunkConflict})}, 0},
+		{"the record's own note replaces an old note that it conflicts with the trunk", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"}),
+			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"})}, 7},
+		{"no slots, no backlog", func() []queue.Recording {
+			var recs []queue.Recording
+			for m := 0; m <= 60; m += 10 {
+				recs = append(recs, record(m, 0, []queue.PR{ready(1)}, nil))
+			}
+			return recs
+		}(), 0},
+		{"a run broken by one record with no backlog restarts", run(0, 5, -10, 15, 20, 25, 30), 15},
+		{"more than 10 minutes with no record ends the run", run(0, 10, 21, 25), 10},
+		{"a run lasts from its first record to its last", run(0, 4, -9), 4},
+		{"records before the window do not count", append([]queue.Recording{full(-5)}, run(0, 5)...), 5},
+		{"records at and after the window's end do not count", run(110, 115, 120, 125), 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := windowRow(t, c.recs, at(0), at(120))
+			if row.BacklogLongestMinutes != c.minutes {
+				t.Fatalf("longest backlog %v minutes, want %v", row.BacklogLongestMinutes, c.minutes)
 			}
 		})
 	}
