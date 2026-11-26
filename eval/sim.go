@@ -103,6 +103,9 @@ type Episode struct {
 	// Share, where set, is the share of the agents the episode breaks: a build that lands on
 	// one fails whatever its tree, and the rest are untouched. 0 is all of them.
 	Share float64
+	// Fixes, where set, are the recorded pull requests that fix one that NeedsFix: a tree
+	// holding any of them passes, and no fix is queued.
+	Fixes []int
 }
 
 type simPR struct {
@@ -126,6 +129,7 @@ type simPR struct {
 type simBuild struct {
 	queue.Build
 	start, end time.Duration
+	pushed     time.Duration
 	lost       bool
 	flake      bool
 	errored    bool
@@ -366,7 +370,7 @@ func (s *Sim) red(sha queue.SHA, tree map[int]bool, at time.Duration) bool {
 		if e.NeedsFix {
 			fixed := false
 			for n := range tree {
-				fixed = fixed || s.prs[n].fix == i+1
+				fixed = fixed || s.prs[n].fix == i+1 || slices.Contains(e.Fixes, n)
 			}
 			if !fixed {
 				return true
@@ -447,10 +451,19 @@ func (s *Sim) flakes() bool {
 	return s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0)
 }
 
+// begun is when a build's tree is judged against the trunk's episodes: a recorded replay's are
+// on the acts' clock, so its trees go by their push.
+func (s *Sim) begun(b *simBuild) time.Duration {
+	if s.shape.Recorded {
+		return b.pushed
+	}
+	return b.start
+}
+
 func (s *Sim) verdict(b *simBuild) queue.Verdict {
 	tree := s.holds[b.SHA]
 	switch {
-	case s.red(b.SHA, tree, b.start), b.guilty:
+	case s.red(b.SHA, tree, s.begun(b)), b.guilty:
 		return queue.Failure
 	case b.flake:
 		return queue.Failure
@@ -479,7 +492,7 @@ func (s *Sim) step(at time.Duration) {
 		s.open()
 	}
 	for i, e := range s.shape.Episodes {
-		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
+		if e.NeedsFix && e.Fixes == nil && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
 			p.First, p.fix, p.breaks, p.clash, p.conflict, p.ahead = true, i+1, false, 0, false, 0
 			s.say("the fix for the red trunk is queued as #%d", p.Number)
@@ -530,7 +543,7 @@ func (s *Sim) step(at time.Duration) {
 					s.RedPullRequests += len(b.Chain)
 				}
 			}
-			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), b.guilty, b.flake)
+			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], s.begun(b)), b.guilty, b.flake)
 		}
 	}
 	s.tick()
@@ -752,7 +765,7 @@ func (s *Sim) push(b queue.Build) {
 		}
 	}
 
-	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost), guilty: guilty}
+	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), pushed: s.now, end: s.now + d, lost: s.chance(s.shape.Lost), guilty: guilty}
 	s.Minutes += d.Minutes()
 	if s.pool != nil {
 		sb.end = never
@@ -951,6 +964,18 @@ func (s *Sim) kept() bool {
 		}
 	}
 	return false
+}
+
+// unfixed is how many episodes that recorded pull requests fix are still red: none of their
+// fixes has landed.
+func (s *Sim) unfixed() int {
+	n := 0
+	for _, e := range s.shape.Episodes {
+		if e.Fixes != nil && !slices.ContainsFunc(e.Fixes, func(n int) bool { return s.prs[n] != nil && s.prs[n].landed }) {
+			n++
+		}
+	}
+	return n
 }
 
 // idle says no pull request or episode remains.
