@@ -212,9 +212,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			case a.Do == "delete" && !deleted[a.SHA]:
 				b, ok := buildingOnLandedChain(rec, a.SHA)
 				pushedAt := cmp.Or(b.Pushed, pushTimes[a.SHA])
-				if ok && hadMembers[a.SHA] && !pushedAt.IsZero() {
+				if ok && hadMembers[a.SHA] && !pushedAt.IsZero() && now.After(pushedAt) {
 					deleted[a.SHA] = true
-					if opts.contains(now) && now.After(pushedAt) {
+					if opts.contains(now) {
 						overtaken = append(overtaken, overtakenBuild{b.SHA, b.Kind, now.Sub(pushedAt).Minutes()})
 					}
 				}

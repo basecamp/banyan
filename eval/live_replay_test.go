@@ -982,6 +982,16 @@ func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
 			recs[5].World.Builds[0].Pushed = recs[5].World.Now.Add(time.Second)
 			return recs
 		}, answered},
+		{"stamped after the record's time, refused, then deleted again", func(recs []queue.Recording) []queue.Recording {
+			recs[5].World.Builds[0].Pushed = recs[5].World.Now.Add(time.Second)
+			later, last := recs[5], recs[5]
+			later.World.Now, last.World.Now = replayStart.Add(55*time.Minute), replayStart.Add(58*time.Minute)
+			return append(recs, later, last)
+		}, with(5*time.Minute - time.Second)},
+		{"deleted at its push time", func(recs []queue.Recording) []queue.Recording {
+			recs[5].World.Builds[0].Pushed = recs[5].World.Now
+			return recs
+		}, answered},
 		{"a candidate never read with members", func(recs []queue.Recording) []queue.Recording {
 			eachLower(recs, func(b *queue.Build) { b.Base, b.Chain = b.SHA, nil })
 			return recs
@@ -1055,13 +1065,26 @@ func TestReplayNeverTimesAProbeOvertaken(t *testing.T) {
 	}
 }
 
+func TestReplayNeverTimesACandidateThatAnsweredOvertaken(t *testing.T) {
+	rec := overtakenWindow(nil)[5]
+	rec.World.Builds = slices.Clone(rec.World.Builds)
+	rec.World.Builds[0].Verdict = queue.Failure
+	if _, ok := buildingOnLandedChain(rec, "lower"); ok {
+		t.Fatal("a candidate with a verdict counted as overtaken")
+	}
+}
+
 func TestReplayCountsAnOvertakenCandidateWhereItsDeleteWasFirstPlanned(t *testing.T) {
-	window := func(t *testing.T, building []queue.Member) []time.Duration {
+	window := func(t *testing.T, landedFirst bool) []time.Duration {
 		recs := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
 			first := recs[5]
+			if !landedFirst {
+				first = recs[4]
+				first.World.Builds = slices.Clone(first.World.Builds)
+				recs[4].Actions = nil
+				first.Actions = append(slices.Clone(first.Actions), queue.Action{Do: "delete", SHA: "lower"})
+			}
 			first.World.Now = replayStart.Add(59 * time.Minute)
-			first.World.Builds = slices.Clone(first.World.Builds)
-			first.World.Builds[0].Chain = building
 			again := recs[5]
 			again.World.Now = replayStart.Add(61 * time.Minute)
 			return append(recs[:5], first, again)
@@ -1070,12 +1093,12 @@ func TestReplayCountsAnOvertakenCandidateWhereItsDeleteWasFirstPlanned(t *testin
 		return w.times
 	}
 	t.Run("first planned before the window", func(t *testing.T) {
-		if got := window(t, nil); len(got) != 0 {
+		if got := window(t, true); len(got) != 0 {
 			t.Fatalf("pool %v", got)
 		}
 	})
 	t.Run("first planned before the window on a chain not yet landed", func(t *testing.T) {
-		if got := window(t, []queue.Member{{Number: 1, Head: "b", Merge: "lower"}}); !slices.Equal(got, []time.Duration{61 * time.Minute}) {
+		if got := window(t, false); !slices.Equal(got, []time.Duration{61 * time.Minute}) {
 			t.Fatalf("pool %v", got)
 		}
 	})
