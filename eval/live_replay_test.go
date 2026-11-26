@@ -566,6 +566,35 @@ func TestReplayLabelsAgainAtTheFirstTickFromItsReturnAPullRequestEjectedInErrorI
 		t.Fatalf("at %v #1 queued %v, want back at 6m, the first tick from zero after its return", s.now, s.prs[1].queued)
 	}
 }
+
+func TestReplayLabelsAgainBeforeTheWindowAPullRequestEjectedInErrorWhoseReturnFallsDueThen(t *testing.T) {
+	p := replayPR(1)
+	p.Queued = replayStart.Add(-21 * time.Minute)
+	_, w, _ := replayWindow(t, []queue.Recording{replayTick(-21, p), replayTick(0, p)}, 30)
+	s := NewSim(Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: 2 * time.Minute, Flake: 1}, w.cfg, 1)
+	at := map[time.Duration]simPR{}
+	var ticks []time.Duration
+	s.plan = func(world queue.World, c queue.Config) []queue.Action {
+		for sha, b := range s.builds {
+			b.flake = s.holds[sha][1]
+		}
+		if _, ok := at[s.now]; !ok {
+			at[s.now], ticks = *s.prs[1], append(ticks, s.now)
+		}
+		return queue.Plan(world, c)
+	}
+	s.Run()
+	out, ok := at[-5*time.Minute]
+	if !ok || out.queued || out.back != -3*time.Minute || s.Left[1] != "culprit" {
+		t.Fatalf("at -5m #1 ticked %v, queued %v, back at %v, left %q; want out until -3m after a wrong ejection at -13m", ok, out.queued, out.back, s.Left[1])
+	}
+	if i := slices.Index(ticks, -5*time.Minute); i+1 >= len(ticks) || ticks[i+1] != -3*time.Minute || !at[-3*time.Minute].queued {
+		t.Fatalf("ticks %v, #1 queued at -3m %v; want queued again at -3m, the first tick from its return", ticks, at[-3*time.Minute].queued)
+	}
+	if open, ok := at[0]; !ok || !open.queued {
+		t.Fatalf("at the window's start #1 ticked %v, queued %v; want it queued", ok, open.queued)
+	}
+}
 func TestReplayTreatsLiveWinnersAlike(t *testing.T) {
 	p, q := replayPR(1), replayPR(2)
 	a, b := p, q
