@@ -139,8 +139,8 @@ type liveMeasures struct {
 	ReadyGapsOver90              int        `json:"ready_gaps_over_90"`
 	// BusiestHourLandings is the most landings in the window in 60 minutes from one of them.
 	// BacklogLongestMinutes is the longest run of records in the window, none more than 10
-	// minutes after the one before, after whose own actions a ready pull request is in no
-	// pending candidate or push and no slot is free, from the run's first record to its last.
+	// minutes after the one before, after whose own actions a pull request that could be built
+	// is in no pending candidate or push and no slot is free, from the run's first record to its last.
 	BusiestHourLandings   int     `json:"busiest_hour_landings"`
 	BacklogLongestMinutes float64 `json:"backlog_longest_minutes"`
 	// UnplannedTrunkMoves counts the ticks in the window that read the trunk at a commit the tick
@@ -455,8 +455,8 @@ func longestBacklog(recs []queue.Recording, opts liveOptions) time.Duration {
 	return longest
 }
 
-// backlogged says that after the record's own actions a ready pull request is in no pending
-// candidate or push, and every slot is held by a pending build or a push.
+// backlogged says that after the record's own actions a pull request that could be built is in
+// no pending candidate or push, and every slot is held by a pending build or a push.
 func backlogged(rec queue.Recording) bool {
 	held, started := 0, map[headKey]bool{}
 	for _, b := range rec.World.Builds {
@@ -478,12 +478,8 @@ func backlogged(rec queue.Recording) bool {
 		}
 	}
 	return held >= rec.Config.Slots && slices.ContainsFunc(rec.World.PRs, func(pr queue.PR) bool {
-		return readyToJoin(pr) && !started[headKey{pr.Number, pr.Head}]
+		return waitsOnTheQueue(pr) && !started[headKey{pr.Number, pr.Head}]
 	})
-}
-
-func readyToJoin(pr queue.PR) bool {
-	return pr.Wait == "" && pr.Checks == queue.Success
 }
 
 // waitsOnTheQueue says a recorded pull request could be built: its own checks passed, nothing of

@@ -670,6 +670,9 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 		{"a pull request held by a wait or by its checks is not ready", []queue.Recording{
 			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Wait: "it is labelled merge-queue-hold"}, {Number: 3, Head: "h3", Checks: queue.Pending}}, []queue.Build{candidate("c", queue.Pending, 1)}),
 			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Wait: "it is labelled merge-queue-hold"}, {Number: 3, Head: "h3", Checks: queue.Pending}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 0},
+		{"a pull request that conflicts with the trunk cannot be built", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}),
+			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 0},
 		{"a pull request at a head no chain holds is not started", []queue.Recording{
 			record(0, 1, []queue.PR{{Number: 1, Head: "pushed-again", Checks: queue.Success}}, []queue.Build{candidate("c", queue.Pending, 1)}),
 			record(7, 1, []queue.PR{{Number: 1, Head: "pushed-again", Checks: queue.Success}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 7},

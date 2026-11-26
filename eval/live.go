@@ -135,7 +135,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				labelled[pr.Number] = pr.Queued
 			}
 			h := recordedHead{pr.Number, pr.Head, pr.Queued}
-			if at[pr.Number] = h; ready[h].IsZero() && readyToJoin(pr) {
+			if at[pr.Number] = h; ready[h].IsZero() && pr.Wait == "" && pr.Checks == queue.Success {
 				if ready[h] = pr.Queued; seen[h] || seenQueue[[2]any{pr.Number, pr.Queued}] || pr.Queued.IsZero() {
 					ready[h] = now
 				}
