@@ -1060,9 +1060,17 @@ func TestReplayRequeuesAtItsNextHeadAPullRequestItEjectedFirst(t *testing.T) {
 	if labels := labelled(w, 3); !slices.Equal(labels, []time.Duration{2 * time.Minute, 34 * time.Minute}) {
 		t.Fatalf("labelled at %v", labels)
 	}
+	for _, a := range w.acts {
+		if a.Number == 3 && a.Do == "label" && (a.Queued == nil || *a.Queued != 2*time.Minute) {
+			t.Fatalf("#3 labelled at %v as queued at %v, want the record's 2m", a.At, a.Queued)
+		}
+	}
 	s := fastReplay(w)
 	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || len(s.Broken) > 0 {
 		t.Fatalf("#3 left for %q, landed %v at head %s: %v", s.Left[3], p.landed, p.Head, s.Broken)
+	}
+	if p := s.prs[3]; p.arrived != 2*time.Minute || !p.Queued.Equal(s.epoch.Add(2*time.Minute)) {
+		t.Fatalf("#3 came back as arrived at %v, queued at %v", p.arrived, p.Queued.Sub(s.epoch))
 	}
 }
 
@@ -1136,6 +1144,32 @@ func TestReplayGuiltyHeadsFailingTimesLeaveTheSharedSample(t *testing.T) {
 	}
 }
 
+func TestReplayRowWaitsByTheGuiltyHeadsFailingTimes(t *testing.T) {
+	was, w, _ := replayWindow(t, timedGuiltDay(), 80)
+	_, timed := w.simulate(Shape{}, was)
+	w.failing = nil
+	_, shared := w.simulate(Shape{}, was)
+	if timed.WaitP50Minutes == nil || shared.WaitP50Minutes == nil || *timed.WaitP50Minutes >= *shared.WaitP50Minutes {
+		t.Fatalf("wait p50 %v with #3's failing times, %v with every build its 10m", timed.WaitP50Minutes, shared.WaitP50Minutes)
+	}
+}
+
+func TestReplayGuiltyHeadsBuildsDrawAmongItsFailingTimes(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	failing := []time.Duration{5 * time.Minute, 3 * time.Minute, 7 * time.Minute}
+	s, _ := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": failing}))
+	took := map[time.Duration]bool{}
+	for i := range 8 {
+		sha := queue.SHA(fmt.Sprintf("guilty%d", i))
+		s.holds[sha] = map[int]bool{3: true}
+		s.push(queue.Build{SHA: sha})
+		took[s.builds[sha].end-s.now] = true
+	}
+	if len(took) < 2 || slices.ContainsFunc(slices.Collect(maps.Keys(took)), func(d time.Duration) bool { return !slices.Contains(failing, d) }) {
+		t.Fatalf("eight trees #3 breaks took %v, want more than one of its recorded %v", slices.Sorted(maps.Keys(took)), failing)
+	}
+}
+
 // withTimes is how long builds take in a replay of guiltDay: the shared sample, and the failing
 // times of the heads that broke it.
 func withTimes(shared []time.Duration, failing map[queue.SHA][]time.Duration) func(*Shape) {
@@ -1159,12 +1193,17 @@ func TestReplayTreeOfTwoGuiltyHeadsFailsInTheShorterTime(t *testing.T) {
 			w.acts[i].Breaks = true
 		}
 	}
-	s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": {8 * time.Minute}, "head2": {3 * time.Minute}}))
-	if !s.holds[sha][2] {
-		t.Fatalf("the tree does not hold #2: %v", s.holds[sha])
-	}
-	if took := s.builds[sha].end - s.now; took != 3*time.Minute {
-		t.Fatalf("the tree #2 and #3 break took %v, want the shorter 3m", took)
+	for _, failing := range []map[queue.SHA][]time.Duration{
+		{"head2": {3 * time.Minute}, "head3": {8 * time.Minute}},
+		{"head2": {8 * time.Minute}, "head3": {3 * time.Minute}},
+	} {
+		s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, failing))
+		if !s.holds[sha][2] {
+			t.Fatalf("the tree does not hold #2: %v", s.holds[sha])
+		}
+		if took := s.builds[sha].end - s.now; took != 3*time.Minute {
+			t.Fatalf("the tree #2 and #3 break took %v with %v, want the shorter 3m", took, failing)
+		}
 	}
 }
 
