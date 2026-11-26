@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"time"
@@ -62,6 +63,10 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			}
 		}
 	}
+	spans, theirs := redTrunks(recs)
+	for sha := range theirs {
+		delete(red, sha)
+	}
 	left := brokeAndLeft(recs, builds, green, red, broken, confirmed)
 	for k := range left {
 		broken[k] = true
@@ -73,6 +78,13 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 		if windowIndex = i; !r.World.Now.After(start.Add(-leadIn)) {
 			firstIndex = i
+		}
+	}
+	opens := min(max(recs[firstIndex].World.Now.Sub(start), -leadIn), 0)
+	w.episodes = nil
+	for _, span := range spans {
+		if at, until := max(span.from.Sub(start), opens), span.until.Sub(start); until > at && at < w.stop {
+			w.episodes = append(w.episodes, Episode{At: at, For: until - at})
 		}
 	}
 	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
@@ -98,6 +110,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	for sha, b := range candidates {
+		if theirs[sha] {
+			continue
+		}
 		if len(builds[sha].Chain) > len(b.Chain) {
 			b.Chain = builds[sha].Chain
 		}
@@ -347,11 +362,11 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 // no landing of it was confirmed, two or more whole builds that held it were read red with no
 // ejected culprit among their members, and a later record no longer queues it at that head.
 //
-// It leaves three things out. It takes no account of a red trunk, so a head that leaves while
-// the trunk fails is held guilty, the trunk's red builds counting with the rest of its evidence.
-// A head with a single failed build is never held guilty, even one that failed alone. And it
-// cannot tell a head from what it failed beside unless the record ejected the other, so two
-// heads failing in the same builds are both held guilty.
+// red holds no build of a red trunk, which is no evidence against the heads it held.
+//
+// It leaves two things out. A head with a single failed build is never held guilty, even one
+// that failed alone. And it cannot tell a head from what it failed beside unless the record
+// ejected the other, so two heads failing in the same builds are both held guilty.
 //
 // The replay labels the pull request of any guilty head, these and those the record ejected,
 // again at the next head the record queues it at, as the replay's queue may have ejected it
@@ -387,6 +402,88 @@ func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, gree
 		}
 	}
 	return guilty
+}
+
+// redTrunk is a span in which the records read the trunk at one commit failing for its own
+// reason.
+type redTrunk struct {
+	from, until time.Time
+}
+
+// redTrunks is each span in which the records read the trunk itself red, with the builds that are
+// its. The trunk at T is red where two probes of the bare trunk on T were read red and no build
+// on T pushed between their pushes was read green. It is red from the record that made T the
+// trunk until the push of the first build on T read green that was pushed after the first of
+// those probes, or the last record where none was. A build is the trunk's where the record that
+// first read it red stands it on T, and it was pushed before the span ends: the records rewrite
+// a build's base as the trunk moves, so one pushed before T landed can stand on it by then.
+func redTrunks(recs []queue.Recording) ([]redTrunk, map[queue.SHA]bool) {
+	pushes := pushTimes(recs)
+	planned, became := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
+	var trunks []queue.SHA
+	failed := map[queue.SHA]queue.Build{}
+	passedOn := map[queue.SHA]map[queue.SHA]bool{}
+	for _, r := range recs {
+		if _, ok := became[r.World.Trunk]; !ok {
+			became[r.World.Trunk] = cmp.Or(planned[r.World.Trunk], r.World.Now)
+			trunks = append(trunks, r.World.Trunk)
+		}
+		for _, b := range r.World.Builds {
+			if _, ok := failed[b.SHA]; !ok && b.Verdict == queue.Failure {
+				failed[b.SHA] = b
+			}
+			if b.Verdict == queue.Success && b.SHA != b.Base {
+				if passedOn[b.Base] == nil {
+					passedOn[b.Base] = map[queue.SHA]bool{}
+				}
+				passedOn[b.Base][b.SHA] = true
+			}
+		}
+		for _, a := range r.Actions {
+			if _, ok := became[a.SHA]; a.Do == "land" && !ok {
+				planned[a.SHA] = r.World.Now
+			}
+		}
+	}
+	var spans []redTrunk
+	theirs := map[queue.SHA]bool{}
+	for _, t := range trunks {
+		var probes []queue.SHA
+		for sha, b := range failed {
+			if b.Kind == queue.Probe && len(b.Chain) == 0 && b.Base == t {
+				probes = append(probes, sha)
+			}
+		}
+		slices.SortFunc(probes, func(a, b queue.SHA) int { return cmp.Or(pushes[a].Compare(pushes[b]), cmp.Compare(a, b)) })
+		passed := func(after, before time.Time) bool {
+			for sha := range passedOn[t] {
+				if pushes[sha].After(after) && pushes[sha].Before(before) {
+					return true
+				}
+			}
+			return false
+		}
+		for i := 1; i < len(probes); i++ {
+			first := pushes[probes[i-1]]
+			if passed(first, pushes[probes[i]]) {
+				continue
+			}
+			until := recs[len(recs)-1].World.Now
+			for sha := range passedOn[t] {
+				if pushes[sha].After(first) && pushes[sha].Before(until) {
+					until = pushes[sha]
+				}
+			}
+			spans = append(spans, redTrunk{became[t], until})
+			for sha, b := range failed {
+				if b.Base == t && pushes[sha].Before(until) {
+					theirs[sha] = true
+				}
+			}
+			break
+		}
+	}
+	return spans, theirs
 }
 
 // heldBehind says the record shows this head refused onto a chain of pull requests ahead of it.

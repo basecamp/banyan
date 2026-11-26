@@ -85,7 +85,7 @@ func replayWindow(t *testing.T, recs []queue.Recording, minutes int) (Score, win
 	return recordedWindow(t, recs, replayStart, replayStart.Add(time.Duration(minutes)*time.Minute))
 }
 func replayShape(w window) Shape {
-	return Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: w.build, Probe: w.probe, Times: w.times, Failing: w.failing}
+	return Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: w.build, Probe: w.probe, Times: w.times, Failing: w.failing, Episodes: w.episodes}
 }
 func runReplay(w window) *Sim {
 	s := NewSim(replayShape(w), w.cfg, 1)
@@ -1449,10 +1449,11 @@ func TestReplayLeavesTheSimulatedHalfOfACleanDayAsItWas(t *testing.T) {
 	if err := json.Unmarshal([]byte(cleanDaySimulated), &was); err != nil {
 		t.Fatal(err)
 	}
-	if row.Simulated["unejected_guilty_heads"] != 0.0 {
-		t.Fatalf("unejected guilty heads %v", row.Simulated["unejected_guilty_heads"])
+	if row.Simulated["unejected_guilty_heads"] != 0.0 || row.Simulated["red_trunk_spans"] != 0.0 {
+		t.Fatalf("unejected guilty heads %v, red trunk spans %v", row.Simulated["unejected_guilty_heads"], row.Simulated["red_trunk_spans"])
 	}
 	delete(row.Simulated, "unejected_guilty_heads")
+	delete(row.Simulated, "red_trunk_spans")
 	if !reflect.DeepEqual(row, was) {
 		t.Fatalf("simulated half changed:\n%v\n%v", row, was)
 	}
