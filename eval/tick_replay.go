@@ -56,7 +56,6 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	left := brokeAndLeft(recs, builds, green, red, broken, confirmed)
-	w.unejectedGuilty = len(left)
 	for k := range left {
 		broken[k] = true
 	}
@@ -255,6 +254,11 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			}
 		}
 		previous = present
+	}
+	for k := range left {
+		if slices.ContainsFunc(w.acts, func(a Act) bool { return a.Do == "head" && a.Number == k.number && a.Head == k.head }) {
+			w.unejectedGuilty++
+		}
 	}
 
 	// Population follows recorded labels and readiness, including repeated queueings.

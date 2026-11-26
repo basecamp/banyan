@@ -1243,6 +1243,10 @@ func TestReplayRowCountsTheGuiltyHeadsTheRecordDidNotEject(t *testing.T) {
 			}
 		})
 	}
+	was, w, _ := recordedWindow(t, guiltDay(), replayStart.Add(40*time.Minute), replayStart.Add(80*time.Minute))
+	if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != 0 {
+		t.Fatalf("a window opening after head3 left counts %d unejected guilty heads", sim.UnejectedGuiltyHeads)
+	}
 }
 
 func TestReplayGuiltyHeadsBuildsDrawAmongItsFailingTimes(t *testing.T) {
