@@ -68,5 +68,5 @@ def later_row:
    | "The four hours before the window, \(.from | hm) on \(.from[0:10]) to \(.to | hm) on \(.to[0:10])" as $title
    | "",
      (if .live == null or .live.ticks == 0 then "**\($title)**: no records cover them."
-      elif (.live.landed // 0) == 0 then .live | summary($title; "no landings")
+      elif (.live.landed // 0) == 0 then .live | summary($title; "no landings"), (if (.passing_candidates_thrown_away // 0) > 0 or (.building_candidates_dropped // 0) > 0 then "", "| | |", "|---|---|", thrown_row, dropped_row else empty end)
       else (.live | summary($title; "no landings"), "", "| | |", "|---|---|", ready_row, held_row, builds_row, busiest_row(null; false), gap_row, red_row, thrown_row, dropped_row), (.takeouts | takeouts_row, later_row) end))

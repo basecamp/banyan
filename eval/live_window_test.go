@@ -565,6 +565,8 @@ func TestLiveCountsPassingCandidatesThrownAwayUnlanded(t *testing.T) {
 		{"a passing check, not a candidate", []queue.Recording{deleted(1, nil, queue.Build{SHA: "c", Kind: queue.Check, Verdict: queue.Success, Chain: []queue.Member{one}})}, 0, 10, 0, 0, 0},
 		{"deleted before the window", []queue.Recording{deleted(1, nil, candidate("c", queue.Success, one, two)), {World: queue.World{Now: at(5), Trunk: "t"}}}, 2, 10, 0, 0, 0},
 		{"deleted at the window's end", []queue.Recording{{World: queue.World{Now: at(1), Trunk: "t"}}, deleted(10, nil, candidate("c", queue.Success, one, two))}, 0, 10, 0, 0, 0},
+		{"a later entry for the same commit passed", []queue.Recording{{World: queue.World{Now: at(1), Trunk: "t", PRs: []queue.PR{{Number: 1, Head: "h1-pushed-again"}},
+			Builds: []queue.Build{candidate("c", queue.Failure, one, two), candidate("c", queue.Success, one, two)}}, Actions: []queue.Action{{Do: "delete", SHA: "c"}}}}, 0, 10, 1, 1, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := windowRow(t, c.recs, at(c.from), at(c.to)).liveMeasures
@@ -634,6 +636,13 @@ func TestLiveCountsCandidatesDroppedWhileBuildingForAMember(t *testing.T) {
 		{"a member ejected before the window", []queue.Recording{
 			read(1, all, []queue.Build{building}, queue.Action{Do: "eject", PR: 1, Cause: "culprit"}),
 			deleted(12, all[1:], building)}, 5, 30, 0, 0, 0, 0, 0},
+		{"a push time read by an earlier record", []queue.Recording{
+			read(5, all, []queue.Build{building}),
+			deleted(20, moved, unpushed(building))}, 0, 30, 1, 1, 0, 1, 20},
+		{"an ejection cleared by the pull request queued again at a new head", []queue.Recording{
+			read(10, all, []queue.Build{building}, queue.Action{Do: "eject", PR: 1, Cause: "culprit"}),
+			read(12, []queue.PR{{Number: 1, Head: "h1-pushed-again"}, {Number: 2, Head: "h2"}, {Number: 3, Head: "h3"}}, []queue.Build{building}),
+			deleted(14, all[1:], building)}, 0, 30, 1, 0, 1, 1, 14},
 		{"no push time, no age", []queue.Recording{deleted(22, moved, unpushed(building))}, 0, 30, 1, 1, 0, 1, 0},
 		{"an age only from a push time", []queue.Recording{deleted(22, moved, unpushed(building), candidate("d", queue.Pending, 6, one, two, three))}, 0, 30, 2, 2, 0, 2, 16},
 	} {

@@ -214,6 +214,19 @@ func TestDailyRowShowsCandidatesDroppedWhileBuildingAndTripsOnNone(t *testing.T)
 	}
 }
 
+func TestDailyRowTripsOnNoCandidatesDroppedWhileBuilding(t *testing.T) {
+	dir := standIns(t)
+	live := `LIVE=,"passing_candidates_thrown_away":0,"ready_gaps_over_90":0,"queue_added_p50_minutes":1,"wrong_ejections":0,` +
+		`"building_candidates_dropped":4,"dropped_head_moved":4,"dropped_member_left":0,"dropped_members_still_queued":9,"dropped_longest_built_minutes":30`
+	if status, _ := dailyRowOf(t, dir, "basecamp/hey-native-apps", "COMMIT="+strings.Repeat("a", 40), live); status != 0 {
+		t.Fatalf("status %d", status)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "state", "hey-native-apps", "rows", "2026-11-18.md"))
+	if row := string(data); !strings.Contains(row, "| Candidates dropped while building | 4: ") || !strings.Contains(row, "\nNo tripwire breached.\n") {
+		t.Fatalf("four dropped and no other tripwire reads:\n%s", row)
+	}
+}
+
 func TestDailyRowHoldsNoLimitOnBuildsPerLanding(t *testing.T) {
 	for _, repo := range []string{"basecamp/hey-native-apps", "basecamp/hey2"} {
 		dir := standIns(t)
@@ -392,6 +405,17 @@ func TestDailyRowSaysWhenTheFourHoursBeforeHoldNoRecordsOrNoLanding(t *testing.T
 		{"no tick in the four hours", false, nil, beforeTitle + ": no records cover them.\n"},
 		{"no tick the eval counts", true, []string{"BEFORE_TICKS=0"}, beforeTitle + ": no records cover them.\n"},
 		{"ticks and no landing", true, []string{`BEFORE_LIVE=,"landed":0,"red_candidates":2`}, beforeTitle + ": no landings.\n"},
+		{"no landing and none thrown away or dropped", true, []string{`BEFORE_LIVE=,"landed":0,"passing_candidates_thrown_away":0,"building_candidates_dropped":0`}, beforeTitle + ": no landings.\n"},
+		{"no landing and candidates thrown away and dropped", true, []string{`BEFORE_LIVE=,"landed":0,"passing_candidates_thrown_away":2,"thrown_away_head_moved":1,"thrown_away_member_left":1,` +
+			`"building_candidates_dropped":1,"dropped_head_moved":1,"dropped_member_left":0,"dropped_members_still_queued":2,"dropped_longest_built_minutes":9.5`},
+			beforeTitle + ": no landings.\n\n| | |\n|---|---|\n" +
+				"| Passing candidates thrown away unlanded | 2: 1 with a member's head moved, 1 with a member gone from the queue |\n" +
+				"| Candidates dropped while building | 1: 1 with a member's head moved, 0 with a member gone from the queue; 2 of their pull requests stayed queued at the same head, the longest 9 min into its build |\n"},
+		{"no landing and candidates dropped", true, []string{`BEFORE_LIVE=,"landed":0,"passing_candidates_thrown_away":0,` +
+			`"building_candidates_dropped":3,"dropped_head_moved":2,"dropped_member_left":1,"dropped_members_still_queued":4,"dropped_longest_built_minutes":0`},
+			beforeTitle + ": no landings.\n\n| | |\n|---|---|\n" +
+				"| Passing candidates thrown away unlanded | none |\n" +
+				"| Candidates dropped while building | 3: 2 with a member's head moved, 1 with a member gone from the queue; 4 of their pull requests stayed queued at the same head |\n"},
 	} {
 		dir := standIns(t)
 		if c.records {
@@ -402,7 +426,7 @@ func TestDailyRowSaysWhenTheFourHoursBeforeHoldNoRecordsOrNoLanding(t *testing.T
 		}
 		data, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
 		row := string(data)
-		if !strings.HasSuffix(row, " comments.\n\n"+c.line) || strings.Count(row, "| | |") != 1 {
+		if !strings.HasSuffix(row, " comments.\n\n"+c.line) || strings.Count(row, "| | |") != 1+strings.Count(c.line, "| | |") {
 			t.Fatalf("%s reads:\n%s", c.name, row)
 		}
 		asked, _ := os.ReadFile(filepath.Join(dir, "asked"))

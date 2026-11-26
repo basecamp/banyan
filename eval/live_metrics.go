@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -205,19 +206,11 @@ func (opts liveOptions) context() liveOptions {
 
 // splitLive splits counted landings only when all of their clocks are known and ordered.
 func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions) ([]landingParts, int) {
-	pushes, verdicts := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
+	pushes, verdicts := pushTimes(recs), map[queue.SHA]time.Time{}
 	for _, rec := range recs {
 		for _, b := range rec.World.Builds {
-			if !b.Pushed.IsZero() && pushes[b.SHA].IsZero() {
-				pushes[b.SHA] = b.Pushed
-			}
 			if b.Verdict != queue.Pending && verdicts[b.SHA].IsZero() {
 				verdicts[b.SHA] = rec.World.Now
-			}
-		}
-		for _, a := range rec.Actions {
-			if a.Do == "push" && pushes[a.Build.SHA].IsZero() {
-				pushes[a.Build.SHA] = rec.World.Now
 			}
 		}
 	}
@@ -241,6 +234,24 @@ func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions)
 	return rows, skipped
 }
 
+// pushTimes is each build's first recorded push time, or the tick that planned its push.
+func pushTimes(recs []queue.Recording) map[queue.SHA]time.Time {
+	pushes := map[queue.SHA]time.Time{}
+	for _, rec := range recs {
+		for _, b := range rec.World.Builds {
+			if !b.Pushed.IsZero() && pushes[b.SHA].IsZero() {
+				pushes[b.SHA] = b.Pushed
+			}
+		}
+		for _, a := range rec.Actions {
+			if a.Do == "push" && pushes[a.Build.SHA].IsZero() {
+				pushes[a.Build.SHA] = rec.World.Now
+			}
+		}
+	}
+	return pushes
+}
+
 func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLanding) liveMeasures {
 	rows, skipped := splitLive(recs, landings, opts)
 	m := liveMeasures{SplitLandings: len(rows), UnsplitLandings: skipped,
@@ -259,7 +270,7 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 		}
 	}
 	thrown, dropped, stillQueued := map[queue.SHA]bool{}, map[queue.SHA]bool{}, map[headKey]bool{}
-	landedHeads, ejectedSinceQueued := map[headKey]bool{}, map[int]bool{}
+	landedHeads, ejectedSinceQueued, pushes := map[headKey]bool{}, map[int]bool{}, pushTimes(recs)
 	for _, rec := range recs {
 		for _, pr := range rec.World.PRs {
 			delete(ejectedSinceQueued, pr.Number)
@@ -285,8 +296,10 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 				if b.SHA != a.SHA || b.Kind != queue.Candidate || len(b.Chain) == 0 {
 					continue
 				}
-				switch {
-				case b.Verdict == queue.Success && !thrown[a.SHA]:
+				if b.Verdict == queue.Success && thrown[a.SHA] || b.Verdict == queue.Pending && dropped[a.SHA] {
+					break
+				}
+				if b.Verdict == queue.Success {
 					thrown[a.SHA] = true
 					m.PassingCandidatesThrownAway++
 					moved, left := throwReasons(rec.World.PRs, b.Chain)
@@ -296,7 +309,9 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 					if left {
 						m.ThrownAwayMemberLeft++
 					}
-				case b.Verdict == queue.Pending && !dropped[a.SHA]:
+					break
+				}
+				if b.Verdict == queue.Pending {
 					if moved, left := dropReasons(rec.World.PRs, b.Chain, landedHeads, ejectedSinceQueued); moved || left {
 						dropped[a.SHA] = true
 						m.BuildingCandidatesDropped++
@@ -311,12 +326,12 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 								stillQueued[headKey{pr.Number, pr.Head}] = true
 							}
 						}
-						if !b.Pushed.IsZero() {
-							m.DroppedLongestBuiltMinutes = max(m.DroppedLongestBuiltMinutes, rec.World.Now.Sub(b.Pushed).Minutes())
+						if pushed := cmp.Or(b.Pushed, pushes[b.SHA]); !pushed.IsZero() {
+							m.DroppedLongestBuiltMinutes = max(m.DroppedLongestBuiltMinutes, rec.World.Now.Sub(pushed).Minutes())
 						}
+						break
 					}
 				}
-				break
 			}
 		}
 	}
