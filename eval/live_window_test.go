@@ -528,3 +528,48 @@ func TestLiveMarksWithoutPlansDoNotCount(t *testing.T) {
 		t.Fatalf("unplanned marks: %+v", row)
 	}
 }
+
+func TestLiveCountsPassingCandidatesThrownAwayUnlanded(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	candidate := func(sha queue.SHA, verdict queue.Verdict, chain ...queue.Member) queue.Build {
+		return queue.Build{SHA: sha, Kind: queue.Candidate, Verdict: verdict, Chain: chain}
+	}
+	one, two := queue.Member{Number: 1, Head: "h1", Merge: "m1"}, queue.Member{Number: 2, Head: "h2", Merge: "m2"}
+	deleted := func(m int, prs []queue.PR, b queue.Build) queue.Recording {
+		return queue.Recording{World: queue.World{Now: at(m), Trunk: "t", PRs: prs, Builds: []queue.Build{b}}, Actions: []queue.Action{{Do: "delete", SHA: b.SHA}}}
+	}
+	both := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2"}}
+	moved := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2-pushed-again"}}
+	for _, c := range []struct {
+		name                    string
+		recs                    []queue.Recording
+		from, to                int
+		thrown, headMoved, left int
+	}{
+		{"a member's head moved", []queue.Recording{deleted(1, moved, candidate("c", queue.Success, one, two))}, 0, 10, 1, 1, 0},
+		{"a member left", []queue.Recording{deleted(1, both[:1], candidate("c", queue.Success, one, two))}, 0, 10, 1, 0, 1},
+		{"one member moved and another left", []queue.Recording{deleted(1, moved[1:], candidate("c", queue.Success, one, two))}, 0, 10, 1, 1, 1},
+		{"deleted twice, counted once", []queue.Recording{deleted(1, both[:1], candidate("c", queue.Success, one, two)), deleted(2, both[:1], candidate("c", queue.Success, one, two))}, 0, 10, 1, 0, 1},
+		{"landed, then deleted", []queue.Recording{
+			{World: queue.World{Now: at(1), Trunk: "t", PRs: both, Builds: []queue.Build{candidate("c", queue.Success, one, two)}}, Actions: []queue.Action{{Do: "land", SHA: "c", Members: []queue.Member{one, two}}}},
+			deleted(2, nil, candidate("c", queue.Success, one, two))}, 0, 10, 0, 0, 0},
+		{"landed after the window", []queue.Recording{
+			deleted(1, both[:1], candidate("c", queue.Success, one, two)),
+			{World: queue.World{Now: at(20), Trunk: "t", PRs: both, Builds: []queue.Build{candidate("c", queue.Success, one, two)}}, Actions: []queue.Action{{Do: "land", SHA: "c", Members: []queue.Member{one, two}}}}}, 0, 10, 0, 0, 0},
+		{"failed", []queue.Recording{deleted(1, nil, candidate("c", queue.Failure, one, two))}, 0, 10, 0, 0, 0},
+		{"pending", []queue.Recording{deleted(1, nil, candidate("c", queue.Pending, one, two))}, 0, 10, 0, 0, 0},
+		{"passed with an empty chain", []queue.Recording{deleted(1, nil, candidate("c", queue.Success))}, 0, 10, 0, 0, 0},
+		{"a passing check, not a candidate", []queue.Recording{deleted(1, nil, queue.Build{SHA: "c", Kind: queue.Check, Verdict: queue.Success, Chain: []queue.Member{one}})}, 0, 10, 0, 0, 0},
+		{"deleted before the window", []queue.Recording{deleted(1, nil, candidate("c", queue.Success, one, two)), {World: queue.World{Now: at(5), Trunk: "t"}}}, 2, 10, 0, 0, 0},
+		{"deleted at the window's end", []queue.Recording{{World: queue.World{Now: at(1), Trunk: "t"}}, deleted(10, nil, candidate("c", queue.Success, one, two))}, 0, 10, 0, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := windowRow(t, c.recs, at(c.from), at(c.to)).liveMeasures
+			if m.PassingCandidatesThrownAway != c.thrown || m.ThrownAwayHeadMoved != c.headMoved || m.ThrownAwayMemberLeft != c.left {
+				t.Fatalf("thrown away %d, head moved %d, member left %d; want %d, %d, %d",
+					m.PassingCandidatesThrownAway, m.ThrownAwayHeadMoved, m.ThrownAwayMemberLeft, c.thrown, c.headMoved, c.left)
+			}
+		})
+	}
+}
