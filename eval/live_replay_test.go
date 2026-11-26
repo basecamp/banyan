@@ -883,3 +883,103 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 		t.Fatal("unknown perturbation accepted")
 	}
 }
+
+func overtakenWindow(change func(recs []queue.Recording) []queue.Recording) []queue.Recording {
+	fast := queue.Build{SHA: "fast", Pushed: replayStart, Verdict: queue.Success}
+	slow := queue.Build{SHA: "slow", Pushed: replayStart, Verdict: queue.Success}
+	over := queue.Build{SHA: "over", Base: "t", Chain: []queue.Member{{Number: 1, Head: "b", Merge: "over"}}}
+	recs := []queue.Recording{replayTick(0), replayTick(10), replayTick(20), replayTick(30), replayTick(40), replayTick(50)}
+	recs[0].Actions = []queue.Action{{Do: "push", Build: over}}
+	over.Pushed = replayStart
+	recs[1].World.Builds = []queue.Build{over}
+	recs[2].World.Builds = []queue.Build{fast}
+	recs[3].World.Builds = []queue.Build{slow}
+	recs[4].Actions = []queue.Action{{Do: "land", SHA: "later", Members: over.Chain}}
+	over.Base, over.Chain = over.SHA, nil
+	recs[5].World.Trunk, recs[5].World.Builds = "later", []queue.Build{over}
+	recs[5].Actions = []queue.Action{{Do: "delete", SHA: over.SHA}}
+	if change != nil {
+		recs = change(recs)
+	}
+	return recs
+}
+
+func TestReplayTimesABuildOvertakenWhileBuildingByItsAge(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(recs []queue.Recording) []queue.Recording
+		want   []time.Duration
+	}{
+		{"members landed", nil, []time.Duration{20 * time.Minute, 30 * time.Minute, 50 * time.Minute}},
+		{"a member's head moved", func(recs []queue.Recording) []queue.Recording {
+			moved := replayPR(1)
+			moved.Head = "moved"
+			recs[4].Actions = nil
+			recs[5].World.Trunk, recs[5].World.PRs = "t", []queue.PR{moved}
+			recs[5].World.Builds[0].Base, recs[5].World.Builds[0].Chain = "t", recs[1].World.Builds[0].Chain
+			return recs
+		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		{"no push time", func(recs []queue.Recording) []queue.Recording {
+			recs[0].Actions = nil
+			recs[1].World.Builds[0].Pushed, recs[5].World.Builds[0].Pushed = time.Time{}, time.Time{}
+			return recs
+		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		{"a trunk check that never had members", func(recs []queue.Recording) []queue.Recording {
+			check := queue.Build{SHA: "over", Kind: queue.Check, Base: "t", Pushed: replayStart}
+			recs[0].Actions = []queue.Action{{Do: "push", Build: check}}
+			recs[1].World.Builds = []queue.Build{check}
+			recs[5].World.Builds = []queue.Build{check}
+			return recs
+		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		{"answered, then read building and deleted", func(recs []queue.Recording) []queue.Recording {
+			slow := recs[3].World.Builds[0]
+			recs[0].Actions = []queue.Action{{Do: "push", Build: queue.Build{SHA: "slow", Chain: []queue.Member{{Number: 1, Head: "b", Merge: "slow"}}}}}
+			recs[1].World.Builds = nil
+			slow.Verdict, slow.Base = queue.Pending, slow.SHA
+			recs[5].World.Builds = []queue.Build{slow}
+			recs[5].Actions = []queue.Action{{Do: "delete", SHA: slow.SHA}}
+			return recs
+		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		{"deleted again where the first delete failed", func(recs []queue.Recording) []queue.Recording {
+			again := recs[5]
+			again.World.Now = replayStart.Add(55 * time.Minute)
+			return append(recs, again)
+		}, []time.Duration{20 * time.Minute, 30 * time.Minute, 50 * time.Minute}},
+		{"deleted, then read answered", func(recs []queue.Recording) []queue.Recording {
+			answered := recs[5].World.Builds[0]
+			answered.Verdict = queue.Success
+			last := replayTick(55)
+			last.World.Trunk, last.World.Builds = "later", []queue.Build{answered}
+			return append(recs, last)
+		}, []time.Duration{20 * time.Minute, 30 * time.Minute, 55 * time.Minute}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, w, _ := replayWindow(t, overtakenWindow(tc.change), 60)
+			slices.Sort(w.times)
+			if !slices.Equal(w.times, tc.want) {
+				t.Fatalf("pool %v, want %v", w.times, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplayOvertakenBuildLeavesTheLiveHalfAsItWas(t *testing.T) {
+	from, to := replayStart.Format(time.RFC3339), replayStart.Add(time.Hour).Format(time.RFC3339)
+	out, err := captureLiveRun(t, writeLive(t, overtakenWindow(nil)), "hey2", from, to, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatal(err)
+	}
+	delete(row, "simulated")
+	delete(row, "over_live")
+	live, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"arrivals":0,"backlog_longest_minutes":0,"build_median_minutes":30,"building_candidates_dropped":0,"builds_per_landing":3,"busiest_hour_landings":1,"busy_minutes":0,"commit":"unknown","context_ticks":0,"departures_after_an_unconfirmed_plan":0,"dropped_head_moved":0,"dropped_longest_built_minutes":0,"dropped_member_left":0,"dropped_members_still_queued":0,"ejected_p90":null,"ejected_p90_minutes":null,"ejections_as_cause":0,"first_tick":"2026-11-18T12:00:00Z","from":"2026-11-18T12:00:00Z","good_builds":2,"labelled_p50":null,"labelled_p50_minutes":null,"labelled_p90":null,"labelled_p90_minutes":null,"labelled_slowest_20th":null,"labelled_slowest_20th_minutes":null,"landed":1,"landing_build_median_minutes":null,"landings_per_hour":null,"landings_without_a_wait":1,"last_tick":"2026-11-18T12:50:00Z","left_waiting":0,"longest_ready_gap_from":null,"longest_ready_gap_minutes":null,"longest_ready_gap_to":null,"non_passing_builds":0,"passing_candidates_thrown_away":0,"queue_added_over_30":0,"queue_added_over_30_sum_minutes":null,"queue_added_p50_minutes":null,"queue_added_p90_minutes":null,"queue_added_p95_minutes":null,"queue_added_sum_minutes":null,"ready_gaps":0,"ready_gaps_over_90":0,"red_candidates":0,"red_pull_requests":0,"red_read_median_minutes":null,"red_read_n":0,"red_read_sum_minutes":null,"settings_in_window":1,"split_landings":0,"split_ready_to_landed_p50_minutes":null,"split_ready_to_landed_p90_minutes":null,"thrown_away_head_moved":0,"thrown_away_member_left":0,"ticks":6,"to":"2026-11-18T13:00:00Z","unchecked":0,"unconfirmed_landing_plans":0,"unplanned_trunk_moves":0,"unreadable":0,"unsplit_landings":1,"wait_p50":null,"wait_p50_minutes":null,"wait_p90":null,"wait_p90_minutes":null,"waiting_at_open":0,"whole_builds":3,"withdrawn":0,"wrong_ejections":0,"wrong_per_1000":0}`; string(live) != want {
+		t.Fatalf("live half %s", live)
+	}
+}

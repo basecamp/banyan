@@ -78,6 +78,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		pushed     = map[queue.SHA]queue.Build{}
 		pushTimes  = map[queue.SHA]time.Time{}
 		answered   = map[queue.SHA]time.Time{}
+		hadMembers = map[queue.SHA]bool{}
+		deleted    = map[queue.SHA]bool{}
+		overtaken  []overtakenBuild
 		candidates = map[queue.SHA]queue.Build{}
 		ready      = map[recordedHead]time.Time{}
 		seen       = map[recordedHead]bool{}
@@ -156,6 +159,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				before[b.SHA] = true
 			}
 			observed[b.SHA] = true
+			hadMembers[b.SHA] = hadMembers[b.SHA] || len(b.Chain) > 0
 			if _, seen := firstPush[b.SHA]; !seen {
 				firstPush[b.SHA] = b.Pushed
 			}
@@ -203,6 +207,12 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 					firstPush[a.Build.SHA] = now
 				}
 				observed[a.Build.SHA] = true
+				hadMembers[a.Build.SHA] = hadMembers[a.Build.SHA] || len(a.Build.Chain) > 0
+			case a.Do == "delete" && opts.contains(now) && !deleted[a.SHA]:
+				if b, ok := overtakenBy(rec.World.Builds, a.SHA); ok && hadMembers[a.SHA] && !pushTimes[a.SHA].IsZero() {
+					deleted[a.SHA] = true
+					overtaken = append(overtaken, overtakenBuild{b.SHA, b.Kind, now.Sub(pushTimes[a.SHA]).Minutes()})
+				}
 			case a.Do == "eject" && a.Cause == "culprit":
 				if opts.contains(now) {
 					causes++
@@ -329,6 +339,11 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	if opts.from != nil && opts.to != nil {
 		win.stop = opts.to.Sub(*opts.from)
+		for _, o := range overtaken {
+			if _, counted := answered[o.sha]; !counted {
+				timed[o.kind] = append(timed[o.kind], o.minutes)
+			}
+		}
 		for _, minutes := range append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...) {
 			win.times = append(win.times, time.Duration(minutes*float64(time.Minute)))
 		}
@@ -430,7 +445,7 @@ const unrecordedStretch = 30 * time.Minute
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
 	arrivals                                        []time.Duration
-	times                                           []time.Duration // a bounded window's whole builds, each as long as it took
+	times                                           []time.Duration // a bounded window's whole builds, each as long as it took or, where overtaken while building, as long as it had built: a lower bound
 	acts                                            []Act
 	unblamedRedCandidates, candidatesWithoutCulprit int
 	opening, left, withdrawn, settings              int
@@ -600,6 +615,23 @@ func planAgain(path string) error {
 		fmt.Println(string(line))
 	}
 	return nil
+}
+
+type overtakenBuild struct {
+	sha     queue.SHA
+	kind    queue.Kind
+	minutes float64
+}
+
+// overtakenBy is the whole build a delete removed while it was still building, once the trunk
+// held every member of its chain, which leaves the chain the record reads empty.
+func overtakenBy(builds []queue.Build, sha queue.SHA) (queue.Build, bool) {
+	for _, b := range builds {
+		if b.SHA == sha {
+			return b, b.Verdict == queue.Pending && b.Kind != queue.Probe && b.Landed.IsZero() && len(b.Chain) == 0
+		}
+	}
+	return queue.Build{}, false
 }
 
 type ejection struct {
