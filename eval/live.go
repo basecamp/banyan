@@ -91,6 +91,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		trunks       = map[queue.SHA]bool{}
 		unconfirmed  = map[queue.SHA]bool{}
 		took         = map[queue.Kind][]float64{}
+		timed        = map[queue.Kind][]float64{}      // took, less the builds whose verdict was first read after an unrecorded stretch
 		verdicts     = map[queue.SHA][]queue.Verdict{} // each tree's whole builds, by the prefix they test
 		good         = map[queue.SHA]bool{}            // the trees a whole build passed, each prefix of its chain among them
 		waits        []time.Duration
@@ -171,6 +172,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			answered[b.SHA] = answerAt
 			if opts.contains(answerAt) {
 				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
+				if (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch {
+					timed[b.Kind] = append(timed[b.Kind], answerAt.Sub(pushedAt).Minutes())
+				}
 				if b.Kind == queue.Candidate {
 					candidates[b.SHA] = b
 				}
@@ -325,7 +329,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	if opts.from != nil && opts.to != nil {
 		win.stop = opts.to.Sub(*opts.from)
-		for _, minutes := range append(slices.Clone(took[queue.Candidate]), took[queue.Check]...) {
+		for _, minutes := range append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...) {
 			win.times = append(win.times, time.Duration(minutes*float64(time.Minute)))
 		}
 		win.probe = win.build
@@ -416,6 +420,12 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	return sc, win, row, nil
 }
+
+// unrecordedStretch is the longest time between two recorded ticks that still times a build
+// by the tick that first read its verdict. A verdict first read after a longer stretch came at
+// some unknown time within it, so the replay draws nothing from that build's time. A landing
+// marked by that same tick is no earlier a time; one marked before it is.
+const unrecordedStretch = 30 * time.Minute
 
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
