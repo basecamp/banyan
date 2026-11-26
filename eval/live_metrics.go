@@ -380,6 +380,9 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 		red, wasRed := reads.red[first]
 		deleted, wasDropped := reads.dropped[first]
 		passed, didPass := reads.passed[first]
+		building := slices.ContainsFunc(recs[r.landing.record].World.Builds, func(b queue.Build) bool {
+			return b.Kind == queue.Candidate && b.SHA == first && b.Verdict == queue.Pending
+		})
 		switch {
 		case minutes > 30:
 			m.HeldFirstWaited++
@@ -389,7 +392,7 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 			m.HeldFirstDropped++
 		case didPass && passed < r.landing.record:
 			m.HeldFirstPassed++
-		case didPass && passed == r.landing.record || slices.ContainsFunc(recs[r.landing.record].World.Builds, func(b queue.Build) bool { return b.SHA == first && b.Verdict == queue.Pending }):
+		case didPass && passed == r.landing.record || building:
 			m.HeldFirstOvertaken++
 		default:
 			m.HeldFirstOther++
@@ -507,7 +510,7 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 // candidateReads holds, for the candidates the records show, which pull requests at which heads
 // each chain holds, in the order the records first show them, the first record that read each
 // red, the first that read each passing, and the first record that deleted each while the last
-// world to show it read it pending.
+// world to show it as a candidate read it pending.
 type candidateReads struct {
 	holders map[headKey][]queue.SHA
 	red     map[queue.SHA]int
@@ -544,8 +547,10 @@ func readCandidates(recs []queue.Recording) candidateReads {
 			if _, ok := c.passed[b.SHA]; !ok && b.Verdict == queue.Success {
 				c.passed[b.SHA] = i
 			}
-			pending[b.SHA] = read[b.SHA] && pending[b.SHA] || b.Verdict == queue.Pending
-			read[b.SHA] = true
+			if b.Kind == queue.Candidate {
+				pending[b.SHA] = read[b.SHA] && pending[b.SHA] || b.Verdict == queue.Pending
+				read[b.SHA] = true
+			}
 		}
 		for _, a := range rec.Actions {
 			switch a.Do {

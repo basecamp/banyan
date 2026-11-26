@@ -925,6 +925,31 @@ func TestLiveSaysWhatBecameOfALandingsFirstCandidate(t *testing.T) {
 		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
 			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
 	}, "other"}
+	passedBesideAPendingCheck := story{0, func(n int, f, l queue.Build) []read {
+		check := queue.Build{SHA: f.SHA, Kind: queue.Check, Pushed: at(5)}
+		return []read{{m: 0}, {m: 5, actions: push(f)},
+			{m: 20, builds: []queue.Build{with(pushed(f, 5), queue.Success), check}, actions: []queue.Action{{Do: "delete", SHA: f.SHA}}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "passed"}
+	pendingCheckAtTheLanding := story{0, func(n int, f, l queue.Build) []read {
+		check := queue.Build{SHA: f.SHA, Kind: queue.Check, Pushed: at(5)}
+		return []read{{m: 0}, {m: 5, actions: push(f)},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{check, with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "other"}
+	lateFirst := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 35, actions: push(f)}, {m: 38, builds: []queue.Build{with(pushed(f, 35), queue.Failure)}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "waited"}
+	redAfterTheLanding := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 40, builds: []queue.Build{pushed(f, 5)}, actions: push(l)},
+			{m: 50, builds: []queue.Build{pushed(f, 5), with(pushed(l, 40), queue.Success)}, actions: land(l)},
+			{m: 51, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}}}
+	}, "overtaken"}
+	pushedOnly := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "other"}
 	quick := story{0, func(n int, f, l queue.Build) []read {
 		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 15, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}},
 			{m: 20, actions: push(l)}, {m: 30, builds: []queue.Build{with(pushed(l, 20), queue.Success)}, actions: land(l)}}
@@ -951,6 +976,11 @@ func TestLiveSaysWhatBecameOfALandingsFirstCandidate(t *testing.T) {
 		{"the first candidate's first pass read in the landing record is overtaken", passedAtTheLanding, "", 40, 5, 0},
 		{"read red, then passing, is failed, not passed", redThenPassed, "", 40, 5, 0},
 		{"the first candidate was never read again", other, "", 40, 5, 0},
+		{"a pending check on the first candidate's commit does not make its deletion a drop", passedBesideAPendingCheck, "", 40, 5, 0},
+		{"a pending check on the first candidate's commit at the landing is not an overtake", pendingCheckAtTheLanding, "", 40, 5, 0},
+		{"a first candidate pushed over 30 minutes after ready waited, though it failed", lateFirst, "", 40, 35, 1},
+		{"a red read after the landing record is not a failure", redAfterTheLanding, "", 40, 5, 0},
+		{"a first candidate seen only in its push", pushedOnly, "", 40, 5, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			recs, _ := tell(1, 0, "t", c.s, c.firstHead)
@@ -985,6 +1015,23 @@ func TestLiveSaysWhatBecameOfALandingsFirstCandidate(t *testing.T) {
 		if m.SplitLandings != 9 || m.QueueAddedOver30 != 8 || sum != m.QueueAddedOver30 || m.FirstCandidateOver30 != 1 ||
 			!reflect.DeepEqual(counts, map[string]int{"waited": 1, "failed": 2, "dropped": 1, "passed": 1, "overtaken": 2, "other": 1}) {
 			t.Fatalf("split %d, held over 30 %d, to the first candidate over 30 %d, held %v", m.SplitLandings, m.QueueAddedOver30, m.FirstCandidateOver30, counts)
+		}
+	})
+	t.Run("the p90 to a first candidate is the quantile, not the longest", func(t *testing.T) {
+		var recs []queue.Recording
+		trunk := queue.SHA("t")
+		for i := range 11 {
+			s := quick
+			if i == 10 {
+				s = waited
+			}
+			var day []queue.Recording
+			day, trunk = tell(i+1, 100*i, trunk, s, "")
+			recs = append(recs, day...)
+		}
+		m := windowRow(t, recs, at(0), at(1100)).liveMeasures
+		if m.SplitLandings != 11 || m.FirstCandidateOver30 != 1 || m.FirstCandidateP90Minutes == nil || *m.FirstCandidateP90Minutes != 5 {
+			t.Fatalf("split %d, over 30 %d, p90 %s", m.SplitLandings, m.FirstCandidateOver30, measured(m.FirstCandidateP90Minutes))
 		}
 	})
 }

@@ -483,13 +483,20 @@ func TestDailyRowSaysWhatBecameOfTheFirstCandidateOfALandingHeldOver30Minutes(t 
 		{"held after failures, drops and overtakes", `,"queue_added_over_30":22,"split_landings":40,"unsplit_landings":0,"first_candidate_p90_minutes":18.14,"first_candidate_over_30":0,` +
 			`"held_first_waited":0,"held_first_failed":13,"held_first_dropped":0,"held_first_passed":6,"held_first_overtaken":3,"held_first_other":0`,
 			"| Ready to a first candidate, p90 | 18.1 min; 0 landings waited over 30 min for one |\n" +
-				"| The 22 held over 30 min | 13 after their first candidate failed, 6 after their first candidate passed and could not land, 3 landed by a later candidate while the first still built |\n"},
+				"| The 22 held over 30 min | 13 after their first candidate failed, 6 after their first candidate passed and could not land, 3 landed by a later candidate while the first still built or had just passed |\n"},
 		{"every count", `,"queue_added_over_30":6,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":40,"first_candidate_over_30":1,` +
 			`"held_first_waited":1,"held_first_failed":1,"held_first_dropped":1,"held_first_passed":1,"held_first_overtaken":1,"held_first_other":1`,
 			"| Ready to a first candidate, p90 | 40 min; 1 landing waited over 30 min for one |\n" +
-				"| The 6 held over 30 min | 1 waited over 30 min for any candidate, 1 after their first candidate failed, 1 after it was dropped while building, 1 after their first candidate passed and could not land, 1 landed by a later candidate while the first still built, 1 other |\n"},
+				"| The 6 held over 30 min | 1 waited over 30 min for any candidate, 1 after their first candidate failed, 1 after it was dropped while building, 1 after their first candidate passed and could not land, 1 landed by a later candidate while the first still built or had just passed, 1 other |\n"},
 		{"a row with the five counts from before passed was counted", `,"queue_added_over_30":5,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":40,"first_candidate_over_30":1,` +
 			`"held_first_waited":1,"held_first_failed":1,"held_first_dropped":1,"held_first_overtaken":1,"held_first_other":1`,
+			"| Ready to a first candidate, p90 | 40 min; 1 landing waited over 30 min for one |\n"},
+		{"a drop and no other", `,"queue_added_over_30":2,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":12,"first_candidate_over_30":0,` +
+			`"held_first_waited":0,"held_first_failed":1,"held_first_dropped":1,"held_first_passed":0,"held_first_overtaken":0,"held_first_other":0`,
+			"| Ready to a first candidate, p90 | 12 min; 0 landings waited over 30 min for one |\n" +
+				"| The 2 held over 30 min | 1 after their first candidate failed, 1 after it was dropped while building |\n"},
+		{"a row missing only the dropped count", `,"queue_added_over_30":5,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":40,"first_candidate_over_30":1,` +
+			`"held_first_waited":1,"held_first_failed":1,"held_first_passed":1,"held_first_overtaken":1,"held_first_other":1`,
 			"| Ready to a first candidate, p90 | 40 min; 1 landing waited over 30 min for one |\n"},
 		{"nothing held over 30 minutes", `,"queue_added_over_30":0,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":3.25,"first_candidate_over_30":0,` +
 			`"held_first_waited":0,"held_first_failed":0,"held_first_dropped":0,"held_first_passed":0,"held_first_overtaken":0,"held_first_other":0`,
