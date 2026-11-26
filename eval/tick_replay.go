@@ -331,7 +331,7 @@ func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, gree
 		}
 	}
 	for sha, b := range builds {
-		evidence := b.Kind != queue.Probe && red[sha] && !green[sha] &&
+		evidence := b.Kind != queue.Probe && red[sha] &&
 			!slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return ejected[headKey{m.Number, m.Head}] })
 		for _, m := range b.Chain {
 			k := headKey{m.Number, m.Head}

@@ -1032,6 +1032,22 @@ func TestReplayHoldsNoHeadGuiltyWithoutEvidenceAgainstIt(t *testing.T) {
 	}
 }
 
+func TestReplayHoldsNoHeadGuiltyThatNoRecordQueued(t *testing.T) {
+	p := replayPR(1)
+	recs := []queue.Recording{replayTick(0, p)}
+	for i, minutes := range []int{4, 6} {
+		r := replayTick(10*(i+1), p)
+		r.World.Builds = []queue.Build{{SHA: queue.SHA(fmt.Sprintf("red%d", i)), Pushed: r.World.Now.Add(-time.Duration(minutes) * time.Minute), Verdict: queue.Failure,
+			Chain: []queue.Member{{Number: 9, Head: "gone9", Merge: queue.SHA(fmt.Sprintf("red%d", i))}}}}
+		recs = append(recs, r)
+	}
+	recs = append(recs, replayTick(30, p))
+	_, w, _ := replayWindow(t, recs, 40)
+	if len(w.failing) != 0 || !slices.Equal(slices.Sorted(slices.Values(w.times)), []time.Duration{4 * time.Minute, 6 * time.Minute}) || w.unblamedRedCandidates != 2 {
+		t.Fatalf("failing %v, shared sample %v, unblamed red candidates %d", w.failing, w.times, w.unblamedRedCandidates)
+	}
+}
+
 func labelled(w window, n int) []time.Duration {
 	var at []time.Duration
 	for _, a := range w.acts {
