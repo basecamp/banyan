@@ -540,6 +540,9 @@ func readCandidates(recs []queue.Recording) candidateReads {
 	for i, rec := range recs {
 		read := map[queue.SHA]bool{}
 		for _, b := range rec.World.Builds {
+			if b.Kind != queue.Candidate {
+				continue
+			}
 			hold(b)
 			if _, ok := c.red[b.SHA]; !ok && (b.Verdict == queue.Failure || b.Verdict == queue.Error) {
 				c.red[b.SHA] = i
@@ -547,10 +550,8 @@ func readCandidates(recs []queue.Recording) candidateReads {
 			if _, ok := c.passed[b.SHA]; !ok && b.Verdict == queue.Success {
 				c.passed[b.SHA] = i
 			}
-			if b.Kind == queue.Candidate {
-				pending[b.SHA] = read[b.SHA] && pending[b.SHA] || b.Verdict == queue.Pending
-				read[b.SHA] = true
-			}
+			pending[b.SHA] = read[b.SHA] && pending[b.SHA] || b.Verdict == queue.Pending
+			read[b.SHA] = true
 		}
 		for _, a := range rec.Actions {
 			switch a.Do {

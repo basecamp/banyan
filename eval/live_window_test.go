@@ -936,6 +936,11 @@ func TestLiveSaysWhatBecameOfALandingsFirstCandidate(t *testing.T) {
 		return []read{{m: 0}, {m: 5, actions: push(f)},
 			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{check, with(pushed(l, 40), queue.Success)}, actions: land(l)}}
 	}, "other"}
+	redCheckBesideTheFirst := story{0, func(n int, f, l queue.Build) []read {
+		check := with(queue.Build{SHA: f.SHA, Kind: queue.Check, Pushed: at(5)}, queue.Failure)
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 20, builds: []queue.Build{pushed(f, 5), check}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{pushed(f, 5), with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "overtaken"}
 	lateFirst := story{0, func(n int, f, l queue.Build) []read {
 		return []read{{m: 0}, {m: 35, actions: push(f)}, {m: 38, builds: []queue.Build{with(pushed(f, 35), queue.Failure)}},
 			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
@@ -978,6 +983,7 @@ func TestLiveSaysWhatBecameOfALandingsFirstCandidate(t *testing.T) {
 		{"the first candidate was never read again", other, "", 40, 5, 0},
 		{"a pending check on the first candidate's commit does not make its deletion a drop", passedBesideAPendingCheck, "", 40, 5, 0},
 		{"a pending check on the first candidate's commit at the landing is not an overtake", pendingCheckAtTheLanding, "", 40, 5, 0},
+		{"a red check on the first candidate's commit is not its failure", redCheckBesideTheFirst, "", 40, 5, 0},
 		{"a first candidate pushed over 30 minutes after ready waited, though it failed", lateFirst, "", 40, 35, 1},
 		{"a red read after the landing record is not a failure", redAfterTheLanding, "", 40, 5, 0},
 		{"a first candidate seen only in its push", pushedOnly, "", 40, 5, 0},
