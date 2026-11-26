@@ -1172,6 +1172,35 @@ func TestReplayRowWaitsByTheGuiltyHeadsFailingTimes(t *testing.T) {
 	}
 }
 
+// cleanDay is the planner's own day of eight pull requests that break nothing, its builds taking
+// different times, so the simulated half rests on the shared draws alone.
+func cleanDay() []queue.Recording {
+	shape := Shape{Build: 10 * time.Minute, Probe: 4 * time.Minute}
+	for n := 1; n <= 8; n++ {
+		shape.Queue = append(shape.Queue, Queued{At: time.Duration(n) * 3 * tick, Number: n})
+	}
+	shape.Takes = []time.Duration{6 * time.Minute, 14 * time.Minute, 9 * time.Minute, 12 * time.Minute, 7 * time.Minute, 11 * time.Minute, 16 * time.Minute, 5 * time.Minute, 13 * time.Minute, 8 * time.Minute}
+	return plannedDay(shape, dials(1, 2, false), 150, func(*Sim) {})
+}
+
+// The simulated half of cleanDay's row as the replay before it held guilty a head that left
+// unejected.
+const cleanDaySimulated = `{"over_live":{"landed":0,"wait_p50":0,"wait_p90":0.1111111111111111,"builds_per_landing":0.13100000000000006},"simulated":{"landed":8,"wait_p50":1.4,"wait_p90":2,"builds_per_landing":0.706875,"unblamed_red_candidates":0,"candidates_without_a_culprit":5,"culprits_unattributed":0,"departures_after_an_unconfirmed_plan":0,"invariant_failures":0,"waiting_at_open":0,"settings_in_window":1,"acts":{"checks":8,"conflict":0,"ejected":0,"head":8,"hold":8,"label":8,"settings":1,"unlabel":0,"wait":8},"unattributed_holds":0,"wait_p50_minutes":14,"wait_p90_minutes":20,"whole_builds":5.655,"probes":0,"red_builds":0,"queue_added_p50_minutes":4,"queue_added_p90_minutes":8,"queue_added_over_30":0,"red_candidates":0,"red_pull_requests":0,"ejected_as_cause":0,"left_waiting":0}}`
+
+func TestReplayLeavesTheSimulatedHalfOfACleanDayAsItWas(t *testing.T) {
+	out, err := captureLiveRun(t, writeLive(t, cleanDay()), "hey2", replayStart.Format(time.RFC3339), replayStart.Add(160*time.Minute).Format(time.RFC3339), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatal(err)
+	}
+	if half, _ := json.Marshal(map[string]json.RawMessage{"simulated": row["simulated"], "over_live": row["over_live"]}); string(half) != cleanDaySimulated {
+		t.Fatalf("simulated half changed:\n%s\n%s", half, cleanDaySimulated)
+	}
+}
+
 func TestReplayGuiltyHeadsBuildsDrawAmongItsFailingTimes(t *testing.T) {
 	_, w, _ := replayWindow(t, guiltDay(), 80)
 	failing := []time.Duration{5 * time.Minute, 3 * time.Minute, 7 * time.Minute}
