@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/basecamp/banyan/internal/queue"
@@ -19,11 +20,15 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	w.stop = to.Sub(start)
 	confirmed := confirmedMembers(recs)
 	builds := map[queue.SHA]queue.Build{}
+	verdicts := map[queue.SHA]queue.Verdict{}
 	broken := map[headKey]bool{}
 	for _, r := range recs {
 		for _, b := range r.World.Builds {
 			if len(b.Chain) > len(builds[b.SHA].Chain) {
 				builds[b.SHA] = b
+			}
+			if b.Verdict != queue.Pending {
+				verdicts[b.SHA] = b.Verdict
 			}
 		}
 		for _, a := range r.Actions {
@@ -50,6 +55,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 				w.unattributed++
 			}
 		}
+	}
+	for _, k := range brokeAndLeft(recs, builds, verdicts, broken, confirmed) {
+		broken[k] = true
 	}
 	for sha, b := range candidates {
 		if len(builds[sha].Chain) > len(b.Chain) {
@@ -291,6 +299,46 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	return nil
+}
+
+// brokeAndLeft is each head, beside those ejected as the cause, that the records hold to have
+// broken the build: no whole build that held it passed, no landing of it was confirmed, two or
+// more failed whole builds held it with no ejected culprit among their members, and a later
+// record no longer queues it at that head. Two such heads failing in the same builds are both
+// held guilty; a head that fails only beside another, or in most of its builds, is not.
+func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, verdicts map[queue.SHA]queue.Verdict, ejected map[headKey]bool, confirmed [][]queue.Member) []headKey {
+	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
+	for _, members := range confirmed {
+		for _, m := range members {
+			landed[headKey{m.Number, m.Head}] = true
+		}
+	}
+	for sha, b := range builds {
+		if b.Kind == queue.Probe {
+			continue
+		}
+		blamed := slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return ejected[headKey{m.Number, m.Head}] })
+		for _, m := range b.Chain {
+			k := headKey{m.Number, m.Head}
+			passed[k] = passed[k] || verdicts[sha] == queue.Success
+			if verdicts[sha] == queue.Failure && !blamed {
+				failed[k]++
+			}
+		}
+	}
+	last := map[headKey]int{}
+	for i, r := range recs {
+		for _, p := range r.World.PRs {
+			last[headKey{p.Number, p.Head}] = i
+		}
+	}
+	var guilty []headKey
+	for k, n := range failed {
+		if i, queued := last[k]; n >= 2 && !passed[k] && !landed[k] && !ejected[k] && queued && i+1 < len(recs) {
+			guilty = append(guilty, k)
+		}
+	}
+	return guilty
 }
 
 // heldBehind says the record shows this head refused onto a chain of pull requests ahead of it.

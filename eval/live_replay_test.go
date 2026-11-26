@@ -883,3 +883,101 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 		t.Fatal("unknown perturbation accepted")
 	}
 }
+
+// breakersDay has a candidate of #1 and #2 building at the open that lands them, then #3,
+// whose head d fails two candidates in 8 and 6 minutes, no build passes and nothing ejects,
+// until its author pushes a new head that lands.
+func breakersDay() []queue.Recording {
+	p, q, r := replayPR(1), replayPR(2), replayPR(3)
+	for _, pr := range []*queue.PR{&p, &q, &r} {
+		pr.Queued = replayStart.Add(-time.Hour)
+	}
+	fixed := r
+	fixed.Head = "fix"
+	build := func(sha, base queue.SHA, pushed int, chain ...queue.Member) queue.Build {
+		return queue.Build{SHA: sha, Base: base, Pushed: replayStart.Add(time.Duration(pushed) * time.Minute), Chain: chain}
+	}
+	answered := func(b queue.Build, v queue.Verdict) []queue.Build { b.Verdict = v; return []queue.Build{b} }
+	open := build("A", "t", -5, queue.Member{Number: 1, Head: p.Head, Merge: "m1"}, queue.Member{Number: 2, Head: q.Head, Merge: "A"})
+	first := build("F1", "A", 11, queue.Member{Number: 3, Head: r.Head, Merge: "F1"})
+	second := build("F2", "A", 19, queue.Member{Number: 3, Head: r.Head, Merge: "F2"})
+	mended := build("G", "A", 30, queue.Member{Number: 3, Head: fixed.Head, Merge: "G"})
+	recs := []queue.Recording{
+		replayTick(-5, p, q, r), replayTick(10, p, q, r), replayTick(11, r), replayTick(19, r),
+		replayTick(25, r), replayTick(30, fixed), replayTick(48, fixed), replayTick(49),
+	}
+	for i := range recs {
+		recs[i].Config = dials(2, 2, false)
+		if i >= 2 {
+			recs[i].World.Trunk = "A"
+		}
+	}
+	recs[0].Actions = []queue.Action{{Do: "push", Build: open}}
+	recs[1].World.Builds = answered(open, queue.Success)
+	recs[1].Actions = []queue.Action{{Do: "land", SHA: "A", Members: open.Chain}}
+	recs[2].Actions = []queue.Action{{Do: "push", Build: first}}
+	recs[3].World.Builds = answered(first, queue.Failure)
+	recs[3].Actions = []queue.Action{{Do: "push", Build: second}}
+	recs[4].World.Builds = answered(second, queue.Failure)
+	recs[5].Actions = []queue.Action{{Do: "push", Build: mended}}
+	recs[6].World.Builds = answered(mended, queue.Success)
+	recs[6].Actions = []queue.Action{{Do: "land", SHA: "G", Members: mended.Chain}}
+	recs[7].World.Trunk = "G"
+	return recs
+}
+
+func heldGuilty(w window, n int, head queue.SHA) bool {
+	return slices.ContainsFunc(w.acts, func(a Act) bool { return a.Do == "head" && a.Number == n && a.Head == head && a.Breaks })
+}
+
+func TestReplayHoldsGuiltyAHeadThatFailedTwiceNeverPassedAndLeft(t *testing.T) {
+	_, w, _ := replayWindow(t, breakersDay(), 60)
+	if !heldGuilty(w, 3, "d") || heldGuilty(w, 3, "fix") || heldGuilty(w, 1, "b") {
+		t.Fatalf("guilt: d %v, fix %v, b %v", heldGuilty(w, 3, "d"), heldGuilty(w, 3, "fix"), heldGuilty(w, 1, "b"))
+	}
+	if w.unblamedRedCandidates != 0 || w.candidatesWithoutCulprit != 2 || w.flake != 0 {
+		t.Fatalf("unblamed red candidates %d of %d, flake %g", w.unblamedRedCandidates, w.candidatesWithoutCulprit, w.flake)
+	}
+}
+
+func TestReplayHoldsNoHeadGuiltyThatTheRecordClears(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(recs []queue.Recording)
+	}{
+		{"a whole build passed it", func(recs []queue.Recording) {
+			recs[4].World.Builds = append(recs[4].World.Builds, queue.Build{SHA: "C", Kind: queue.Check, Base: "A", Verdict: queue.Success, Chain: []queue.Member{{Number: 3, Head: "d", Merge: "C"}}})
+		}},
+		{"it failed once", func(recs []queue.Recording) {
+			recs[3].Actions, recs[4].World.Builds = nil, nil
+		}},
+		{"it failed once and in a probe", func(recs []queue.Recording) {
+			recs[3].Actions = nil
+			recs[4].World.Builds = []queue.Build{{SHA: "P", Kind: queue.Probe, Base: "A", Verdict: queue.Failure, Chain: []queue.Member{{Number: 3, Head: "d", Merge: "P"}}}}
+		}},
+		{"an ejected culprit failed beside it", func(recs []queue.Recording) {
+			for _, r := range recs[3:5] {
+				r.World.Builds[0].Chain = append([]queue.Member{{Number: 4, Head: "e", Merge: "m4"}}, r.World.Builds[0].Chain...)
+			}
+			recs[4].Actions = []queue.Action{{Do: "eject", PR: 4, Cause: "culprit", Evidence: []queue.SHA{"F1", "F2"}}}
+		}},
+		{"it landed", func(recs []queue.Recording) {
+			recs[4].Actions = []queue.Action{{Do: "land", SHA: "L", Members: []queue.Member{{Number: 3, Head: "d"}}}}
+			recs[5].World.Trunk = "L"
+		}},
+		{"it was still queued at the last record", func(recs []queue.Recording) {
+			for i := 5; i < len(recs); i++ {
+				recs[i].World.PRs = recs[4].World.PRs
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := breakersDay()
+			tc.change(recs)
+			_, w, _ := replayWindow(t, recs, 60)
+			if heldGuilty(w, 3, "d") {
+				t.Fatal("head d held guilty")
+			}
+		})
+	}
+}
