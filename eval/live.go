@@ -232,7 +232,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 						h = recordedHead{}
 					}
 					r := ready[h]
-					landings = append(landings, liveLanding{at: now, ready: r, sha: a.SHA})
+					landings = append(landings, liveLanding{at: now, ready: r, sha: a.SHA, member: headKey{m.Number, m.Head}, record: i})
 					if !opts.contains(now) {
 						continue
 					}
