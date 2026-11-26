@@ -536,7 +536,9 @@ func longestBacklog(recs []queue.Recording, opts liveOptions) time.Duration {
 
 // backlogged says that after the record's own actions a pull request that could be built is in
 // no pending candidate or push, and every slot is held by a pending candidate or a candidate's
-// push. A round's probes and checks run beside the slots, as the engine counts them.
+// push. A round's probes and checks run beside the slots, and so does a candidate the engine
+// reads as no longer building: one marked landed while landed builds are kept, and one pending
+// longer than the timeout, which it builds again.
 func backlogged(rec queue.Recording) bool {
 	deleted, taken, ejected, notes := map[queue.SHA]bool{}, map[headKey]bool{}, map[int]bool{}, map[int]string{}
 	held, started := 0, map[headKey]bool{}
@@ -562,7 +564,9 @@ func backlogged(rec queue.Recording) bool {
 		}
 	}
 	for _, b := range rec.World.Builds {
-		if b.Verdict == queue.Pending && b.Kind == queue.Candidate && !deleted[b.SHA] {
+		kept := rec.Config.Keep > 0 && !b.Landed.IsZero()
+		late := rec.Config.Timeout > 0 && rec.World.Now.Sub(b.Pushed) > rec.Config.Timeout
+		if b.Verdict == queue.Pending && b.Kind == queue.Candidate && !deleted[b.SHA] && !kept && !late {
 			held++
 			for _, m := range b.Chain {
 				started[headKey{m.Number, m.Head}] = true
