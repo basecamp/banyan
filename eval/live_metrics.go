@@ -137,6 +137,12 @@ type liveMeasures struct {
 	LongestReadyGapFrom          *time.Time `json:"longest_ready_gap_from"`
 	LongestReadyGapTo            *time.Time `json:"longest_ready_gap_to"`
 	ReadyGapsOver90              int        `json:"ready_gaps_over_90"`
+	// BusiestHourLandings is the most landings in the window in 60 minutes from one of them.
+	// BacklogLongestMinutes is the longest run of records in the window, none more than 10
+	// minutes after the one before, after whose own actions a ready pull request is in no
+	// pending candidate or push and no slot is free, from the run's first record to its last.
+	BusiestHourLandings   int     `json:"busiest_hour_landings"`
+	BacklogLongestMinutes float64 `json:"backlog_longest_minutes"`
 	// UnplannedTrunkMoves counts the ticks in the window that read the trunk at a commit the tick
 	// before did not and no recorded plan landed: a merge made outside the queue, or a tick whose
 	// record is missing, whose landings the score cannot count.
@@ -226,7 +232,8 @@ func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions)
 
 func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLanding) liveMeasures {
 	rows, skipped := splitLive(recs, landings, opts)
-	m := liveMeasures{SplitLandings: len(rows), UnsplitLandings: skipped}
+	m := liveMeasures{SplitLandings: len(rows), UnsplitLandings: skipped,
+		BusiestHourLandings: busiestHour(landings, opts), BacklogLongestMinutes: longestBacklog(recs, opts).Minutes()}
 	planned := map[queue.SHA]bool{}
 	for _, rec := range recs {
 		for _, a := range rec.Actions {
@@ -402,6 +409,81 @@ func throwReasons(prs []queue.PR, chain []queue.Member) (moved, left bool) {
 		moved, left = moved || queued && head != member.Head, left || !queued
 	}
 	return moved, left
+}
+
+func busiestHour(landings []liveLanding, opts liveOptions) int {
+	var times []time.Time
+	for _, l := range landings {
+		if opts.contains(l.at) {
+			times = append(times, l.at)
+		}
+	}
+	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
+	most, end := 0, 0
+	for i, at := range times {
+		for end < len(times) && times[end].Before(at.Add(time.Hour)) {
+			end++
+		}
+		most = max(most, end-i)
+	}
+	return most
+}
+
+func longestBacklog(recs []queue.Recording, opts liveOptions) time.Duration {
+	var longest time.Duration
+	var first, last time.Time
+	standing := false
+	for _, rec := range recs {
+		if !opts.contains(rec.World.Now) {
+			continue
+		}
+		if standing && rec.World.Now.Sub(last) > 10*time.Minute {
+			standing = false
+		}
+		switch {
+		case !backlogged(rec):
+			standing = false
+		case standing:
+			last = rec.World.Now
+		default:
+			standing, first, last = true, rec.World.Now, rec.World.Now
+		}
+		if standing {
+			longest = max(longest, last.Sub(first))
+		}
+	}
+	return longest
+}
+
+// backlogged says that after the record's own actions a ready pull request is in no pending
+// candidate or push, and every slot is held by a pending build or a push.
+func backlogged(rec queue.Recording) bool {
+	held, started := 0, map[headKey]bool{}
+	for _, b := range rec.World.Builds {
+		if b.Verdict == queue.Pending {
+			held++
+			if b.Kind == queue.Candidate {
+				for _, m := range b.Chain {
+					started[headKey{m.Number, m.Head}] = true
+				}
+			}
+		}
+	}
+	for _, a := range rec.Actions {
+		if a.Do == "push" {
+			held++
+			for _, m := range a.Build.Chain {
+				started[headKey{m.Number, m.Head}] = true
+			}
+		}
+	}
+	return held >= rec.Config.Slots && slices.ContainsFunc(rec.World.PRs, func(pr queue.PR) bool {
+		return readyToJoin(pr) && !started[headKey{pr.Number, pr.Head}]
+	})
+}
+
+func readyToJoin(pr queue.PR) bool {
+	return pr.Wait == "" && pr.Checks == queue.Success
 }
 
 // waitsOnTheQueue says a recorded pull request could be built: its own checks passed, nothing of
