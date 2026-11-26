@@ -177,6 +177,56 @@ func TestDailyRowTripsOverThreePassingCandidatesThrownAwayInHeyNativeApps(t *tes
 	}
 }
 
+func TestDailyRowShowsCandidatesDroppedWhileBuildingAndTripsOnNone(t *testing.T) {
+	const thrown = `,"passing_candidates_thrown_away":4,"thrown_away_head_moved":2,"thrown_away_member_left":2`
+	read := func(t *testing.T, live string) (row, trips string) {
+		t.Helper()
+		dir := standIns(t)
+		if status, _ := dailyRowOf(t, dir, "basecamp/hey-native-apps", "COMMIT="+strings.Repeat("a", 40), "LIVE="+thrown+live); status != 0 {
+			t.Fatalf("%s: status %d", live, status)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "state", "hey-native-apps", "rows", "2026-11-18.md"))
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "**Tripwires:** ") || line == "No tripwire breached." {
+				trips = line
+			}
+		}
+		return string(data), trips
+	}
+	_, without := read(t, "")
+	for _, c := range []struct {
+		live, line string
+	}{
+		{`,"building_candidates_dropped":3,"dropped_head_moved":2,"dropped_member_left":1,"dropped_members_still_queued":11,"dropped_longest_built_minutes":21.9`,
+			"3: 2 with a member's head moved, 1 with a member gone from the queue; 11 of their pull requests stayed queued at the same head, the longest 21 min into its build"},
+		{`,"building_candidates_dropped":1,"dropped_head_moved":0,"dropped_member_left":1,"dropped_members_still_queued":1,"dropped_longest_built_minutes":0`,
+			"1: 0 with a member's head moved, 1 with a member gone from the queue; 1 of their pull requests stayed queued at the same head"},
+		{`,"building_candidates_dropped":0,"dropped_head_moved":0,"dropped_member_left":0,"dropped_members_still_queued":0,"dropped_longest_built_minutes":0`, "none"},
+		{`,"building_candidates_dropped":1,"dropped_head_moved":1,"dropped_member_left":0,"dropped_members_still_queued":1,"dropped_longest_built_minutes":null`, "1; details not measured"},
+		{`,"building_candidates_dropped":1,"dropped_head_moved":1,"dropped_member_left":null,"dropped_members_still_queued":1,"dropped_longest_built_minutes":4`, "1; details not measured"},
+		{`,"building_candidates_dropped":2`, "2; details not measured"},
+		{``, "not measured"},
+	} {
+		row, trips := read(t, c.live)
+		if !strings.Contains(row, "| Passing candidates thrown away unlanded | 4: 2 with a member's head moved, 2 with a member gone from the queue |\n| Candidates dropped while building | "+c.line+" |\n") || trips != without {
+			t.Fatalf("dropped while building, with tripwires %q, reads:\n%s", without, row)
+		}
+	}
+}
+
+func TestDailyRowTripsOnNoCandidatesDroppedWhileBuilding(t *testing.T) {
+	dir := standIns(t)
+	live := `LIVE=,"passing_candidates_thrown_away":0,"ready_gaps_over_90":0,"queue_added_p50_minutes":1,"wrong_ejections":0,` +
+		`"building_candidates_dropped":4,"dropped_head_moved":4,"dropped_member_left":0,"dropped_members_still_queued":9,"dropped_longest_built_minutes":30`
+	if status, _ := dailyRowOf(t, dir, "basecamp/hey-native-apps", "COMMIT="+strings.Repeat("a", 40), live); status != 0 {
+		t.Fatalf("status %d", status)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "state", "hey-native-apps", "rows", "2026-11-18.md"))
+	if row := string(data); !strings.Contains(row, "| Candidates dropped while building | 4: ") || !strings.Contains(row, "\nNo tripwire breached.\n") {
+		t.Fatalf("four dropped and no other tripwire reads:\n%s", row)
+	}
+}
+
 func TestDailyRowHoldsNoLimitOnBuildsPerLanding(t *testing.T) {
 	for _, repo := range []string{"basecamp/hey-native-apps", "basecamp/hey2"} {
 		dir := standIns(t)
@@ -195,7 +245,7 @@ const (
 		`"queue_added_p50_minutes":9,"queue_added_p90_minutes":20,"queue_added_over_30":1,"split_landings":3,"unsplit_landings":0,"builds_per_landing":0.5,` +
 		`"ready_gaps":2,"longest_ready_gap_minutes":95,"longest_ready_gap_from":"2026-11-17T22:00:00Z","longest_ready_gap_to":"2026-11-17T23:35:00Z","ready_gaps_over_90":1,` +
 		`"red_candidates":1,"red_pull_requests":4,"red_read_n":1,"red_read_median_minutes":12,` +
-		`"passing_candidates_thrown_away":5,"thrown_away_head_moved":4,"thrown_away_member_left":1,"wrong_ejections":3,"unchecked":2,` +
+		`"passing_candidates_thrown_away":5,"thrown_away_head_moved":4,"thrown_away_member_left":1,"building_candidates_dropped":3,"dropped_head_moved":3,"dropped_member_left":0,"dropped_members_still_queued":11,"dropped_longest_built_minutes":22.4,"wrong_ejections":3,"unchecked":2,` +
 		`"busiest_hour_landings":9,"backlog_longest_minutes":75`
 	beforeOuts = `{"takeouts":[{"at":"2026-11-17T23:00:00Z","number":7,"head":"abc","attributed":"checks","class":"own check","failed_then_passed":["build"],"landed_same_head":false},` +
 		`{"at":"2026-11-17T23:30:00Z","number":7,"head":"abc","attributed":"bob","class":"bob","failed_then_passed":[],"landed_same_head":false}],` +
@@ -212,6 +262,7 @@ const (
 		"| Longest wait of a ready head with no landing | 95 min, 22:00Z to 23:35Z |\n" +
 		"| Red candidates | 1, holding 4 pull requests; failed job seen to read red 12 min at the median over 1 |\n" +
 		"| Passing candidates thrown away unlanded | 5: 4 with a member's head moved, 1 with a member gone from the queue |\n" +
+		"| Candidates dropped while building | 3: 3 with a member's head moved, 0 with a member gone from the queue; 11 of their pull requests stayed queued at the same head, the longest 22 min into its build |\n" +
 		"| Take-outs | 2: 0 blamed in a candidate, 1 own check, 0 no gate, 0 conflict, 1 bob |\n" +
 		"| Of those, a failed check passed later on the same commit | 1 (1 own check) |\n"
 )
@@ -354,6 +405,17 @@ func TestDailyRowSaysWhenTheFourHoursBeforeHoldNoRecordsOrNoLanding(t *testing.T
 		{"no tick in the four hours", false, nil, beforeTitle + ": no records cover them.\n"},
 		{"no tick the eval counts", true, []string{"BEFORE_TICKS=0"}, beforeTitle + ": no records cover them.\n"},
 		{"ticks and no landing", true, []string{`BEFORE_LIVE=,"landed":0,"red_candidates":2`}, beforeTitle + ": no landings.\n"},
+		{"no landing and none thrown away or dropped", true, []string{`BEFORE_LIVE=,"landed":0,"passing_candidates_thrown_away":0,"building_candidates_dropped":0`}, beforeTitle + ": no landings.\n"},
+		{"no landing and candidates thrown away and dropped", true, []string{`BEFORE_LIVE=,"landed":0,"passing_candidates_thrown_away":2,"thrown_away_head_moved":1,"thrown_away_member_left":1,` +
+			`"building_candidates_dropped":1,"dropped_head_moved":1,"dropped_member_left":0,"dropped_members_still_queued":2,"dropped_longest_built_minutes":9.5`},
+			beforeTitle + ": no landings.\n\n| | |\n|---|---|\n" +
+				"| Passing candidates thrown away unlanded | 2: 1 with a member's head moved, 1 with a member gone from the queue |\n" +
+				"| Candidates dropped while building | 1: 1 with a member's head moved, 0 with a member gone from the queue; 2 of their pull requests stayed queued at the same head, the longest 9 min into its build |\n"},
+		{"no landing and candidates dropped", true, []string{`BEFORE_LIVE=,"landed":0,"passing_candidates_thrown_away":0,` +
+			`"building_candidates_dropped":3,"dropped_head_moved":2,"dropped_member_left":1,"dropped_members_still_queued":4,"dropped_longest_built_minutes":0`},
+			beforeTitle + ": no landings.\n\n| | |\n|---|---|\n" +
+				"| Passing candidates thrown away unlanded | none |\n" +
+				"| Candidates dropped while building | 3: 2 with a member's head moved, 1 with a member gone from the queue; 4 of their pull requests stayed queued at the same head |\n"},
 	} {
 		dir := standIns(t)
 		if c.records {
@@ -364,7 +426,7 @@ func TestDailyRowSaysWhenTheFourHoursBeforeHoldNoRecordsOrNoLanding(t *testing.T
 		}
 		data, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
 		row := string(data)
-		if !strings.HasSuffix(row, " comments.\n\n"+c.line) || strings.Count(row, "| | |") != 1 {
+		if !strings.HasSuffix(row, " comments.\n\n"+c.line) || strings.Count(row, "| | |") != 1+strings.Count(c.line, "| | |") {
 			t.Fatalf("%s reads:\n%s", c.name, row)
 		}
 		asked, _ := os.ReadFile(filepath.Join(dir, "asked"))

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -151,14 +152,25 @@ type liveMeasures struct {
 	// had passed with members on them, and that no recorded plan landed, each once. Of those,
 	// ThrownAwayHeadMoved counts the ones with a member queued at another head by then, and
 	// ThrownAwayMemberLeft the ones with a member no longer queued; one can be both, or neither.
-	PassingCandidatesThrownAway int      `json:"passing_candidates_thrown_away"`
-	ThrownAwayHeadMoved         int      `json:"thrown_away_head_moved"`
-	ThrownAwayMemberLeft        int      `json:"thrown_away_member_left"`
-	RedCandidates               int      `json:"red_candidates"`
-	RedReadN                    int      `json:"red_read_n"`
-	RedReadMedianMinutes        *float64 `json:"red_read_median_minutes"`
-	RedReadSumMinutes           *float64 `json:"red_read_sum_minutes"`
-	RedPullRequests             int      `json:"red_pull_requests"`
+	PassingCandidatesThrownAway int `json:"passing_candidates_thrown_away"`
+	ThrownAwayHeadMoved         int `json:"thrown_away_head_moved"`
+	ThrownAwayMemberLeft        int `json:"thrown_away_member_left"`
+	// BuildingCandidatesDropped counts the candidates a tick in the window deleted while they were
+	// still building, with a member queued at another head by then (DroppedHeadMoved) or no longer
+	// queued, though it neither landed nor was ejected by the queue (DroppedMemberLeft), each once.
+	// DroppedMembersStillQueued counts their members still queued at the head that was building,
+	// each once, and DroppedLongestBuiltMinutes is the longest any with a push time had built, 0
+	// when none had one.
+	BuildingCandidatesDropped  int      `json:"building_candidates_dropped"`
+	DroppedHeadMoved           int      `json:"dropped_head_moved"`
+	DroppedMemberLeft          int      `json:"dropped_member_left"`
+	DroppedMembersStillQueued  int      `json:"dropped_members_still_queued"`
+	DroppedLongestBuiltMinutes float64  `json:"dropped_longest_built_minutes"`
+	RedCandidates              int      `json:"red_candidates"`
+	RedReadN                   int      `json:"red_read_n"`
+	RedReadMedianMinutes       *float64 `json:"red_read_median_minutes"`
+	RedReadSumMinutes          *float64 `json:"red_read_sum_minutes"`
+	RedPullRequests            int      `json:"red_pull_requests"`
 }
 
 type recordedHead struct {
@@ -194,19 +206,11 @@ func (opts liveOptions) context() liveOptions {
 
 // splitLive splits counted landings only when all of their clocks are known and ordered.
 func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions) ([]landingParts, int) {
-	pushes, verdicts := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
+	pushes, verdicts := pushTimes(recs), map[queue.SHA]time.Time{}
 	for _, rec := range recs {
 		for _, b := range rec.World.Builds {
-			if !b.Pushed.IsZero() && pushes[b.SHA].IsZero() {
-				pushes[b.SHA] = b.Pushed
-			}
 			if b.Verdict != queue.Pending && verdicts[b.SHA].IsZero() {
 				verdicts[b.SHA] = rec.World.Now
-			}
-		}
-		for _, a := range rec.Actions {
-			if a.Do == "push" && pushes[a.Build.SHA].IsZero() {
-				pushes[a.Build.SHA] = rec.World.Now
 			}
 		}
 	}
@@ -230,6 +234,24 @@ func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions)
 	return rows, skipped
 }
 
+// pushTimes is each build's first recorded push time, or the tick that planned its push.
+func pushTimes(recs []queue.Recording) map[queue.SHA]time.Time {
+	pushes := map[queue.SHA]time.Time{}
+	for _, rec := range recs {
+		for _, b := range rec.World.Builds {
+			if !b.Pushed.IsZero() && pushes[b.SHA].IsZero() {
+				pushes[b.SHA] = b.Pushed
+			}
+		}
+		for _, a := range rec.Actions {
+			if a.Do == "push" && pushes[a.Build.SHA].IsZero() {
+				pushes[a.Build.SHA] = rec.World.Now
+			}
+		}
+	}
+	return pushes
+}
+
 func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLanding) liveMeasures {
 	rows, skipped := splitLive(recs, landings, opts)
 	m := liveMeasures{SplitLandings: len(rows), UnsplitLandings: skipped,
@@ -247,17 +269,37 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 			m.UnplannedTrunkMoves++
 		}
 	}
-	thrown := map[queue.SHA]bool{}
+	thrown, dropped, stillQueued := map[queue.SHA]bool{}, map[queue.SHA]bool{}, map[headKey]bool{}
+	landedHeads, ejectedSinceQueued, pushes := map[headKey]bool{}, map[int]bool{}, pushTimes(recs)
 	for _, rec := range recs {
+		for _, pr := range rec.World.PRs {
+			delete(ejectedSinceQueued, pr.Number)
+		}
+		for _, a := range rec.Actions {
+			switch a.Do {
+			case "land":
+				for _, member := range a.Members {
+					landedHeads[headKey{member.Number, member.Head}] = true
+				}
+			case "eject":
+				ejectedSinceQueued[a.PR] = true
+			}
+		}
 		if !opts.contains(rec.World.Now) {
 			continue
 		}
 		for _, a := range rec.Actions {
-			if a.Do != "delete" || planned[a.SHA] || thrown[a.SHA] {
+			if a.Do != "delete" || planned[a.SHA] {
 				continue
 			}
 			for _, b := range rec.World.Builds {
-				if b.SHA == a.SHA && b.Kind == queue.Candidate && b.Verdict == queue.Success && len(b.Chain) > 0 {
+				if b.SHA != a.SHA || b.Kind != queue.Candidate || len(b.Chain) == 0 {
+					continue
+				}
+				if b.Verdict == queue.Success && thrown[a.SHA] || b.Verdict == queue.Pending && dropped[a.SHA] {
+					break
+				}
+				if b.Verdict == queue.Success {
 					thrown[a.SHA] = true
 					m.PassingCandidatesThrownAway++
 					moved, left := throwReasons(rec.World.PRs, b.Chain)
@@ -269,9 +311,31 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 					}
 					break
 				}
+				if b.Verdict == queue.Pending {
+					if moved, left := dropReasons(rec.World.PRs, b.Chain, landedHeads, ejectedSinceQueued); moved || left {
+						dropped[a.SHA] = true
+						m.BuildingCandidatesDropped++
+						if moved {
+							m.DroppedHeadMoved++
+						}
+						if left {
+							m.DroppedMemberLeft++
+						}
+						for _, pr := range rec.World.PRs {
+							if slices.ContainsFunc(b.Chain, func(member queue.Member) bool { return member.Number == pr.Number && member.Head == pr.Head }) {
+								stillQueued[headKey{pr.Number, pr.Head}] = true
+							}
+						}
+						if pushed := cmp.Or(b.Pushed, pushes[b.SHA]); !pushed.IsZero() {
+							m.DroppedLongestBuiltMinutes = max(m.DroppedLongestBuiltMinutes, rec.World.Now.Sub(pushed).Minutes())
+						}
+						break
+					}
+				}
 			}
 		}
 	}
+	m.DroppedMembersStillQueued = len(stillQueued)
 	var added, build, total []float64
 	for _, r := range rows {
 		added, build, total = append(added, r.added), append(build, r.build), append(total, r.total)
@@ -407,6 +471,21 @@ func throwReasons(prs []queue.PR, chain []queue.Member) (moved, left bool) {
 	for _, member := range chain {
 		head, queued := heads[member.Number]
 		moved, left = moved || queued && head != member.Head, left || !queued
+	}
+	return moved, left
+}
+
+// dropReasons is throwReasons for a candidate still building, where a member no longer queued
+// counts as left only when it neither landed at that head nor was ejected since it was last queued.
+func dropReasons(prs []queue.PR, chain []queue.Member, landed map[headKey]bool, ejected map[int]bool) (moved, left bool) {
+	heads := map[int]queue.SHA{}
+	for _, pr := range prs {
+		heads[pr.Number] = pr.Head
+	}
+	for _, member := range chain {
+		head, queued := heads[member.Number]
+		gone := !queued && !landed[headKey{member.Number, member.Head}] && !ejected[member.Number]
+		moved, left = moved || queued && head != member.Head, left || gone
 	}
 	return moved, left
 }
