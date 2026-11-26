@@ -732,6 +732,32 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 	full := func(m int) queue.Recording {
 		return record(m, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)})
 	}
+	pushed := func(b queue.Build, m int) queue.Build {
+		b.Pushed = at(m)
+		return b
+	}
+	kept := func(b queue.Build, m int) queue.Build {
+		b.Landed = at(m)
+		return b
+	}
+	timedOut := func(timeout time.Duration, old func(m int) queue.Build) []queue.Recording {
+		var recs []queue.Recording
+		for _, m := range []int{0, 7} {
+			r := record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{old(m)}, queue.Action{Do: "push", Build: pushed(candidate(queue.SHA(fmt.Sprintf("retry%d", m)), queue.Pending, 1), m)})
+			r.Config.Gather, r.Config.Timeout = 2, timeout
+			recs = append(recs, r)
+		}
+		return recs
+	}
+	landedAndKept := func(keep time.Duration) []queue.Recording {
+		var recs []queue.Recording
+		for _, m := range []int{0, 7} {
+			r := record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{pushed(candidate("c", queue.Pending, 1), m-5), kept(pushed(candidate("d", queue.Pending, 3), m-20), m-1)})
+			r.Config.Keep = keep
+			recs = append(recs, r)
+		}
+		return recs
+	}
 	free := func(m int) queue.Recording {
 		return record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)})
 	}
@@ -802,6 +828,12 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 		{"the record's own note replaces an old note that it conflicts with the trunk", []queue.Recording{
 			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"}),
 			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"})}, 7},
+		{"a candidate pending past the timeout holds no slot beside its retry", timedOut(time.Hour, func(m int) queue.Build { return pushed(candidate("c", queue.Pending, 1), m-120) }), 0},
+		{"a candidate pending exactly as long as the timeout still holds its slot", timedOut(time.Hour, func(m int) queue.Build { return pushed(candidate("c", queue.Pending, 1), m-60) }), 7},
+		{"a candidate with no push time is past any timeout", timedOut(time.Hour, func(int) queue.Build { return candidate("c", queue.Pending, 1) }), 0},
+		{"with no timeout an old candidate holds its slot", timedOut(0, func(m int) queue.Build { return pushed(candidate("c", queue.Pending, 1), m-120) }), 7},
+		{"a candidate marked landed and kept holds no slot", landedAndKept(10 * time.Minute), 0},
+		{"a candidate marked landed holds its slot where nothing is kept", landedAndKept(0), 7},
 		{"no slots, no backlog", func() []queue.Recording {
 			var recs []queue.Recording
 			for m := 0; m <= 60; m += 10 {
