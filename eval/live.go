@@ -559,7 +559,10 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 		waits, labelled, ejects = append(waits, s.Waits...), append(labelled, s.Labelled...), append(ejects, s.Ejects...)
 	}
 	if sc.Landed > 0 {
-		sc.Wrong, sc.Builds, sc.PerHour = 1000*float64(wrong)/float64(sc.Landed), float64(whole)/float64(sc.Landed), float64(sc.Landed)/hours
+		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(sc.Landed), float64(whole)/float64(sc.Landed)
+		if hours > 0 {
+			sc.PerHour = float64(sc.Landed) / hours
+		}
 		if w.stop > 0 {
 			probe := shape.Probe
 			if probe == 0 {

@@ -305,13 +305,13 @@ func (s *Sim) clashes(parent, head queue.SHA) bool {
 
 // leftWaiting says a pull request ends the run waiting on the queue. A refusal onto the trunk
 // that only a clashing head this simulation landed makes is the simulated order's, not its
-// author's, so it still waits on the queue.
+// author's, so it still waits on the queue. A replay broken before its window leaves none.
 func (s *Sim) leftWaiting(p *simPR) bool {
 	pr := p.PR
 	if !p.conflict && p.ahead == 0 && s.clashes(s.trunk, p.Head) {
 		pr.Note = ""
 	}
-	return p.queued && !p.landed && waitsOnTheQueue(pr)
+	return s.now >= 0 && p.queued && !p.landed && waitsOnTheQueue(pr)
 }
 
 func (s *Sim) Mark(parent queue.SHA, note string) queue.SHA { return s.commit(parent, "", note, 0) }
@@ -863,7 +863,7 @@ func (s *Sim) land(a queue.Action) {
 
 // Run plays ticks before Stop, or drains an unbounded shape and checks that it finishes. A
 // recorded replay opens at its first act, before zero where it is led into its window, and
-// scores what happens from zero on.
+// scores what happens from zero on; one broken before zero scores nothing but its failure.
 func (s *Sim) Run() {
 	if s.shape.Stop > 0 {
 		if s.shape.Recorded {
@@ -889,6 +889,9 @@ func (s *Sim) Run() {
 				break
 			}
 			s.step(next)
+		}
+		if s.now < 0 {
+			s.scored = scored{Ejected: map[string]int{}}
 		}
 		return
 	}

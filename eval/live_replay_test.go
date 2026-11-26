@@ -370,6 +370,46 @@ func TestReplayCountsNothingOfALandingBeforeTheWindow(t *testing.T) {
 	}
 }
 
+func TestReplayBrokenBeforeTheWindowScoresNothingButItsFailure(t *testing.T) {
+	shape := threeQueued()
+	shape.Queue = append(shape.Queue, Queued{At: 14 * time.Minute, Number: 4})
+	recs := plannedDay(shape, dials(1, 3, false), 60, func(*Sim) {})
+	_, w, _ := recordedWindow(t, recs, replayStart.Add(20*time.Minute), replayStart.Add(60*time.Minute))
+	s := NewSim(replayShape(w), w.cfg, 1)
+	landed := 0
+	s.plan = func(world queue.World, c queue.Config) []queue.Action {
+		acts := queue.Plan(world, c)
+		if p := s.prs[4]; landed == 0 && s.Landed > 0 && p != nil && p.queued && s.now < 0 {
+			landed = s.Landed
+			again := slices.Sorted(maps.Keys(s.seen))[0]
+			acts = append(acts, queue.Action{Do: "push", Build: queue.Build{SHA: again}})
+		}
+		return acts
+	}
+	s.Run()
+	if len(s.Broken) == 0 || s.now >= 0 || landed == 0 {
+		t.Fatalf("broken %v at %v after %d landings", s.Broken, s.now, landed)
+	}
+	if !reflect.DeepEqual(s.scored, scored{Ejected: map[string]int{}}) || s.opening != 0 {
+		t.Fatalf("a seed broken in the lead-in scored %+v, %d waiting at the open", s.scored, s.opening)
+	}
+	for _, p := range s.prs {
+		if s.leftWaiting(p) {
+			t.Fatalf("#%d left waiting by a seed broken in the lead-in", p.Number)
+		}
+	}
+}
+
+func TestReplayRatesNoLandingsAnHourWhereEveryLandingIsAtZero(t *testing.T) {
+	p := replayPR(1)
+	p.Queued = replayStart.Add(-10 * time.Minute)
+	_, w, _ := replayWindow(t, []queue.Recording{replayTick(-10, p), replayTick(0, p), replayTick(30, p)}, 30)
+	w.times, w.build = []time.Duration{10 * time.Minute}, 10*time.Minute
+	if sc, _ := w.simulate(Shape{}, Score{}); sc.Landed != 1 || sc.PerHour != 0 {
+		t.Fatalf("%d landed, %v an hour", sc.Landed, sc.PerHour)
+	}
+}
+
 func TestReplayCountsNoRedCandidateAnsweredBeforeTheWindow(t *testing.T) {
 	_, w, row := recordedWindow(t, guiltDay(), replayStart.Add(14*time.Minute), replayStart.Add(80*time.Minute))
 	s := runReplay(w)
