@@ -474,3 +474,45 @@ func TestDailyRowJudgesTheBusiestHourOnlyOnADayABacklogStoodAnHour(t *testing.T)
 		}
 	}
 }
+
+func TestDailyRowSaysWhatBecameOfTheFirstCandidateOfALandingHeldOver30Minutes(t *testing.T) {
+	const held = "| Landings held over 30 minutes | "
+	for _, c := range []struct {
+		name, live, lines string
+	}{
+		{"held after failures, drops and overtakes", `,"queue_added_over_30":22,"split_landings":40,"unsplit_landings":0,"first_candidate_p90_minutes":18.14,"first_candidate_over_30":0,` +
+			`"held_first_waited":0,"held_first_failed":13,"held_first_dropped":6,"held_first_overtaken":3,"held_first_other":0`,
+			"| Ready to a first candidate, p90 | 18.1 min; 0 landings waited over 30 min for one |\n" +
+				"| The 22 held over 30 min | 13 after their first candidate failed, 6 after it was dropped while building, 3 landed by a later candidate while the first still built |\n"},
+		{"every count", `,"queue_added_over_30":5,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":40,"first_candidate_over_30":1,` +
+			`"held_first_waited":1,"held_first_failed":1,"held_first_dropped":1,"held_first_overtaken":1,"held_first_other":1`,
+			"| Ready to a first candidate, p90 | 40 min; 1 landing waited over 30 min for one |\n" +
+				"| The 5 held over 30 min | 1 waited over 30 min for any candidate, 1 after their first candidate failed, 1 after it was dropped while building, 1 landed by a later candidate while the first still built, 1 other |\n"},
+		{"nothing held over 30 minutes", `,"queue_added_over_30":0,"split_landings":9,"unsplit_landings":0,"first_candidate_p90_minutes":3.25,"first_candidate_over_30":0,` +
+			`"held_first_waited":0,"held_first_failed":0,"held_first_dropped":0,"held_first_overtaken":0,"held_first_other":0`,
+			"| Ready to a first candidate, p90 | 3.3 min; 0 landings waited over 30 min for one |\n"},
+		{"an older row without the fields", `,"queue_added_over_30":4,"split_landings":9,"unsplit_landings":0`, ""},
+		{"no landing split", `,"queue_added_over_30":0,"split_landings":0,"unsplit_landings":2,"first_candidate_p90_minutes":null,"first_candidate_over_30":0,` +
+			`"held_first_waited":0,"held_first_failed":0,"held_first_dropped":0,"held_first_overtaken":0,"held_first_other":0`, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := standIns(t)
+			recordBefore(t, dir, "o/app")
+			if status, _ := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40), "LIVE="+c.live, "BEFORE_LIVE="+beforeLive+`,"first_candidate_p90_minutes":12,"first_candidate_over_30":2,`+
+				`"held_first_waited":1,"held_first_failed":0,"held_first_dropped":0,"held_first_overtaken":0,"held_first_other":0`, "BEFORE_TAKEOUTS="+beforeOuts); status != 0 {
+				t.Fatalf("status %d", status)
+			}
+			data, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
+			row := string(data)
+			start := strings.Index(row, held)
+			if start < 0 {
+				t.Fatalf("no held line:\n%s", row)
+			}
+			after := row[start+strings.Index(row[start:], "\n")+1:]
+			if !strings.HasPrefix(after, c.lines+"| Builds per landing |") || strings.Count(row, "first candidate") != strings.Count(c.lines, "first candidate") ||
+				strings.Contains(row, "null") || !strings.HasSuffix(row, beforeBlock) {
+				t.Fatalf("reads:\n%s", row)
+			}
+		})
+	}
+}

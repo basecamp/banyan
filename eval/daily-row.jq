@@ -10,6 +10,13 @@ def summary($title; $none):
   else "**\($title)**: \(.landed) landings. Ready to landed took \(.wait_p50_minutes | n1) minutes at the median and \(.wait_p90_minutes | n1) at p90. The queue added \(.queue_added_p50_minutes | n1) at the median and \(.queue_added_p90_minutes | n1) at p90." end;
 def ready_row: "| Ready to landed, median / p90 | \(.wait_p50_minutes | n1) / \(.wait_p90_minutes | n1) min (\(.wait_p50 | n2) / \(.wait_p90 | n2) builds of \(.build_median_minutes | n1) min) |";
 def held_row: "| Landings held over 30 minutes | \(.queue_added_over_30 | n1) of \(.split_landings) (\(.unsplit_landings) more could not be split) |";
+def first_row:
+  if .first_candidate_p90_minutes == null or .first_candidate_over_30 == null then empty
+  else "| Ready to a first candidate, p90 | \(.first_candidate_p90_minutes | n1) min; \(.first_candidate_over_30) landing\(if .first_candidate_over_30 == 1 then "" else "s" end) waited over 30 min for one |" end;
+def first_held_row:
+  [.held_first_waited, .held_first_failed, .held_first_dropped, .held_first_overtaken, .held_first_other] as $held
+  | if (.queue_added_over_30 // 0) == 0 or ($held | any(. == null)) then empty
+    else "| The \(.queue_added_over_30) held over 30 min | \([$held, ["waited over 30 min for any candidate", "after their first candidate failed", "after it was dropped while building", "landed by a later candidate while the first still built", "other"]] | transpose | map(select(.[0] > 0) | "\(.[0]) \(.[1])") | join(", ")) |" end;
 def builds_row: "| Builds per landing | \(.builds_per_landing | n2) |";
 def gap_row: "| Longest wait of a ready head with no landing | \(if .ready_gaps == null then "not measured" elif .longest_ready_gap_minutes == null then "none" else "\(.longest_ready_gap_minutes | n1) min, \(.longest_ready_gap_from | hm) to \(.longest_ready_gap_to | hm)" end) |";
 def red_row: "| Red candidates | \(if .red_candidates == null then "not measured" elif .red_candidates == 0 then "none" else "\(.red_candidates), holding \(.red_pull_requests | n1) pull requests; " + (if (.red_read_n // 0) > 0 then "failed job seen to read red \(.red_read_median_minutes | n1) min at the median over \(.red_read_n)" else "no failed job's time was recorded" end) end) |";
@@ -52,7 +59,7 @@ def later_row:
   "|---|---|",
   ($l | ready_row),
   "| Minutes the queue adds, median / p90 / p95 | \($l.queue_added_p50_minutes | n1) / \($l.queue_added_p90_minutes | n1) / \($l.queue_added_p95_minutes | n1) |",
-  ($l | held_row, builds_row, busiest_row($target; true), gap_row, red_row),
+  ($l | held_row, first_row, first_held_row, builds_row, busiest_row($target; true), gap_row, red_row),
   "| Trunk moves no recorded tick planned | \($l.unplanned_trunk_moves | n1)\(if ($l.unplanned_trunk_moves // 0) > 0 then " (a merge outside the queue, or a tick whose record is missing; its landings are not counted)" else "" end) |",
   ($l | thrown_row, dropped_row),
   (if ($l.unconfirmed_landing_plans // 0) > 0 then "| Landing plans in the window the records never confirm | \($l.unconfirmed_landing_plans) (a refused push, or a landing confirmed after the records end) |" else empty end),
