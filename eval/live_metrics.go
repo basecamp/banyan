@@ -140,12 +140,19 @@ type liveMeasures struct {
 	// UnplannedTrunkMoves counts the ticks in the window that read the trunk at a commit the tick
 	// before did not and no recorded plan landed: a merge made outside the queue, or a tick whose
 	// record is missing, whose landings the score cannot count.
-	UnplannedTrunkMoves  int      `json:"unplanned_trunk_moves"`
-	RedCandidates        int      `json:"red_candidates"`
-	RedReadN             int      `json:"red_read_n"`
-	RedReadMedianMinutes *float64 `json:"red_read_median_minutes"`
-	RedReadSumMinutes    *float64 `json:"red_read_sum_minutes"`
-	RedPullRequests      int      `json:"red_pull_requests"`
+	UnplannedTrunkMoves int `json:"unplanned_trunk_moves"`
+	// PassingCandidatesThrownAway counts the candidates a tick in the window deleted while they
+	// had passed with members on them, and that no recorded plan landed, each once. Of those,
+	// ThrownAwayHeadMoved counts the ones with a member queued at another head by then, and
+	// ThrownAwayMemberLeft the ones with a member no longer queued; one can be both, or neither.
+	PassingCandidatesThrownAway int      `json:"passing_candidates_thrown_away"`
+	ThrownAwayHeadMoved         int      `json:"thrown_away_head_moved"`
+	ThrownAwayMemberLeft        int      `json:"thrown_away_member_left"`
+	RedCandidates               int      `json:"red_candidates"`
+	RedReadN                    int      `json:"red_read_n"`
+	RedReadMedianMinutes        *float64 `json:"red_read_median_minutes"`
+	RedReadSumMinutes           *float64 `json:"red_read_sum_minutes"`
+	RedPullRequests             int      `json:"red_pull_requests"`
 }
 
 type recordedHead struct {
@@ -231,6 +238,31 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 	for i := 1; i < len(recs); i++ {
 		if trunk := recs[i].World.Trunk; trunk != recs[i-1].World.Trunk && !planned[trunk] && opts.contains(recs[i].World.Now) {
 			m.UnplannedTrunkMoves++
+		}
+	}
+	thrown := map[queue.SHA]bool{}
+	for _, rec := range recs {
+		if !opts.contains(rec.World.Now) {
+			continue
+		}
+		for _, a := range rec.Actions {
+			if a.Do != "delete" || planned[a.SHA] || thrown[a.SHA] {
+				continue
+			}
+			for _, b := range rec.World.Builds {
+				if b.SHA == a.SHA && b.Kind == queue.Candidate && b.Verdict == queue.Success && len(b.Chain) > 0 {
+					thrown[a.SHA] = true
+					m.PassingCandidatesThrownAway++
+					moved, left := throwReasons(rec.World.PRs, b.Chain)
+					if moved {
+						m.ThrownAwayHeadMoved++
+					}
+					if left {
+						m.ThrownAwayMemberLeft++
+					}
+					break
+				}
+			}
 		}
 	}
 	var added, build, total []float64
@@ -358,6 +390,18 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 		m.RedReadSumMinutes = number(math.RoundToEven(redSum))
 	}
 	return m
+}
+
+func throwReasons(prs []queue.PR, chain []queue.Member) (moved, left bool) {
+	heads := map[int]queue.SHA{}
+	for _, pr := range prs {
+		heads[pr.Number] = pr.Head
+	}
+	for _, member := range chain {
+		head, queued := heads[member.Number]
+		moved, left = moved || queued && head != member.Head, left || !queued
+	}
+	return moved, left
 }
 
 // waitsOnTheQueue says a recorded pull request could be built: its own checks passed, nothing of

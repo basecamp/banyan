@@ -2,36 +2,52 @@
 # daily-row <owner/repo> <YYYY-MM-DD> [<shape>]: a queue's row for one day, 01:17Z to 21:17Z, from the
 # eval's live score over its tick records and its take-outs from GitHub, kept under
 # $BANYAN_ROWS/<repo>/rows as <day>.json and <day>.md with a line in rows.tsv. <shape> adds the
-# simulated row beside it. The day's first whole row is the row: a later run changes nothing, and
-# only posts it where that is still owed. With $BANYAN_ROW_POST set, the Markdown goes to that
-# command's stdin once and its answer is kept in <day>.posted. Any failure exits non-zero with
-# nothing of the day replaced. $BANYAN_EVAL is the eval's binary, $BANYAN_GH the gh reads go through,
-# and $BANYAN_CLONE a clone of the repository the wrong-ejection check reads; without one, a landing
-# after an ejection as the cause is counted as unchecked.
+# simulated row beside it. The row also gives the live score and take-outs of the four hours before
+# its window, from 21:17Z the day before, under the key before and kept as <day>.before.*.json, so
+# no landing falls outside every row; they trip no tripwire and add nothing to rows.tsv. The day's
+# first whole row is the row: a later run changes nothing, and only posts it where that is still
+# owed. With $BANYAN_ROW_POST set, the Markdown goes to that command's stdin once and its answer
+# is kept in <day>.posted. Any failure, of a read for the day or for the four hours, exits non-zero
+# with nothing of the day replaced. $BANYAN_EVAL is the eval's binary, $BANYAN_GH the gh reads go
+# through, and $BANYAN_CLONE a clone of the repository the wrong-ejection check reads; without one,
+# a landing after an ejection as the cause is counted as unchecked.
 set -euo pipefail
 repo=$1 day=$2 shape=${3:-}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 eval_bin=${BANYAN_EVAL:?the eval binary}
 dir=${BANYAN_ROWS:-$HOME/.local/state/banyan-rows}/${repo##*/}
 rows=$dir/rows
-from=${day}T01:17:00Z to=${day}T21:17:00Z
+from=${day}T01:17:00Z to=${day}T21:17:00Z before=$(date -u -d "$day - 1 day" +%F)T21:17:00Z
 mkdir -p "$rows"
 committed() {
   jq -e '.live.commit | test("^[0-9a-f]{40}$")' "$1" > /dev/null && return 0
   echo "daily-row: the eval is not built from a commit ($(jq -r .live.commit "$1")), so its row is not posted" >&2; exit 1
 }
+recorded() {
+  [ -d "$dir/ticks" ] && find "$dir/ticks" -maxdepth 1 -name '*.json' -printf '%f\n' |
+    awk -v from="$(date -u -d "$1" +%Y%m%dT%H%M%SZ)" -v to="$(date -u -d "$2" +%Y%m%dT%H%M%SZ)" '$0 >= from && $0 < to { n++ } END { exit n == 0 }'
+}
 
 if [ ! -s "$rows/$day.json" ]; then
   [ "$(date -u +%s)" -ge "$(date -u -d "$to" +%s)" ] || { echo "daily-row: $day's window is still open" >&2; exit 2; }
-  "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$from - 72 hours" +%FT%TZ)" "$(date -u -d "$to + 5 minutes" +%FT%TZ)" >&2
+  "$here/fetch-ticks" "$repo" "$dir" "$(date -u -d "$before - 72 hours" +%FT%TZ)" "$(date -u -d "$to + 5 minutes" +%FT%TZ)" >&2
   tmp=$(mktemp -d "$rows/.$day.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   like=(); [ -n "$shape" ] && like=(-like "$shape")
-  [ -z "${BANYAN_CLONE:-}" ] || like+=(-clone "$BANYAN_CLONE")
-  "$eval_bin" -live "$dir/ticks" -from "$from" -to "$to" "${like[@]}" -row > "$tmp/live.json"
+  clone=(); [ -z "${BANYAN_CLONE:-}" ] || clone=(-clone "$BANYAN_CLONE")
+  "$eval_bin" -live "$dir/ticks" -from "$from" -to "$to" "${like[@]}" "${clone[@]}" -row > "$tmp/live.json"
   "$eval_bin" -takeouts "$repo" -from "$from" -to "$to" > "$tmp/takeouts.json"
+  if recorded "$before" "$from"; then
+    "$eval_bin" -live "$dir/ticks" -from "$before" -to "$from" "${clone[@]}" -row > "$tmp/before.live.json"
+  else
+    echo null > "$tmp/before.live.json"
+  fi
+  "$eval_bin" -takeouts "$repo" -from "$before" -to "$from" > "$tmp/before.takeouts.json"
   jq -n --arg repo "$repo" --arg day "$day" --arg made "$(date -u +%FT%TZ)" --slurpfile live "$tmp/live.json" --slurpfile out "$tmp/takeouts.json" \
-    '{repo: $repo, day: $day, made: $made, live: $live[0], takeouts: $out[0]}' > "$tmp/row.json"
+    --arg before "$before" --arg from "$from" --slurpfile before_live "$tmp/before.live.json" --slurpfile before_out "$tmp/before.takeouts.json" \
+    '{repo: $repo, day: $day, made: $made, live: $live[0], takeouts: $out[0],
+      before: {from: $before, to: $from, live: $before_live[0], takeouts: $before_out[0]}}' > "$tmp/row.json"
   jq -e '.live.landed != null and .live.ticks > 0 and (.takeouts.takeouts | type) == "array"' "$tmp/row.json" > /dev/null
+  jq -e '(.before.live == null or (.before.live.ticks | type) == "number") and (.before.takeouts.takeouts | type) == "array"' "$tmp/row.json" > /dev/null
   [ -z "${BANYAN_ROW_POST:-}" ] || committed "$tmp/row.json"
   jq -r -f "$here/daily-row.jq" "$tmp/row.json" > "$tmp/row.md"
   [ -s "$tmp/row.md" ]
@@ -50,6 +66,7 @@ if [ ! -s "$rows/$day.json" ]; then
       | map(if . == null then "" elif type == "number" then (. * 100 | round / 100) else . end) | @tsv' "$tmp/row.json"
   } > "$tmp/rows.tsv"
   mv "$tmp/row.md" "$rows/$day.md"; mv "$tmp/live.json" "$rows/$day.live.json"; mv "$tmp/takeouts.json" "$rows/$day.takeouts.json"
+  mv "$tmp/before.live.json" "$rows/$day.before.live.json"; mv "$tmp/before.takeouts.json" "$rows/$day.before.takeouts.json"
   mv "$tmp/rows.tsv" "$dir/rows.tsv"; mv "$tmp/row.json" "$rows/$day.json"
 fi
 
