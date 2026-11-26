@@ -151,14 +151,24 @@ type liveMeasures struct {
 	// had passed with members on them, and that no recorded plan landed, each once. Of those,
 	// ThrownAwayHeadMoved counts the ones with a member queued at another head by then, and
 	// ThrownAwayMemberLeft the ones with a member no longer queued; one can be both, or neither.
-	PassingCandidatesThrownAway int      `json:"passing_candidates_thrown_away"`
-	ThrownAwayHeadMoved         int      `json:"thrown_away_head_moved"`
-	ThrownAwayMemberLeft        int      `json:"thrown_away_member_left"`
-	RedCandidates               int      `json:"red_candidates"`
-	RedReadN                    int      `json:"red_read_n"`
-	RedReadMedianMinutes        *float64 `json:"red_read_median_minutes"`
-	RedReadSumMinutes           *float64 `json:"red_read_sum_minutes"`
-	RedPullRequests             int      `json:"red_pull_requests"`
+	PassingCandidatesThrownAway int `json:"passing_candidates_thrown_away"`
+	ThrownAwayHeadMoved         int `json:"thrown_away_head_moved"`
+	ThrownAwayMemberLeft        int `json:"thrown_away_member_left"`
+	// BuildingCandidatesDropped counts the candidates a tick in the window deleted while they were
+	// still building, with a member queued at another head by then (DroppedHeadMoved) or no longer
+	// queued (DroppedMemberLeft), each once. DroppedMembersRestarted counts their other members,
+	// still queued at the head that was building, each once, and DroppedLongestBuiltMinutes is
+	// the longest any of them had built.
+	BuildingCandidatesDropped  int      `json:"building_candidates_dropped"`
+	DroppedHeadMoved           int      `json:"dropped_head_moved"`
+	DroppedMemberLeft          int      `json:"dropped_member_left"`
+	DroppedMembersRestarted    int      `json:"dropped_members_restarted"`
+	DroppedLongestBuiltMinutes float64  `json:"dropped_longest_built_minutes"`
+	RedCandidates              int      `json:"red_candidates"`
+	RedReadN                   int      `json:"red_read_n"`
+	RedReadMedianMinutes       *float64 `json:"red_read_median_minutes"`
+	RedReadSumMinutes          *float64 `json:"red_read_sum_minutes"`
+	RedPullRequests            int      `json:"red_pull_requests"`
 }
 
 type recordedHead struct {
@@ -247,7 +257,7 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 			m.UnplannedTrunkMoves++
 		}
 	}
-	thrown := map[queue.SHA]bool{}
+	thrown, restarted := map[queue.SHA]bool{}, map[headKey]bool{}
 	for _, rec := range recs {
 		if !opts.contains(rec.World.Now) {
 			continue
@@ -269,9 +279,29 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 					}
 					break
 				}
+				if b.SHA == a.SHA && b.Kind == queue.Candidate && b.Verdict == queue.Pending && len(b.Chain) > 0 {
+					if moved, left := throwReasons(rec.World.PRs, b.Chain); moved || left {
+						thrown[a.SHA] = true
+						m.BuildingCandidatesDropped++
+						if moved {
+							m.DroppedHeadMoved++
+						}
+						if left {
+							m.DroppedMemberLeft++
+						}
+						for _, pr := range rec.World.PRs {
+							if slices.ContainsFunc(b.Chain, func(member queue.Member) bool { return member.Number == pr.Number && member.Head == pr.Head }) {
+								restarted[headKey{pr.Number, pr.Head}] = true
+							}
+						}
+						m.DroppedLongestBuiltMinutes = max(m.DroppedLongestBuiltMinutes, rec.World.Now.Sub(b.Pushed).Minutes())
+					}
+					break
+				}
 			}
 		}
 	}
+	m.DroppedMembersRestarted = len(restarted)
 	var added, build, total []float64
 	for _, r := range rows {
 		added, build, total = append(added, r.added), append(build, r.build), append(total, r.total)

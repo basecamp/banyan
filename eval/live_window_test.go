@@ -576,6 +576,50 @@ func TestLiveCountsPassingCandidatesThrownAwayUnlanded(t *testing.T) {
 	}
 }
 
+func TestLiveCountsCandidatesDroppedWhileBuildingForAMember(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	candidate := func(sha queue.SHA, verdict queue.Verdict, pushed int, chain ...queue.Member) queue.Build {
+		return queue.Build{SHA: sha, Kind: queue.Candidate, Verdict: verdict, Pushed: at(pushed), Chain: chain}
+	}
+	one, two, three := queue.Member{Number: 1, Head: "h1"}, queue.Member{Number: 2, Head: "h2"}, queue.Member{Number: 3, Head: "h3"}
+	deleted := func(m int, prs []queue.PR, builds ...queue.Build) queue.Recording {
+		rec := queue.Recording{World: queue.World{Now: at(m), Trunk: "t", PRs: prs, Builds: builds}}
+		for _, b := range builds {
+			rec.Actions = append(rec.Actions, queue.Action{Do: "delete", SHA: b.SHA})
+		}
+		return rec
+	}
+	all := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2"}, {Number: 3, Head: "h3"}}
+	moved := []queue.PR{{Number: 1, Head: "h1"}, {Number: 2, Head: "h2-pushed-again"}, {Number: 3, Head: "h3"}}
+	for _, c := range []struct {
+		name                                string
+		recs                                []queue.Recording
+		from, to                            int
+		dropped, headMoved, left, restarted int
+		longest                             float64
+	}{
+		{"a member's head moved", []queue.Recording{deleted(22, moved, candidate("c", queue.Pending, 0, one, two))}, 0, 30, 1, 1, 0, 1, 22},
+		{"a member left", []queue.Recording{deleted(9, all[:1], candidate("c", queue.Pending, 2, one, two))}, 0, 30, 1, 0, 1, 1, 7},
+		{"stacked candidates restart each member once", []queue.Recording{deleted(22, moved,
+			candidate("c", queue.Pending, 0, one, two), candidate("d", queue.Pending, 6, one, two, three))}, 0, 30, 2, 2, 0, 2, 22},
+		{"every member still queued at its head", []queue.Recording{deleted(22, all, candidate("c", queue.Pending, 0, one, two))}, 0, 30, 0, 0, 0, 0, 0},
+		{"passed before it was dropped", []queue.Recording{deleted(22, moved, candidate("c", queue.Success, 0, one, two))}, 0, 30, 0, 0, 0, 0, 0},
+		{"failed", []queue.Recording{deleted(22, moved, candidate("c", queue.Failure, 0, one, two))}, 0, 30, 0, 0, 0, 0, 0},
+		{"an empty chain", []queue.Recording{deleted(22, moved, candidate("c", queue.Pending, 0))}, 0, 30, 0, 0, 0, 0, 0},
+		{"deleted twice, counted once", []queue.Recording{deleted(22, moved, candidate("c", queue.Pending, 0, one, two)), deleted(23, moved, candidate("c", queue.Pending, 0, one, two))}, 0, 30, 1, 1, 0, 1, 22},
+		{"deleted before the window", []queue.Recording{deleted(1, moved, candidate("c", queue.Pending, 0, one, two)), {World: queue.World{Now: at(5), Trunk: "t"}}}, 2, 30, 0, 0, 0, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := windowRow(t, c.recs, at(c.from), at(c.to)).liveMeasures
+			got := [4]int{m.BuildingCandidatesDropped, m.DroppedHeadMoved, m.DroppedMemberLeft, m.DroppedMembersRestarted}
+			if want := [4]int{c.dropped, c.headMoved, c.left, c.restarted}; got != want || m.DroppedLongestBuiltMinutes != c.longest {
+				t.Fatalf("dropped, head moved, member left, restarted %v, longest built %v min; want %v, %v", got, m.DroppedLongestBuiltMinutes, want, c.longest)
+			}
+		})
+	}
+}
+
 func TestLiveBusiestHourCountsEachMemberLandedInTheWindow(t *testing.T) {
 	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }

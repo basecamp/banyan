@@ -21,6 +21,7 @@ def busiest_row($target; $day):
     elif backlog_judged then "\(.busiest_hour_landings)\(if $target == null then ", with no target for this queue" else " against a target of \($target)" end), judged: a backlog stood for \(.backlog_longest_minutes | floor) min that day"
     else "\(.busiest_hour_landings), not judged: no backlog stood for an hour (the longest stood \(.backlog_longest_minutes | floor) min)" end) |";
 def thrown_row: "| Passing candidates thrown away unlanded | \(if .passing_candidates_thrown_away == null then "not measured" elif .passing_candidates_thrown_away == 0 then "none" else "\(.passing_candidates_thrown_away): \(.thrown_away_head_moved) with a member's head moved, \(.thrown_away_member_left) with a member gone from the queue" end) |";
+def dropped_row: "| Candidates dropped while building | \(if .building_candidates_dropped == null then "not measured" elif .building_candidates_dropped == 0 then "none" else "\(.building_candidates_dropped): \(.dropped_head_moved) with a member's head moved, \(.dropped_member_left) with a member gone from the queue; \(.dropped_members_restarted) pull requests started again, the longest \(.dropped_longest_built_minutes | floor) min into its build" end) |";
 def takeouts_row:
   (.by_class // {}) as $c | (.takeouts // []) as $outs
   | ([$outs[] | select(.class as $k | classes | index($k) | not)] | group_by(.attributed) | map({name: .[0].attributed, count: length})) as $others
@@ -51,7 +52,7 @@ def later_row:
   "| Minutes the queue adds, median / p90 / p95 | \($l.queue_added_p50_minutes | n1) / \($l.queue_added_p90_minutes | n1) / \($l.queue_added_p95_minutes | n1) |",
   ($l | held_row, builds_row, busiest_row($target; true), gap_row, red_row),
   "| Trunk moves no recorded tick planned | \($l.unplanned_trunk_moves | n1)\(if ($l.unplanned_trunk_moves // 0) > 0 then " (a merge outside the queue, or a tick whose record is missing; its landings are not counted)" else "" end) |",
-  ($l | thrown_row),
+  ($l | thrown_row, dropped_row),
   (if ($l.unconfirmed_landing_plans // 0) > 0 then "| Landing plans in the window the records never confirm | \($l.unconfirmed_landing_plans) (a refused push, or a landing confirmed after the records end) |" else empty end),
   "| Wrong ejections by the engine | \($l.wrong_ejections | n1)\(if $unjudged > 0 then ", with \($unjudged) landing(s) not checked" else "" end) |",
   ($t | takeouts_row, later_row),
@@ -66,4 +67,4 @@ def later_row:
    | "",
      (if .live == null or .live.ticks == 0 then "**\($title)**: no records cover them."
       elif (.live.landed // 0) == 0 then .live | summary($title; "no landings")
-      else (.live | summary($title; "no landings"), "", "| | |", "|---|---|", ready_row, held_row, builds_row, busiest_row(null; false), gap_row, red_row, thrown_row), (.takeouts | takeouts_row, later_row) end))
+      else (.live | summary($title; "no landings"), "", "| | |", "|---|---|", ready_row, held_row, builds_row, busiest_row(null; false), gap_row, red_row, thrown_row, dropped_row), (.takeouts | takeouts_row, later_row) end))
