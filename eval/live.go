@@ -583,7 +583,9 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, UnejectedGuiltyHeads: w.unejectedGuilty, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
 		}
 		for _, a := range w.acts {
-			comparison.Acts[a.Do]++
+			if a.At >= 0 {
+				comparison.Acts[a.Do]++
+			}
 		}
 		if len(waits) > 0 {
 			comparison.WaitP50Minutes, comparison.WaitP90Minutes = number(sc.WaitP50*shape.Build.Minutes()), number(sc.WaitP90*shape.Build.Minutes())

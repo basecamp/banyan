@@ -464,11 +464,12 @@ func TestReplayPairsKeepMainsHoldOnAHeadHeldAtTheOpening(t *testing.T) {
 	h := g.heads()
 	r2 := g.commit(map[string]string{"y": "R\n"}, "R")
 	a, b, q, r := pairPR(1, h.a, -600), pairPR(2, h.b, -599), pairPR(3, h.q, -598), pairPR(5, r2, -597)
-	opening, later, again := replayTick(0, a, b, q, r), replayTick(1, a, b, q, r), replayTick(20, a, b, q, r)
+	opening, start, later, again := replayTick(-10, a, b, q, r), replayTick(0, a, b, q, r), replayTick(1, a, b, q, r), replayTick(20, a, b, q, r)
 	failsOnto(&opening, q, a)
+	failsOnto(&start, q, a)
 	failsOnto(&later, r, b)
 	failsOnto(&again, q, a)
-	recs := []queue.Recording{replayTick(-10, a, b, q, r), opening, later, replayTick(10, a, b, q, r), again, replayTick(30, a, b, q, r)}
+	recs := []queue.Recording{opening, start, later, replayTick(10, a, b, q, r), again, replayTick(30, a, b, q, r)}
 	_, w, _ := pairWindow(t, recs, 60, g.dir)
 	_, recorded, _ := pairWindow(t, recs, 60, "")
 	if heldActs(w, q.Number) != 2 || !reflect.DeepEqual(heldActsOf(w, q.Number), heldActsOf(recorded, q.Number)) {
@@ -491,6 +492,21 @@ func TestReplayPairsKeepMainsHoldOnAHeadHeldAtTheOpening(t *testing.T) {
 	s.play()
 	if !merges(s, onto(t, s, s.trunk, b.Number), q.Number) || merges(s, onto(t, s, s.trunk, a.Number), q.Number) {
 		t.Error("after its recorded hold, Q was not refused onto A alone")
+	}
+}
+
+func TestReplayPairsAnswerAHeadFirstHeldInTheLeadInFromGit(t *testing.T) {
+	g := newPairRepo(t)
+	h := g.heads()
+	a, q := pairPR(1, h.a, -600), pairPR(3, h.q, -598)
+	leadIn, start := replayTick(-5, a, q), replayTick(0, a, q)
+	failsOnto(&leadIn, q, a)
+	failsOnto(&start, q, a)
+	recs := []queue.Recording{replayTick(-10, a, q), leadIn, start, replayTick(10, a, q)}
+	_, w, _ := pairWindow(t, recs, 60, g.dir)
+	_, recorded, _ := pairWindow(t, recs, 60, "")
+	if heldActs(recorded, q.Number) != 1 || heldActs(w, q.Number) != 0 || w.ignoredHolds != 0 {
+		t.Fatalf("Q's hold acts %d, recorded %d, unattributed holds %d", heldActs(w, q.Number), heldActs(recorded, q.Number), w.ignoredHolds)
 	}
 }
 
