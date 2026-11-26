@@ -18,7 +18,7 @@ def backlog_judged: (.backlog_longest_minutes // 0) >= 60;
 def busiest_row($target; $day):
   "| Landings in the busiest hour | \(if .busiest_hour_landings == null or .backlog_longest_minutes == null then "not measured"
     elif ($day | not) then "\(.busiest_hour_landings), not judged outside the day's window (the longest backlog stood \(.backlog_longest_minutes | floor) min)"
-    elif backlog_judged then "\(.busiest_hour_landings)\(if $target == null then ", with no target for this queue" else " against a target of \($target)" end), judged: a backlog stood for \(.backlog_longest_minutes | floor) min that day"
+    elif backlog_judged then (if $target == null then "\(.busiest_hour_landings), with no target for this queue" else "\(.busiest_hour_landings) against a target of \($target), judged: a backlog stood for \(.backlog_longest_minutes | floor) min that day" end)
     else "\(.busiest_hour_landings), not judged: no backlog stood for an hour (the longest stood \(.backlog_longest_minutes | floor) min)" end) |";
 def thrown_row: "| Passing candidates thrown away unlanded | \(if .passing_candidates_thrown_away == null then "not measured" elif .passing_candidates_thrown_away == 0 then "none" else "\(.passing_candidates_thrown_away): \(.thrown_away_head_moved) with a member's head moved, \(.thrown_away_member_left) with a member gone from the queue" end) |";
 def takeouts_row:

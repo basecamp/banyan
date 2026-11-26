@@ -600,6 +600,7 @@ func TestLiveBusiestHourCountsEachMemberLandedInTheWindow(t *testing.T) {
 	}{
 		{"the best 60 minutes is not a clock hour, and one exactly 60 minutes on is outside it", map[int]int{30: 1, 45: 3, 80: 1, 90: 1}, 5, 6},
 		{"landings before and after the window do not count", map[int]int{-10: 2, 30: 1, 45: 3, 80: 1, 90: 1, 120: 4}, 5, 6},
+		{"the busiest hour is not the first", map[int]int{0: 1, 70: 3}, 3, 4},
 		{"no landing", map[int]int{}, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -676,11 +677,33 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 		{"a pull request at a head no chain holds is not started", []queue.Recording{
 			record(0, 1, []queue.PR{{Number: 1, Head: "pushed-again", Checks: queue.Success}}, []queue.Build{candidate("c", queue.Pending, 1)}),
 			record(7, 1, []queue.PR{{Number: 1, Head: "pushed-again", Checks: queue.Success}}, []queue.Build{candidate("c", queue.Pending, 1)})}, 7},
+		{"the record's own delete frees the slot", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "delete", SHA: "c"})}, 0},
+		{"the record's own landing takes the waiter", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1), candidate("e", queue.Success, 2)}, queue.Action{Do: "land", SHA: "e", Members: []queue.Member{member(2)}})}, 0},
+		{"the record's own ejection takes the waiter", []queue.Recording{
+			full(0),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "eject", PR: 2, Cause: "culprit"})}, 0},
+		{"the record's own note that a pull request conflicts with the trunk", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: trunkConflict}),
+			record(7, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: trunkConflict})}, 0},
+		{"the record's own note replaces an old note that it conflicts with the trunk", []queue.Recording{
+			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"}),
+			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"})}, 7},
+		{"no slots, no backlog", func() []queue.Recording {
+			var recs []queue.Recording
+			for m := 0; m <= 60; m += 10 {
+				recs = append(recs, record(m, 0, []queue.PR{ready(1)}, nil))
+			}
+			return recs
+		}(), 0},
 		{"a run broken by one record with no backlog restarts", run(0, 5, -10, 15, 20, 25, 30), 15},
 		{"more than 10 minutes with no record ends the run", run(0, 10, 21, 25), 10},
 		{"a run lasts from its first record to its last", run(0, 4, -9), 4},
 		{"records before the window do not count", append([]queue.Recording{full(-5)}, run(0, 5)...), 5},
-		{"records at and after the window's end do not count", run(0, 5, 120, 125), 5},
+		{"records at and after the window's end do not count", run(110, 115, 120, 125), 5},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			row := windowRow(t, c.recs, at(0), at(120))

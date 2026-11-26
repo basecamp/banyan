@@ -393,6 +393,9 @@ func TestDailyRowJudgesTheBusiestHourOnlyOnADayABacklogStoodAnHour(t *testing.T)
 		{"basecamp/hey-native-apps", "22", "179", "22 against a target of 16, judged: a backlog stood for 179 min that day", "No tripwire breached."},
 		{"basecamp/hey-native-apps", "12", "67.4", "12 against a target of 16, judged: a backlog stood for 67 min that day", "**Tripwires:** 12 landings in the busiest hour of a day a backlog stood an hour, under 16."},
 		{"basecamp/hey2", "11", "60", "11 against a target of 12, judged: a backlog stood for 60 min that day", "**Tripwires:** 11 landings in the busiest hour of a day a backlog stood an hour, under 12."},
+		{"basecamp/hey-native-apps", "16", "90", "16 against a target of 16, judged: a backlog stood for 90 min that day", "No tripwire breached."},
+		{"basecamp/hey2", "12", "90", "12 against a target of 12, judged: a backlog stood for 90 min that day", "No tripwire breached."},
+		{"o/app", "2", "65", "2, with no target for this queue", "No tripwire breached."},
 		{"basecamp/hey2", "5", "59.96", "5, not judged: no backlog stood for an hour (the longest stood 59 min)", "No tripwire breached."},
 		{"basecamp/hey-native-apps", "0", "0", "0, not judged: no backlog stood for an hour (the longest stood 0 min)", "No tripwire breached."},
 	} {
