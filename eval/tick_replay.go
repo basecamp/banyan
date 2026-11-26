@@ -315,15 +315,19 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 }
 
 // brokeAndLeft is each head, beside those ejected as the cause, that the records hold to have
-// broken the build: no build of any kind that held it was ever read green, no landing of it
-// was confirmed, two or more whole builds that held it were read red and never green, with no
+// broken the build: a record queued it, no build of any kind that held it was ever read green,
+// no landing of it was confirmed, two or more whole builds that held it were read red with no
 // ejected culprit among their members, and a later record no longer queues it at that head.
 //
-// It takes no account of a red trunk, as no record yet holds a head that only a red trunk's
-// rounds failed. Two heads failing in the same builds are both held guilty; a head that fails
-// only beside another, or in most of its builds, is not. The replay labels the pull request of
-// any guilty head, these and those the record ejected, again at the next head the record queues
-// it at, as the replay's queue may have ejected it there.
+// It leaves three things out. It takes no account of a red trunk, so a head that leaves while
+// the trunk fails is held guilty, the trunk's red builds counting with the rest of its evidence.
+// A head with a single failed build is never held guilty, even one that failed alone. And it
+// cannot tell a head from what it failed beside unless the record ejected the other, so two
+// heads failing in the same builds are both held guilty.
+//
+// The replay labels the pull request of any guilty head, these and those the record ejected,
+// again at the next head the record queues it at, as the replay's queue may have ejected it
+// there.
 func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, green, red map[queue.SHA]bool, ejected map[headKey]bool, confirmed [][]queue.Member) map[headKey]bool {
 	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
 	for _, members := range confirmed {
