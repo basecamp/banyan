@@ -887,13 +887,18 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 func overtakenWindow(change func(recs []queue.Recording) []queue.Recording) []queue.Recording {
 	fast := queue.Build{SHA: "fast", Pushed: replayStart, Verdict: queue.Success}
 	slow := queue.Build{SHA: "slow", Pushed: replayStart, Verdict: queue.Success}
+	slower := queue.Build{SHA: "slower", Pushed: replayStart, Verdict: queue.Success}
 	over := queue.Build{SHA: "over", Base: "t", Chain: []queue.Member{{Number: 1, Head: "b", Merge: "over"}}}
 	recs := []queue.Recording{replayTick(0), replayTick(10), replayTick(20), replayTick(30), replayTick(40), replayTick(50)}
+	for i := range recs {
+		recs[i].Config.Cancels = true
+	}
 	recs[0].Actions = []queue.Action{{Do: "push", Build: over}}
 	over.Pushed = replayStart
 	recs[1].World.Builds = []queue.Build{over}
 	recs[2].World.Builds = []queue.Build{fast}
 	recs[3].World.Builds = []queue.Build{slow}
+	recs[4].World.Builds = []queue.Build{slower}
 	recs[4].Actions = []queue.Action{{Do: "land", SHA: "later", Members: over.Chain}}
 	over.Base, over.Chain = over.SHA, nil
 	recs[5].World.Trunk, recs[5].World.Builds = "later", []queue.Build{over}
@@ -904,13 +909,17 @@ func overtakenWindow(change func(recs []queue.Recording) []queue.Recording) []qu
 	return recs
 }
 
-func TestReplayTimesABuildOvertakenWhileBuildingByItsAge(t *testing.T) {
+func TestReplayTimesACandidateOvertakenWhileBuildingByItsAge(t *testing.T) {
+	answered := []time.Duration{20 * time.Minute, 30 * time.Minute, 40 * time.Minute}
+	with := func(more ...time.Duration) []time.Duration {
+		return slices.Sorted(slices.Values(append(slices.Clone(answered), more...)))
+	}
 	for _, tc := range []struct {
 		name   string
 		change func(recs []queue.Recording) []queue.Recording
 		want   []time.Duration
 	}{
-		{"members landed", nil, []time.Duration{20 * time.Minute, 30 * time.Minute, 50 * time.Minute}},
+		{"members landed", nil, with(50 * time.Minute)},
 		{"a member's head moved", func(recs []queue.Recording) []queue.Recording {
 			moved := replayPR(1)
 			moved.Head = "moved"
@@ -918,19 +927,62 @@ func TestReplayTimesABuildOvertakenWhileBuildingByItsAge(t *testing.T) {
 			recs[5].World.Trunk, recs[5].World.PRs = "t", []queue.PR{moved}
 			recs[5].World.Builds[0].Base, recs[5].World.Builds[0].Chain = "t", recs[1].World.Builds[0].Chain
 			return recs
-		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		}, answered},
 		{"no push time", func(recs []queue.Recording) []queue.Recording {
 			recs[0].Actions = nil
 			recs[1].World.Builds[0].Pushed, recs[5].World.Builds[0].Pushed = time.Time{}, time.Time{}
 			return recs
-		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		}, answered},
+		{"aged from the push the deleting record reads", func(recs []queue.Recording) []queue.Recording {
+			recs[1].World.Builds = nil
+			recs[5].World.Builds[0].Pushed = replayStart.Add(20 * time.Minute)
+			return recs
+		}, with(30 * time.Minute)},
 		{"a trunk check that never had members", func(recs []queue.Recording) []queue.Recording {
 			check := queue.Build{SHA: "over", Kind: queue.Check, Base: "t", Pushed: replayStart}
 			recs[0].Actions = []queue.Action{{Do: "push", Build: check}}
 			recs[1].World.Builds = []queue.Build{check}
 			recs[5].World.Builds = []queue.Build{check}
 			return recs
-		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		}, answered},
+		{"a check with members", func(recs []queue.Recording) []queue.Recording {
+			for _, i := range []int{0, 1, 5} {
+				for j := range recs[i].Actions {
+					recs[i].Actions[j].Build.Kind = queue.Check
+				}
+				for j := range recs[i].World.Builds {
+					recs[i].World.Builds[j].Kind = queue.Check
+				}
+			}
+			return recs
+		}, answered},
+		{"a probe", func(recs []queue.Recording) []queue.Recording {
+			for _, i := range []int{0, 1, 5} {
+				for j := range recs[i].Actions {
+					recs[i].Actions[j].Build.Kind = queue.Probe
+				}
+				for j := range recs[i].World.Builds {
+					recs[i].World.Builds[j].Kind = queue.Probe
+				}
+			}
+			return recs
+		}, answered},
+		{"at the timeout", func(recs []queue.Recording) []queue.Recording {
+			recs[5].Config.Timeout = 50 * time.Minute
+			return recs
+		}, with(50 * time.Minute)},
+		{"past the timeout", func(recs []queue.Recording) []queue.Recording {
+			recs[5].Config.Timeout = 50*time.Minute - time.Second
+			return recs
+		}, answered},
+		{"marked landed", func(recs []queue.Recording) []queue.Recording {
+			recs[5].World.Builds[0].Landed = recs[4].World.Now
+			return recs
+		}, answered},
+		{"deleted after the window", func(recs []queue.Recording) []queue.Recording {
+			recs[5].World.Now = replayStart.Add(65 * time.Minute)
+			return recs
+		}, answered},
 		{"answered, then read building and deleted", func(recs []queue.Recording) []queue.Recording {
 			slow := recs[3].World.Builds[0]
 			recs[0].Actions = []queue.Action{{Do: "push", Build: queue.Build{SHA: "slow", Chain: []queue.Member{{Number: 1, Head: "b", Merge: "slow"}}}}}
@@ -939,19 +991,19 @@ func TestReplayTimesABuildOvertakenWhileBuildingByItsAge(t *testing.T) {
 			recs[5].World.Builds = []queue.Build{slow}
 			recs[5].Actions = []queue.Action{{Do: "delete", SHA: slow.SHA}}
 			return recs
-		}, []time.Duration{20 * time.Minute, 30 * time.Minute}},
+		}, answered},
 		{"deleted again where the first delete failed", func(recs []queue.Recording) []queue.Recording {
 			again := recs[5]
 			again.World.Now = replayStart.Add(55 * time.Minute)
 			return append(recs, again)
-		}, []time.Duration{20 * time.Minute, 30 * time.Minute, 50 * time.Minute}},
+		}, with(50 * time.Minute)},
 		{"deleted, then read answered", func(recs []queue.Recording) []queue.Recording {
-			answered := recs[5].World.Builds[0]
-			answered.Verdict = queue.Success
+			done := recs[5].World.Builds[0]
+			done.Verdict = queue.Success
 			last := replayTick(55)
-			last.World.Trunk, last.World.Builds = "later", []queue.Build{answered}
+			last.World.Trunk, last.World.Builds = "later", []queue.Build{done}
 			return append(recs, last)
-		}, []time.Duration{20 * time.Minute, 30 * time.Minute, 55 * time.Minute}},
+		}, with(55 * time.Minute)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, w, _ := replayWindow(t, overtakenWindow(tc.change), 60)
@@ -963,23 +1015,45 @@ func TestReplayTimesABuildOvertakenWhileBuildingByItsAge(t *testing.T) {
 	}
 }
 
-func TestReplayOvertakenBuildLeavesTheLiveHalfAsItWas(t *testing.T) {
-	from, to := replayStart.Format(time.RFC3339), replayStart.Add(time.Hour).Format(time.RFC3339)
-	out, err := captureLiveRun(t, writeLive(t, overtakenWindow(nil)), "hey2", from, to, true)
-	if err != nil {
-		t.Fatal(err)
+func TestReplayCountsAnOvertakenCandidateWhereItsDeleteWasFirstPlanned(t *testing.T) {
+	recs := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
+		recs[5].World.Now = replayStart.Add(59 * time.Minute)
+		again := recs[5]
+		again.World.Now = replayStart.Add(61 * time.Minute)
+		return append(recs, again)
+	})
+	_, w, _ := recordedWindow(t, recs, replayStart.Add(60*time.Minute), replayStart.Add(90*time.Minute))
+	if len(w.times) != 0 {
+		t.Fatalf("pool %v", w.times)
 	}
-	var row map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(out), &row); err != nil {
-		t.Fatal(err)
+}
+
+func TestReplayOvertakenCandidateLeavesTheLiveHalfAsItWas(t *testing.T) {
+	liveHalf := func(recs []queue.Recording) map[string]json.RawMessage {
+		t.Helper()
+		from, to := replayStart.Format(time.RFC3339), replayStart.Add(time.Hour).Format(time.RFC3339)
+		out, err := captureLiveRun(t, writeLive(t, recs), "hey2", from, to, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(out), &row); err != nil {
+			t.Fatal(err)
+		}
+		delete(row, "simulated")
+		delete(row, "over_live")
+		return row
 	}
-	delete(row, "simulated")
-	delete(row, "over_live")
-	live, err := json.Marshal(row)
-	if err != nil {
-		t.Fatal(err)
+	overtaken := overtakenWindow(nil)
+	if _, w, _ := replayWindow(t, overtaken, 60); !slices.Contains(w.times, 50*time.Minute) {
+		t.Fatalf("no overtaken candidate in the pool %v", w.times)
 	}
-	if want := `{"arrivals":0,"backlog_longest_minutes":0,"build_median_minutes":30,"building_candidates_dropped":0,"builds_per_landing":3,"busiest_hour_landings":1,"busy_minutes":0,"commit":"unknown","context_ticks":0,"departures_after_an_unconfirmed_plan":0,"dropped_head_moved":0,"dropped_longest_built_minutes":0,"dropped_member_left":0,"dropped_members_still_queued":0,"ejected_p90":null,"ejected_p90_minutes":null,"ejections_as_cause":0,"first_tick":"2026-11-18T12:00:00Z","from":"2026-11-18T12:00:00Z","good_builds":2,"labelled_p50":null,"labelled_p50_minutes":null,"labelled_p90":null,"labelled_p90_minutes":null,"labelled_slowest_20th":null,"labelled_slowest_20th_minutes":null,"landed":1,"landing_build_median_minutes":null,"landings_per_hour":null,"landings_without_a_wait":1,"last_tick":"2026-11-18T12:50:00Z","left_waiting":0,"longest_ready_gap_from":null,"longest_ready_gap_minutes":null,"longest_ready_gap_to":null,"non_passing_builds":0,"passing_candidates_thrown_away":0,"queue_added_over_30":0,"queue_added_over_30_sum_minutes":null,"queue_added_p50_minutes":null,"queue_added_p90_minutes":null,"queue_added_p95_minutes":null,"queue_added_sum_minutes":null,"ready_gaps":0,"ready_gaps_over_90":0,"red_candidates":0,"red_pull_requests":0,"red_read_median_minutes":null,"red_read_n":0,"red_read_sum_minutes":null,"settings_in_window":1,"split_landings":0,"split_ready_to_landed_p50_minutes":null,"split_ready_to_landed_p90_minutes":null,"thrown_away_head_moved":0,"thrown_away_member_left":0,"ticks":6,"to":"2026-11-18T13:00:00Z","unchecked":0,"unconfirmed_landing_plans":0,"unplanned_trunk_moves":0,"unreadable":0,"unsplit_landings":1,"wait_p50":null,"wait_p50_minutes":null,"wait_p90":null,"wait_p90_minutes":null,"waiting_at_open":0,"whole_builds":3,"withdrawn":0,"wrong_ejections":0,"wrong_per_1000":0}`; string(live) != want {
-		t.Fatalf("live half %s", live)
+	control := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
+		recs[5].Actions = nil
+		return recs
+	})
+	got, want := liveHalf(overtaken), liveHalf(control)
+	if !reflect.DeepEqual(got, want) || string(got["build_median_minutes"]) != "30" {
+		t.Fatalf("live half %v, want %v", got, want)
 	}
 }

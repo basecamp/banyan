@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -208,10 +209,14 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				}
 				observed[a.Build.SHA] = true
 				hadMembers[a.Build.SHA] = hadMembers[a.Build.SHA] || len(a.Build.Chain) > 0
-			case a.Do == "delete" && opts.contains(now) && !deleted[a.SHA]:
-				if b, ok := overtakenBy(rec.World.Builds, a.SHA); ok && hadMembers[a.SHA] && !pushTimes[a.SHA].IsZero() {
+			case a.Do == "delete" && !deleted[a.SHA]:
+				b, ok := buildingOnLandedChain(rec, a.SHA)
+				pushedAt := cmp.Or(b.Pushed, pushTimes[a.SHA])
+				if ok && hadMembers[a.SHA] && !pushedAt.IsZero() {
 					deleted[a.SHA] = true
-					overtaken = append(overtaken, overtakenBuild{b.SHA, b.Kind, now.Sub(pushTimes[a.SHA]).Minutes()})
+					if opts.contains(now) {
+						overtaken = append(overtaken, overtakenBuild{b.SHA, b.Kind, now.Sub(pushedAt).Minutes()})
+					}
 				}
 			case a.Do == "eject" && a.Cause == "culprit":
 				if opts.contains(now) {
@@ -445,7 +450,7 @@ const unrecordedStretch = 30 * time.Minute
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
 	arrivals                                        []time.Duration
-	times                                           []time.Duration // a bounded window's whole builds, each as long as it took or, where overtaken while building, as long as it had built: a lower bound
+	times                                           []time.Duration // a bounded window's whole builds, each as long as it took, with lower bounds for candidates still building when the queue dropped them with every member landed
 	acts                                            []Act
 	unblamedRedCandidates, candidatesWithoutCulprit int
 	opening, left, withdrawn, settings              int
@@ -623,12 +628,15 @@ type overtakenBuild struct {
 	minutes float64
 }
 
-// overtakenBy is the whole build a delete removed while it was still building, once the trunk
-// held every member of its chain, which leaves the chain the record reads empty.
-func overtakenBy(builds []queue.Build, sha queue.SHA) (queue.Build, bool) {
-	for _, b := range builds {
+// buildingOnLandedChain says whether the record plans to delete a candidate still building, not
+// yet late, once the trunk holds every member of its chain, which the record reads as an empty
+// chain. The record only plans the delete: the remote can refuse it, and a later record plan it
+// again.
+func buildingOnLandedChain(rec queue.Recording, sha queue.SHA) (queue.Build, bool) {
+	for _, b := range rec.World.Builds {
 		if b.SHA == sha {
-			return b, b.Verdict == queue.Pending && b.Kind != queue.Probe && b.Landed.IsZero() && len(b.Chain) == 0
+			late := rec.Config.Timeout > 0 && rec.World.Now.Sub(b.Pushed) > rec.Config.Timeout
+			return b, b.Kind == queue.Candidate && b.Verdict == queue.Pending && !late && b.Landed.IsZero() && len(b.Chain) == 0
 		}
 	}
 	return queue.Build{}, false
