@@ -55,7 +55,8 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			}
 		}
 	}
-	for _, k := range brokeAndLeft(recs, builds, green, red, broken, confirmed) {
+	left := brokeAndLeft(recs, builds, green, red, broken, confirmed)
+	for k := range left {
 		broken[k] = true
 	}
 	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
@@ -247,7 +248,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			} else {
 				delete(holding, p.Number)
 			}
-			if !exists || old.Queued != p.Queued || old.First != p.First {
+			if !exists || old.Queued != p.Queued || old.First != p.First || old.Head != p.Head && left[headKey{p.Number, old.Head}] {
 				q := p.Queued.Sub(start)
 				add(p.Number, Act{Do: "label", First: p.First, Queued: &q})
 			}
@@ -324,8 +325,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 // trunk red only until a later round passes, and it sees neither when the trunk failed nor which
 // jobs did, so every failure on that base counts for nothing. Two such heads failing in the same
 // builds are both held guilty; a head that fails only beside another, or in most of its builds,
-// is not. The record's queue never ejected one, so where the replay's does, it does not come back.
-func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, green, red map[queue.SHA]bool, ejected map[headKey]bool, confirmed [][]queue.Member) []headKey {
+// is not. The record's queue never ejected one, so the replay labels its pull request again at
+// the next head the record queues it at, as the replay's queue may have ejected it.
+func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, green, red map[queue.SHA]bool, ejected map[headKey]bool, confirmed [][]queue.Member) map[headKey]bool {
 	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
 	for _, members := range confirmed {
 		for _, m := range members {
@@ -363,10 +365,10 @@ func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, gree
 			last[headKey{p.Number, p.Head}] = i
 		}
 	}
-	var guilty []headKey
+	guilty := map[headKey]bool{}
 	for k, n := range failed {
 		if i, queued := last[k]; n >= 2 && !passed[k] && !landed[k] && !ejected[k] && queued && i+1 < len(recs) {
-			guilty = append(guilty, k)
+			guilty[k] = true
 		}
 	}
 	return guilty

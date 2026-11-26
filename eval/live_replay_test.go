@@ -1100,8 +1100,62 @@ func innocentPassengerDay() []queue.Recording {
 
 func TestReplayInnocentPassengersRedsStayUnblamed(t *testing.T) {
 	_, w, _ := replayWindow(t, innocentPassengerDay(), 80)
-	if heldGuilty(w, 3, "head3") || w.unblamedRedCandidates != 1 || w.candidatesWithoutCulprit != 2 {
-		t.Fatalf("guilty %v, unblamed red candidates %d of %d", heldGuilty(w, 3, "head3"), w.unblamedRedCandidates, w.candidatesWithoutCulprit)
+	if heldGuilty(w, 3, "head3") || w.unblamedRedCandidates != 1 || w.candidatesWithoutCulprit != 2 || len(labelled(w, 3)) != 1 {
+		t.Fatalf("guilty %v, unblamed red candidates %d of %d, labelled at %v", heldGuilty(w, 3, "head3"), w.unblamedRedCandidates, w.candidatesWithoutCulprit, labelled(w, 3))
+	}
+}
+
+func labelled(w window, n int) []time.Duration {
+	var at []time.Duration
+	for _, a := range w.acts {
+		if a.Number == n && a.Do == "label" {
+			at = append(at, a.At)
+		}
+	}
+	return at
+}
+
+// fastReplay plays the window with every build taking two minutes, so the replay's queue
+// ejects a breaking head sooner than the record's would have.
+func fastReplay(w window) *Sim {
+	shape := replayShape(w)
+	shape.Times, shape.Probe = []time.Duration{2 * time.Minute}, 2*time.Minute
+	for head := range shape.Failing {
+		shape.Failing[head] = []time.Duration{2 * time.Minute}
+	}
+	s := NewSim(shape, w.cfg, 1)
+	s.Run()
+	return s
+}
+
+func TestReplayRequeuesAtItsNextHeadAPullRequestItEjectedFirst(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	if labels := labelled(w, 3); !slices.Equal(labels, []time.Duration{2 * time.Minute, 34 * time.Minute}) {
+		t.Fatalf("labelled at %v", labels)
+	}
+	s := fastReplay(w)
+	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || len(s.Broken) > 0 {
+		t.Fatalf("#3 left for %q, landed %v at head %s: %v", s.Left[3], p.landed, p.Head, s.Broken)
+	}
+}
+
+func TestReplayLeavesAPullRequestTheRecordEjectedOutUntilItIsLabelledAgain(t *testing.T) {
+	recs := plannedDay(threeQueued(3), dials(1, 3, false), 70, func(s *Sim) {
+		switch p := s.prs[3]; s.now {
+		case 40 * time.Minute:
+			p.Head, p.breaks = "fix3", false
+			s.byHead[p.Head] = 3
+		case 50 * time.Minute:
+			p.queued, p.Queued = true, s.epoch.Add(s.now)
+		}
+	})
+	_, w, _ := replayWindow(t, recs, 80)
+	if labels := labelled(w, 3); !heldGuilty(w, 3, "head3") || !slices.Equal(labels, []time.Duration{2 * time.Minute, 52 * time.Minute}) {
+		t.Fatalf("guilty %v, labelled at %v", heldGuilty(w, 3, "head3"), labels)
+	}
+	s := fastReplay(w)
+	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || p.at < 52*time.Minute {
+		t.Fatalf("#3 left for %q, landed %v at head %s at %v", s.Left[3], p.landed, p.Head, p.at)
 	}
 }
 
