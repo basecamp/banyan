@@ -56,6 +56,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	left := brokeAndLeft(recs, builds, green, red, broken, confirmed)
+	w.unejectedGuilty = len(left)
 	for k := range left {
 		broken[k] = true
 	}

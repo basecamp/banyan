@@ -1200,7 +1200,7 @@ func cleanDay() []queue.Recording {
 }
 
 // The simulated half of cleanDay's row as the replay before it held guilty a head that left
-// unejected.
+// unejected, which had no count of those heads.
 const cleanDaySimulated = `{"over_live":{"landed":0,"wait_p50":0,"wait_p90":0.1111111111111111,"builds_per_landing":0.13100000000000006},"simulated":{"landed":8,"wait_p50":1.4,"wait_p90":2,"builds_per_landing":0.706875,"unblamed_red_candidates":0,"candidates_without_a_culprit":5,"culprits_unattributed":0,"departures_after_an_unconfirmed_plan":0,"invariant_failures":0,"waiting_at_open":0,"settings_in_window":1,"acts":{"checks":8,"conflict":0,"ejected":0,"head":8,"hold":8,"label":8,"settings":1,"unlabel":0,"wait":8},"unattributed_holds":0,"wait_p50_minutes":14,"wait_p90_minutes":20,"whole_builds":5.655,"probes":0,"red_builds":0,"queue_added_p50_minutes":4,"queue_added_p90_minutes":8,"queue_added_over_30":0,"red_candidates":0,"red_pull_requests":0,"ejected_as_cause":0,"left_waiting":0}}`
 
 func TestReplayLeavesTheSimulatedHalfOfACleanDayAsItWas(t *testing.T) {
@@ -1208,12 +1208,40 @@ func TestReplayLeavesTheSimulatedHalfOfACleanDayAsItWas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var row map[string]json.RawMessage
+	var row, was struct {
+		Simulated map[string]any `json:"simulated"`
+		OverLive  map[string]any `json:"over_live"`
+	}
 	if err := json.Unmarshal([]byte(out), &row); err != nil {
 		t.Fatal(err)
 	}
-	if half, _ := json.Marshal(map[string]json.RawMessage{"simulated": row["simulated"], "over_live": row["over_live"]}); string(half) != cleanDaySimulated {
-		t.Fatalf("simulated half changed:\n%s\n%s", half, cleanDaySimulated)
+	if err := json.Unmarshal([]byte(cleanDaySimulated), &was); err != nil {
+		t.Fatal(err)
+	}
+	if row.Simulated["unejected_guilty_heads"] != 0.0 {
+		t.Fatalf("unejected guilty heads %v", row.Simulated["unejected_guilty_heads"])
+	}
+	delete(row.Simulated, "unejected_guilty_heads")
+	if !reflect.DeepEqual(row, was) {
+		t.Fatalf("simulated half changed:\n%v\n%v", row, was)
+	}
+}
+
+func TestReplayRowCountsTheGuiltyHeadsTheRecordDidNotEject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		day  []queue.Recording
+		want int
+	}{
+		{"one left unejected", guiltDay(), 1},
+		{"only an ejected culprit", plannedDay(threeQueued(3), dials(1, 3, false), 70, func(*Sim) {}), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			was, w, _ := replayWindow(t, tc.day, 80)
+			if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != tc.want || !heldGuilty(w, 3, "head3") {
+				t.Fatalf("unejected guilty heads %d, head3 held guilty %v", sim.UnejectedGuiltyHeads, heldGuilty(w, 3, "head3"))
+			}
+		})
 	}
 }
 

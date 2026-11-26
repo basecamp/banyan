@@ -438,6 +438,7 @@ type window struct {
 	clashing                                        map[queue.SHA]map[queue.SHA]bool
 	clashingPairs                                   *int
 	unattributed, unconfirmedDepartures             int
+	unejectedGuilty                                 int
 	flake, errored                                  float64
 	build                                           time.Duration
 	probe                                           time.Duration
@@ -579,7 +580,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 			QueueAddedP50Minutes: median(added), QueueAddedP90Minutes: quantile(added, 90), QueueAddedOver30: float64(over30) / seeds,
 			RedCandidates: float64(redCandidates) / seeds, RedPullRequests: float64(redPullRequests) / seeds,
 			UnblamedRedCandidates: w.unblamedRedCandidates, CandidatesWithoutACulprit: w.candidatesWithoutCulprit,
-			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
+			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, UnejectedGuiltyHeads: w.unejectedGuilty, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
 		}
 		for _, a := range w.acts {
 			comparison.Acts[a.Do]++
