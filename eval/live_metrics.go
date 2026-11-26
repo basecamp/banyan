@@ -488,9 +488,29 @@ func longestBacklog(recs []queue.Recording, opts liveOptions) time.Duration {
 // backlogged says that after the record's own actions a pull request that could be built is in
 // no pending candidate or push, and every slot is held by a pending build or a push.
 func backlogged(rec queue.Recording) bool {
+	deleted, taken, ejected, notes := map[queue.SHA]bool{}, map[headKey]bool{}, map[int]bool{}, map[int]string{}
 	held, started := 0, map[headKey]bool{}
+	for _, a := range rec.Actions {
+		switch a.Do {
+		case "push":
+			held++
+			for _, m := range a.Build.Chain {
+				started[headKey{m.Number, m.Head}] = true
+			}
+		case "delete":
+			deleted[a.SHA] = true
+		case "land":
+			for _, m := range a.Members {
+				taken[headKey{m.Number, m.Head}] = true
+			}
+		case "eject":
+			ejected[a.PR] = true
+		case "note":
+			notes[a.PR] = a.Text
+		}
+	}
 	for _, b := range rec.World.Builds {
-		if b.Verdict == queue.Pending {
+		if b.Verdict == queue.Pending && !deleted[b.SHA] {
 			held++
 			if b.Kind == queue.Candidate {
 				for _, m := range b.Chain {
@@ -499,16 +519,12 @@ func backlogged(rec queue.Recording) bool {
 			}
 		}
 	}
-	for _, a := range rec.Actions {
-		if a.Do == "push" {
-			held++
-			for _, m := range a.Build.Chain {
-				started[headKey{m.Number, m.Head}] = true
-			}
+	return rec.Config.Slots > 0 && held >= rec.Config.Slots && slices.ContainsFunc(rec.World.PRs, func(pr queue.PR) bool {
+		if note, ok := notes[pr.Number]; ok {
+			pr.Note = note
 		}
-	}
-	return held >= rec.Config.Slots && slices.ContainsFunc(rec.World.PRs, func(pr queue.PR) bool {
-		return waitsOnTheQueue(pr) && !started[headKey{pr.Number, pr.Head}]
+		key := headKey{pr.Number, pr.Head}
+		return waitsOnTheQueue(pr) && !started[key] && !taken[key] && !ejected[pr.Number]
 	})
 }
 
