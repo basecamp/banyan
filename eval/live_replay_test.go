@@ -80,8 +80,11 @@ func replayTick(minutes int, prs ...queue.PR) queue.Recording {
 func replayWindow(t *testing.T, recs []queue.Recording, minutes int) (Score, window, liveRow) {
 	return recordedWindow(t, recs, replayStart, replayStart.Add(time.Duration(minutes)*time.Minute))
 }
+func replayShape(w window) Shape {
+	return Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: w.build, Probe: w.probe, Times: w.times, Failing: w.failing}
+}
 func runReplay(w window) *Sim {
-	s := NewSim(Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: w.build, Probe: w.probe, Times: w.times}, w.cfg, 1)
+	s := NewSim(replayShape(w), w.cfg, 1)
 	s.Run()
 	return s
 }
@@ -846,7 +849,8 @@ func TestReplayPerturbedRowKeepsLiveFields(t *testing.T) {
 func TestReplayPerturbTimesAndSettings(t *testing.T) {
 	first, next := dials(3, 12, true), dials(5, 2, false)
 	w := window{cfg: first, build: 10 * time.Minute, probe: 3 * time.Minute, times: []time.Duration{8 * time.Minute, 12 * time.Minute},
-		acts: []Act{{Do: "settings", Config: &first}, {At: time.Hour, Do: "settings", Config: &next}}}
+		failing: map[queue.SHA][]time.Duration{"d": {6 * time.Minute}},
+		acts:    []Act{{Do: "settings", Config: &first}, {At: time.Hour, Do: "settings", Config: &next}}}
 	for _, name := range []string{"builds-double", "builds-half", "one-slot", "no-batch"} {
 		t.Run(name, func(t *testing.T) {
 			got, err := w.perturb(name)
@@ -867,6 +871,9 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 						t.Fatal("sample build time was not scaled")
 					}
 				}
+				if float64(got.failing["d"][0])/float64(w.failing["d"][0]) != ratio {
+					t.Fatal("a guilty head's failing time was not scaled")
+				}
 			case "one-slot", "no-batch":
 				for _, a := range got.acts {
 					if name == "one-slot" && a.Config.Slots != 1 || name == "no-batch" && a.Config.MaxBatch != 1 {
@@ -876,7 +883,7 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 			}
 		})
 	}
-	if first != dials(3, 12, true) || next != dials(5, 2, false) || w.build != 10*time.Minute || !slices.Equal(w.times, []time.Duration{8 * time.Minute, 12 * time.Minute}) {
+	if first != dials(3, 12, true) || next != dials(5, 2, false) || w.build != 10*time.Minute || !slices.Equal(w.times, []time.Duration{8 * time.Minute, 12 * time.Minute}) || w.failing["d"][0] != 6*time.Minute {
 		t.Fatal("perturbation changed source window")
 	}
 	if _, err := w.perturb("unknown"); err == nil {
@@ -979,5 +986,115 @@ func TestReplayHoldsNoHeadGuiltyThatTheRecordClears(t *testing.T) {
 				t.Fatal("head d held guilty")
 			}
 		})
+	}
+}
+
+// firstTreeHolding opens the replay, lets mark change the simulated queue, runs the planner's
+// first tick, and gives the first tree it pushed that holds this pull request.
+func firstTreeHolding(t *testing.T, w window, n int, mark func(*Sim)) (*Sim, queue.SHA) {
+	t.Helper()
+	s := NewSim(replayShape(w), w.cfg, 1)
+	s.play()
+	mark(s)
+	s.tick()
+	for _, sha := range s.shas() {
+		if b := s.builds[sha]; b.start >= 0 && s.holds[sha][n] {
+			return s, sha
+		}
+	}
+	t.Fatal("no build holds the pull request")
+	return nil, ""
+}
+
+func firstBuildHolding(t *testing.T, w window, n int) time.Duration {
+	t.Helper()
+	s, sha := firstTreeHolding(t, w, n, func(*Sim) {})
+	return s.builds[sha].end - s.now
+}
+
+// ejectedOnItsFirstFailure is breakersDay with #3 ejected on F1, so its one failing time is 8m.
+func ejectedOnItsFirstFailure() []queue.Recording {
+	recs := breakersDay()
+	recs[3].Actions, recs[4].World.Builds = []queue.Action{{Do: "eject", PR: 3, Cause: "culprit", Evidence: []queue.SHA{"F1"}}}, nil
+	return recs
+}
+
+func TestReplayGuiltyHeadFailsInItsOwnRecordedTime(t *testing.T) {
+	_, w, _ := replayWindow(t, ejectedOnItsFirstFailure(), 60)
+	if slices.Sort(w.times); !slices.Equal(w.times, []time.Duration{15 * time.Minute, 18 * time.Minute}) {
+		t.Fatalf("shared sample %v", w.times)
+	}
+	if took := firstBuildHolding(t, w, 3); took != 8*time.Minute {
+		t.Fatalf("the tree #3 breaks took %v, want its recorded 8m", took)
+	}
+}
+
+func TestReplayTreeOfTwoGuiltyHeadsFailsInTheShorterTime(t *testing.T) {
+	_, w, _ := replayWindow(t, ejectedOnItsFirstFailure(), 60)
+	s, sha := firstTreeHolding(t, w, 3, func(s *Sim) {
+		s.prs[2].breaks = true
+		s.shape.Failing = map[queue.SHA][]time.Duration{"d": {8 * time.Minute}, s.prs[2].Head: {3 * time.Minute}}
+	})
+	if !s.holds[sha][2] {
+		t.Fatalf("the tree does not hold #2: %v", s.holds[sha])
+	}
+	if took := s.builds[sha].end - s.now; took != 3*time.Minute {
+		t.Fatalf("the tree #2 and #3 break took %v, want the shorter 3m", took)
+	}
+}
+
+func TestReplayProbeOfAGuiltyHeadKeepsTheProbeTime(t *testing.T) {
+	_, w, _ := replayWindow(t, ejectedOnItsFirstFailure(), 60)
+	s, sha := firstTreeHolding(t, w, 3, func(*Sim) {})
+	s.holds["probe"] = s.holds[sha]
+	s.push(queue.Build{SHA: "probe", Kind: queue.Probe})
+	if took := s.builds["probe"].end - s.now; took != w.probe || took == 8*time.Minute || len(s.Broken) > 0 {
+		t.Fatalf("the probe took %v, want the probe time %v: %v", took, w.probe, s.Broken)
+	}
+}
+
+func TestReplayGuiltyHeadsFailingTimesLeaveTheSharedSample(t *testing.T) {
+	_, w, _ := replayWindow(t, breakersDay(), 60)
+	if slices.Sort(w.times); !slices.Equal(w.times, []time.Duration{15 * time.Minute, 18 * time.Minute}) {
+		t.Fatalf("shared sample %v", w.times)
+	}
+	if took := firstBuildHolding(t, w, 3); took != 6*time.Minute && took != 8*time.Minute {
+		t.Fatalf("the tree #3 breaks took %v, want one of its recorded 8m and 6m", took)
+	}
+}
+
+func TestReplayGuiltyHeadWithNoFailingTimeDrawsFromTheSharedSample(t *testing.T) {
+	recs := breakersDay()
+	probe := queue.Build{SHA: "P", Kind: queue.Probe, Base: "A", Pushed: recs[2].World.Now, Verdict: queue.Failure, Chain: []queue.Member{{Number: 3, Head: "d", Merge: "P"}}}
+	recs[2].Actions, recs[3].World.Builds = nil, []queue.Build{probe}
+	recs[3].Actions, recs[4].World.Builds = []queue.Action{{Do: "eject", PR: 3, Cause: "culprit", Evidence: []queue.SHA{"P"}}}, nil
+	recs[5].Actions, recs[6].World.Builds, recs[6].Actions, recs[7].World.Trunk = nil, nil, nil, "A"
+	_, w, _ := replayWindow(t, recs, 60)
+	if !heldGuilty(w, 3, "d") || !slices.Equal(w.times, []time.Duration{15 * time.Minute}) {
+		t.Fatalf("guilty %v, shared sample %v", heldGuilty(w, 3, "d"), w.times)
+	}
+	if took := firstBuildHolding(t, w, 3); took != 15*time.Minute {
+		t.Fatalf("the tree #3 breaks took %v, want the shared 15m", took)
+	}
+}
+
+// The live half of breakersDay's row as the replay before it carried running candidates, held
+// guilty a head that left unejected, or timed a guilty head's builds by its own.
+const breakersDayLive = `{"arrivals":4,"backlog_longest_minutes":0,"build_median_minutes":15,"building_candidates_dropped":0,"builds_per_landing":1,"busiest_hour_landings":3,"busy_minutes":49,"context_ticks":1,"departures_after_an_unconfirmed_plan":0,"dropped_head_moved":0,"dropped_longest_built_minutes":0,"dropped_member_left":0,"dropped_members_still_queued":0,"ejected_p90":null,"ejected_p90_minutes":null,"ejections_as_cause":0,"first_tick":"2026-11-18T12:10:00Z","from":"2026-11-18T12:00:00Z","good_builds":2,"labelled_p50":4.666666666666667,"labelled_p50_minutes":70,"labelled_p90":7.2,"labelled_p90_minutes":108,"labelled_slowest_20th":7.2,"labelled_slowest_20th_minutes":108,"landed":3,"landing_build_median_minutes":15,"landings_per_hour":3.673469387755102,"last_tick":"2026-11-18T12:49:00Z","left_waiting":0,"longest_ready_gap_from":"2026-11-18T12:10:00Z","longest_ready_gap_minutes":38,"longest_ready_gap_to":"2026-11-18T12:48:00Z","non_passing_builds":0,"passing_candidates_thrown_away":0,"queue_added_over_30":2,"queue_added_over_30_sum_minutes":110,"queue_added_p50_minutes":55,"queue_added_p90_minutes":55,"queue_added_p95_minutes":55,"queue_added_sum_minutes":110,"ready_gaps":2,"ready_gaps_over_90":0,"red_candidates":2,"red_pull_requests":2,"red_read_median_minutes":null,"red_read_n":0,"red_read_sum_minutes":null,"settings_in_window":1,"split_landings":3,"split_ready_to_landed_p50_minutes":70,"split_ready_to_landed_p90_minutes":70,"thrown_away_head_moved":0,"thrown_away_member_left":0,"ticks":7,"to":"2026-11-18T13:00:00Z","unchecked":0,"unconfirmed_landing_plans":0,"unplanned_trunk_moves":0,"unreadable":0,"unsplit_landings":0,"wait_p50":4.666666666666667,"wait_p50_minutes":70,"wait_p90":4.666666666666667,"wait_p90_minutes":70,"waiting_at_open":3,"whole_builds":3,"withdrawn":0,"wrong_ejections":0,"wrong_per_1000":0}`
+
+func TestReplayLeavesTheLiveHalfOfTheRowAsItWas(t *testing.T) {
+	out, err := captureLiveRun(t, writeLive(t, breakersDay()), "hey2", replayStart.Format(time.RFC3339), replayStart.Add(time.Hour).Format(time.RFC3339), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"simulated", "over_live", "commit"} {
+		delete(row, key)
+	}
+	if live, _ := json.Marshal(row); string(live) != breakersDayLive {
+		t.Fatalf("live half changed:\n%s\n%s", live, breakersDayLive)
 	}
 }

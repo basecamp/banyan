@@ -4,7 +4,9 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand"
+	"slices"
 	"sort"
 	"time"
 
@@ -49,6 +51,10 @@ type Shape struct {
 	Whole time.Duration
 	// Clashing holds each head git was asked about, with the heads git cannot merge it with.
 	Clashing map[queue.SHA]map[queue.SHA]bool
+	// Failing holds how long each recorded whole build that a guilty head failed took, by the
+	// head. A whole build of a tree that holds such a head takes one of its times in place of one
+	// from Times, the shortest drawn where it holds more than one.
+	Failing map[queue.SHA][]time.Duration
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
 	Rerun   time.Duration
@@ -712,6 +718,11 @@ func (s *Sim) push(b queue.Build) {
 			d = s.shape.Whole
 		}
 	}
+	if b.Kind != queue.Probe {
+		if fails, ok := s.failing(b.SHA); ok {
+			d = fails
+		}
+	}
 
 	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
 	s.Minutes += d.Minutes()
@@ -734,6 +745,21 @@ func (s *Sim) push(b queue.Build) {
 	}
 	s.started++
 	s.builds[b.SHA] = sb
+}
+
+// failing is how long a whole build of this tree takes to fail by the recorded times of the
+// guilty heads it holds, where it holds one the record timed.
+func (s *Sim) failing(sha queue.SHA) (time.Duration, bool) {
+	var d time.Duration
+	found := false
+	for _, n := range slices.Sorted(maps.Keys(s.holds[sha])) {
+		if p, times := s.prs[n], s.shape.Failing[s.prs[n].Head]; p.breaks && len(times) > 0 {
+			if fails := times[s.rng.Intn(len(times))]; !found || fails < d {
+				d, found = fails, true
+			}
+		}
+	}
+	return d, found
 }
 
 // pickup is how long after its push the CI takes a build up: one to ten seconds, by the commit

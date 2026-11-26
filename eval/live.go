@@ -91,7 +91,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		trunks       = map[queue.SHA]bool{}
 		unconfirmed  = map[queue.SHA]bool{}
 		took         = map[queue.Kind][]float64{}
-		timed        = map[queue.Kind][]float64{}      // took, less the builds whose verdict was first read after an unrecorded stretch
+		timed        = map[queue.Kind][]timedBuild{}   // took, less the builds whose verdict was first read after an unrecorded stretch
 		verdicts     = map[queue.SHA][]queue.Verdict{} // each tree's whole builds, by the prefix they test
 		good         = map[queue.SHA]bool{}            // the trees a whole build passed, each prefix of its chain among them
 		waits        []time.Duration
@@ -173,7 +173,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 			if opts.contains(answerAt) {
 				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
 				if (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch {
-					timed[b.Kind] = append(timed[b.Kind], answerAt.Sub(pushedAt).Minutes())
+					timed[b.Kind] = append(timed[b.Kind], timedBuild{b.SHA, b.Verdict == queue.Failure, time.Duration(answerAt.Sub(pushedAt).Minutes() * float64(time.Minute))})
 				}
 				if b.Kind == queue.Candidate {
 					candidates[b.SHA] = b
@@ -329,9 +329,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	if opts.from != nil && opts.to != nil {
 		win.stop = opts.to.Sub(*opts.from)
-		for _, minutes := range append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...) {
-			win.times = append(win.times, time.Duration(minutes*float64(time.Minute)))
-		}
+		win.timed = append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...)
 		win.probe = win.build
 		if len(took[queue.Probe]) > 0 {
 			win.probe = time.Duration(percentile(took[queue.Probe], 50) * float64(time.Minute))
@@ -430,7 +428,9 @@ const unrecordedStretch = 30 * time.Minute
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
 	arrivals                                        []time.Duration
-	times                                           []time.Duration // a bounded window's whole builds, each as long as it took
+	timed                                           []timedBuild                  // a bounded window's whole builds whose time the record holds
+	times                                           []time.Duration               // the same, each as long as it took, less those a guilty head failed
+	failing                                         map[queue.SHA][]time.Duration // each guilty head's failed builds among them, each as long as it took
 	acts                                            []Act
 	unblamedRedCandidates, candidatesWithoutCulprit int
 	opening, left, withdrawn, settings              int
@@ -443,6 +443,13 @@ type window struct {
 	probe                                           time.Duration
 	stop                                            time.Duration
 	cfg                                             queue.Config
+}
+
+// timedBuild is a whole build whose time the record holds, and whether it failed.
+type timedBuild struct {
+	sha    queue.SHA
+	failed bool
+	took   time.Duration
 }
 
 // perturb changes only the replay's build times or recorded settings.
@@ -462,6 +469,13 @@ func (w window) perturb(name string) (window, error) {
 		for i := range w.times {
 			w.times[i] = scale(w.times[i])
 		}
+		failing := map[queue.SHA][]time.Duration{}
+		for head, times := range w.failing {
+			for _, d := range times {
+				failing[head] = append(failing[head], scale(d))
+			}
+		}
+		w.failing = failing
 	case "one-slot", "no-batch":
 		change := func(c queue.Config) queue.Config {
 			if name == "one-slot" {
@@ -503,7 +517,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 		shape.Episodes, shape.Script, shape.Takes = nil, nil, nil
 		shape.Rerun, shape.Rescued, shape.Whole = 0, 0, 0
 		shape.Times, shape.Probe = w.times, w.probe
-		shape.Clashing = w.clashing
+		shape.Clashing, shape.Failing = w.clashing, w.failing
 	} else if was.Good > 0 {
 		shape.Flake = float64(was.Flaked) / float64(was.Good)
 	}

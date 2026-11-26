@@ -59,6 +59,18 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	for _, k := range brokeAndLeft(recs, builds, verdicts, broken, confirmed) {
 		broken[k] = true
 	}
+	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
+	for _, b := range w.timed {
+		guilty := false
+		for _, m := range builds[b.sha].Chain {
+			if b.failed && broken[headKey{m.Number, m.Head}] {
+				w.failing[m.Head], guilty = append(w.failing[m.Head], b.took), true
+			}
+		}
+		if !guilty {
+			w.times = append(w.times, b.took)
+		}
+	}
 	for sha, b := range candidates {
 		if len(builds[sha].Chain) > len(b.Chain) {
 			b.Chain = builds[sha].Chain
@@ -305,7 +317,8 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 // broken the build: no whole build that held it passed, no landing of it was confirmed, two or
 // more failed whole builds held it with no ejected culprit among their members, and a later
 // record no longer queues it at that head. Two such heads failing in the same builds are both
-// held guilty; a head that fails only beside another, or in most of its builds, is not.
+// held guilty; a head that fails only beside another, or in most of its builds, is not. The
+// record's queue never ejected one, so where the replay's does, it does not come back.
 func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, verdicts map[queue.SHA]queue.Verdict, ejected map[headKey]bool, confirmed [][]queue.Member) []headKey {
 	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
 	for _, members := range confirmed {
