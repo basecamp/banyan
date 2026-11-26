@@ -732,6 +732,32 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 	full := func(m int) queue.Recording {
 		return record(m, 1, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)})
 	}
+	pushed := func(b queue.Build, m int) queue.Build {
+		b.Pushed = at(m)
+		return b
+	}
+	kept := func(b queue.Build, m int) queue.Build {
+		b.Landed = at(m)
+		return b
+	}
+	timedOut := func(timeout time.Duration, old func(m int) queue.Build) []queue.Recording {
+		var recs []queue.Recording
+		for _, m := range []int{0, 7} {
+			r := record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{old(m)}, queue.Action{Do: "push", Build: pushed(candidate(queue.SHA(fmt.Sprintf("retry%d", m)), queue.Pending, 1), m)})
+			r.Config.Gather, r.Config.Timeout = 2, timeout
+			recs = append(recs, r)
+		}
+		return recs
+	}
+	landedAndKept := func(keep time.Duration) []queue.Recording {
+		var recs []queue.Recording
+		for _, m := range []int{0, 7} {
+			r := record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{pushed(candidate("c", queue.Pending, 1), m-5), kept(pushed(candidate("d", queue.Pending, 3), m-20), m-1)})
+			r.Config.Keep = keep
+			recs = append(recs, r)
+		}
+		return recs
+	}
 	free := func(m int) queue.Recording {
 		return record(m, 2, []queue.PR{ready(1), ready(2)}, []queue.Build{candidate("c", queue.Pending, 1)})
 	}
@@ -802,6 +828,12 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 		{"the record's own note replaces an old note that it conflicts with the trunk", []queue.Recording{
 			record(0, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"}),
 			record(7, 1, []queue.PR{ready(1), {Number: 2, Head: "h2", Checks: queue.Success, Note: trunkConflict}}, []queue.Build{candidate("c", queue.Pending, 1)}, queue.Action{Do: "note", PR: 2, Text: "in the queue, waiting"})}, 7},
+		{"a candidate pending past the timeout holds no slot beside its retry", timedOut(time.Hour, func(m int) queue.Build { return pushed(candidate("c", queue.Pending, 1), m-120) }), 0},
+		{"a candidate pending exactly as long as the timeout still holds its slot", timedOut(time.Hour, func(m int) queue.Build { return pushed(candidate("c", queue.Pending, 1), m-60) }), 7},
+		{"a candidate with no push time is past any timeout", timedOut(time.Hour, func(int) queue.Build { return candidate("c", queue.Pending, 1) }), 0},
+		{"with no timeout an old candidate holds its slot", timedOut(0, func(m int) queue.Build { return pushed(candidate("c", queue.Pending, 1), m-120) }), 7},
+		{"a candidate marked landed and kept holds no slot", landedAndKept(10 * time.Minute), 0},
+		{"a candidate marked landed holds its slot where nothing is kept", landedAndKept(0), 7},
 		{"no slots, no backlog", func() []queue.Recording {
 			var recs []queue.Recording
 			for m := 0; m <= 60; m += 10 {
@@ -822,4 +854,222 @@ func TestLiveBacklogStandsWhileAReadyPullRequestWaitsForAFullQueue(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestLiveSaysWhatBecameOfALandingsFirstCandidate(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return start.Add(time.Duration(m) * time.Minute) }
+	type read struct {
+		m       int
+		builds  []queue.Build
+		actions []queue.Action
+	}
+	type story struct {
+		ready  int
+		reads  func(n int, first, last queue.Build) []read
+		heldAt string
+	}
+	push := func(b queue.Build) []queue.Action { return []queue.Action{{Do: "push", Build: b}} }
+	with := func(b queue.Build, v queue.Verdict) queue.Build {
+		b.Verdict = v
+		return b
+	}
+	land := func(b queue.Build) []queue.Action { return []queue.Action{{Do: "land", SHA: b.SHA, Members: b.Chain}} }
+	tell := func(n, base int, trunk queue.SHA, s story, firstHead string) ([]queue.Recording, queue.SHA) {
+		head := queue.SHA(fmt.Sprintf("h%d", n))
+		if firstHead == "" {
+			firstHead = string(head)
+		}
+		first := queue.Build{SHA: queue.SHA(fmt.Sprintf("f%d", n)), Chain: []queue.Member{{Number: n, Head: queue.SHA(firstHead)}}}
+		last := queue.Build{SHA: queue.SHA(fmt.Sprintf("l%d", n)), Chain: []queue.Member{{Number: n, Head: head}}}
+		var recs []queue.Recording
+		for _, r := range s.reads(n, first, last) {
+			pr := queue.PR{Number: n, Head: head, Queued: at(base), Checks: queue.Pending}
+			if r.m >= s.ready {
+				pr.Checks = queue.Success
+			}
+			builds := slices.Clone(r.builds)
+			actions := slices.Clone(r.actions)
+			for i := range builds {
+				builds[i].Pushed = builds[i].Pushed.Add(time.Duration(base) * time.Minute)
+			}
+			for i := range actions {
+				if actions[i].Do == "push" {
+					actions[i].Build.Pushed = at(base + r.m)
+				}
+			}
+			recs = append(recs, queue.Recording{World: queue.World{Now: at(base + r.m), Trunk: trunk, PRs: []queue.PR{pr}, Builds: builds}, Actions: actions})
+		}
+		recs = append(recs, queue.Recording{World: queue.World{Now: recs[len(recs)-1].World.Now.Add(2 * time.Minute), Trunk: last.SHA}})
+		return recs, last.SHA
+	}
+	pushed := func(b queue.Build, m int) queue.Build {
+		b.Pushed = at(m)
+		return b
+	}
+	failed := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 25, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "failed"}
+	dropped := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 20, builds: []queue.Build{pushed(f, 5)}, actions: []queue.Action{{Do: "delete", SHA: f.SHA}}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "dropped"}
+	overtaken := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 40, builds: []queue.Build{pushed(f, 5)}, actions: push(l)},
+			{m: 50, builds: []queue.Build{pushed(f, 5), with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "overtaken"}
+	waited := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 20}, {m: 35, actions: push(l)}, {m: 45, builds: []queue.Build{with(pushed(l, 35), queue.Success)}, actions: land(l)}}
+	}, "waited"}
+	redThenDeleted := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 25, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}},
+			{m: 30, builds: []queue.Build{pushed(f, 5)}, actions: []queue.Action{{Do: "delete", SHA: f.SHA}}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "failed"}
+	beforeReady := story{10, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10}, {m: 25, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}},
+			{m: 50, actions: push(l)}, {m: 60, builds: []queue.Build{with(pushed(l, 50), queue.Success)}, actions: land(l)}}
+	}, "failed"}
+	thrownAway := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 20, builds: []queue.Build{with(pushed(f, 5), queue.Success)}, actions: []queue.Action{{Do: "delete", SHA: f.SHA}}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "passed"}
+	passed := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 25, builds: []queue.Build{with(pushed(f, 5), queue.Success)}},
+			{m: 40, builds: []queue.Build{with(pushed(f, 5), queue.Success)}, actions: push(l)},
+			{m: 50, builds: []queue.Build{with(pushed(f, 5), queue.Success), with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "passed"}
+	passedAtTheLanding := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 40, builds: []queue.Build{pushed(f, 5)}, actions: push(l)},
+			{m: 50, builds: []queue.Build{with(pushed(f, 5), queue.Success), with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "overtaken"}
+	redThenPassed := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 25, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}},
+			{m: 30, builds: []queue.Build{with(pushed(f, 5), queue.Success)}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "failed"}
+	other := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "other"}
+	passedBesideAPendingCheck := story{0, func(n int, f, l queue.Build) []read {
+		check := queue.Build{SHA: f.SHA, Kind: queue.Check, Pushed: at(5)}
+		return []read{{m: 0}, {m: 5, actions: push(f)},
+			{m: 20, builds: []queue.Build{with(pushed(f, 5), queue.Success), check}, actions: []queue.Action{{Do: "delete", SHA: f.SHA}}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "passed"}
+	pendingCheckAtTheLanding := story{0, func(n int, f, l queue.Build) []read {
+		check := queue.Build{SHA: f.SHA, Kind: queue.Check, Pushed: at(5)}
+		return []read{{m: 0}, {m: 5, actions: push(f)},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{check, with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "other"}
+	redCheckBesideTheFirst := story{0, func(n int, f, l queue.Build) []read {
+		check := with(queue.Build{SHA: f.SHA, Kind: queue.Check, Pushed: at(5)}, queue.Failure)
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 20, builds: []queue.Build{pushed(f, 5), check}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{pushed(f, 5), with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "overtaken"}
+	lateFirst := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 35, actions: push(f)}, {m: 38, builds: []queue.Build{with(pushed(f, 35), queue.Failure)}},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "waited"}
+	redAfterTheLanding := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 10, builds: []queue.Build{pushed(f, 5)}},
+			{m: 40, builds: []queue.Build{pushed(f, 5)}, actions: push(l)},
+			{m: 50, builds: []queue.Build{pushed(f, 5), with(pushed(l, 40), queue.Success)}, actions: land(l)},
+			{m: 51, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}}}
+	}, "overtaken"}
+	pushedOnly := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)},
+			{m: 40, actions: push(l)}, {m: 50, builds: []queue.Build{with(pushed(l, 40), queue.Success)}, actions: land(l)}}
+	}, "other"}
+	quick := story{0, func(n int, f, l queue.Build) []read {
+		return []read{{m: 0}, {m: 5, actions: push(f)}, {m: 15, builds: []queue.Build{with(pushed(f, 5), queue.Failure)}},
+			{m: 20, actions: push(l)}, {m: 30, builds: []queue.Build{with(pushed(l, 20), queue.Success)}, actions: land(l)}}
+	}, ""}
+	held := func(m liveMeasures) map[string]int {
+		return map[string]int{"waited": m.HeldFirstWaited, "failed": m.HeldFirstFailed, "dropped": m.HeldFirstDropped, "passed": m.HeldFirstPassed, "overtaken": m.HeldFirstOvertaken, "other": m.HeldFirstOther}
+	}
+	for _, c := range []struct {
+		name         string
+		s            story
+		firstHead    string
+		added, first float64
+		over30       int
+	}{
+		{"the first candidate failed and a later one landed", failed, "", 40, 5, 0},
+		{"the first candidate was dropped while building", dropped, "", 40, 5, 0},
+		{"a later candidate landed while the first still built", overtaken, "", 40, 5, 0},
+		{"no candidate for 35 minutes", waited, "", 35, 35, 1},
+		{"read red, built again and deleted is failed, not dropped", redThenDeleted, "", 40, 5, 0},
+		{"a first candidate pushed before the pull request was ready", beforeReady, "", 40, 0, 0},
+		{"a candidate at an older head is not the first", failed, "h1-old", 40, 40, 1},
+		{"the first candidate passed and was thrown away", thrownAway, "", 40, 5, 0},
+		{"the first candidate passed before the landing record and could not land", passed, "", 40, 5, 0},
+		{"the first candidate's first pass read in the landing record is overtaken", passedAtTheLanding, "", 40, 5, 0},
+		{"read red, then passing, is failed, not passed", redThenPassed, "", 40, 5, 0},
+		{"the first candidate was never read again", other, "", 40, 5, 0},
+		{"a pending check on the first candidate's commit does not make its deletion a drop", passedBesideAPendingCheck, "", 40, 5, 0},
+		{"a pending check on the first candidate's commit at the landing is not an overtake", pendingCheckAtTheLanding, "", 40, 5, 0},
+		{"a red check on the first candidate's commit is not its failure", redCheckBesideTheFirst, "", 40, 5, 0},
+		{"a first candidate pushed over 30 minutes after ready waited, though it failed", lateFirst, "", 40, 35, 1},
+		{"a red read after the landing record is not a failure", redAfterTheLanding, "", 40, 5, 0},
+		{"a first candidate seen only in its push", pushedOnly, "", 40, 5, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			recs, _ := tell(1, 0, "t", c.s, c.firstHead)
+			m := windowRow(t, recs, at(0), at(100)).liveMeasures
+			want := map[string]int{"waited": 0, "failed": 0, "dropped": 0, "passed": 0, "overtaken": 0, "other": 0}
+			if c.firstHead != "" {
+				want["waited"] = 1
+			} else {
+				want[c.s.heldAt] = 1
+			}
+			if m.SplitLandings != 1 || m.QueueAddedOver30 != 1 || *m.QueueAddedP90Minutes != c.added || m.FirstCandidateP90Minutes == nil || *m.FirstCandidateP90Minutes != c.first ||
+				m.FirstCandidateOver30 != c.over30 || !reflect.DeepEqual(held(m), want) {
+				t.Fatalf("queue adds %s, to the first candidate %s, over 30 %d, held %v; want %v, %v, %d, %v",
+					measured(m.QueueAddedP90Minutes), measured(m.FirstCandidateP90Minutes), m.FirstCandidateOver30, held(m), c.added, c.first, c.over30, want)
+			}
+		})
+	}
+	t.Run("a day mixing all of them", func(t *testing.T) {
+		var recs []queue.Recording
+		trunk := queue.SHA("t")
+		for i, s := range []story{failed, dropped, overtaken, waited, redThenDeleted, passed, passedAtTheLanding, other, quick} {
+			var day []queue.Recording
+			day, trunk = tell(i+1, 100*i, trunk, s, "")
+			recs = append(recs, day...)
+		}
+		m := windowRow(t, recs, at(0), at(900)).liveMeasures
+		counts := held(m)
+		sum := 0
+		for _, n := range counts {
+			sum += n
+		}
+		if m.SplitLandings != 9 || m.QueueAddedOver30 != 8 || sum != m.QueueAddedOver30 || m.FirstCandidateOver30 != 1 ||
+			!reflect.DeepEqual(counts, map[string]int{"waited": 1, "failed": 2, "dropped": 1, "passed": 1, "overtaken": 2, "other": 1}) {
+			t.Fatalf("split %d, held over 30 %d, to the first candidate over 30 %d, held %v", m.SplitLandings, m.QueueAddedOver30, m.FirstCandidateOver30, counts)
+		}
+	})
+	t.Run("the p90 to a first candidate is the quantile, not the longest", func(t *testing.T) {
+		var recs []queue.Recording
+		trunk := queue.SHA("t")
+		for i := range 11 {
+			s := quick
+			if i == 10 {
+				s = waited
+			}
+			var day []queue.Recording
+			day, trunk = tell(i+1, 100*i, trunk, s, "")
+			recs = append(recs, day...)
+		}
+		m := windowRow(t, recs, at(0), at(1100)).liveMeasures
+		if m.SplitLandings != 11 || m.FirstCandidateOver30 != 1 || m.FirstCandidateP90Minutes == nil || *m.FirstCandidateP90Minutes != 5 {
+			t.Fatalf("split %d, over 30 %d, p90 %s", m.SplitLandings, m.FirstCandidateOver30, measured(m.FirstCandidateP90Minutes))
+		}
+	})
 }
