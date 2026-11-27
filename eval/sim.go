@@ -4,7 +4,9 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand"
+	"slices"
 	"sort"
 	"time"
 
@@ -49,6 +51,10 @@ type Shape struct {
 	Whole time.Duration
 	// Clashing holds each head git was asked about, with the heads git cannot merge it with.
 	Clashing map[queue.SHA]map[queue.SHA]bool
+	// Failing holds how long each recorded whole build that a guilty head failed took, push to
+	// answered as in Times, by the head. A whole build of a tree that holds such a head takes one
+	// of its times in place of one from Times.
+	Failing map[queue.SHA][]time.Duration
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
 	Rerun   time.Duration
@@ -123,6 +129,7 @@ type simBuild struct {
 	lost       bool
 	flake      bool
 	errored    bool
+	guilty     bool // its tree, at the heads it was pushed with, fails for a pull request's own reason
 }
 
 // Sim is one simulated world: the repository, its CI and the hidden facts that decide
@@ -430,7 +437,7 @@ func (s *Sim) flakes() bool {
 func (s *Sim) verdict(b *simBuild) queue.Verdict {
 	tree := s.holds[b.SHA]
 	switch {
-	case s.red(b.SHA, tree, b.start), s.guilty(tree):
+	case s.red(b.SHA, tree, b.start), b.guilty:
 		return queue.Failure
 	case b.flake:
 		return queue.Failure
@@ -506,7 +513,7 @@ func (s *Sim) step(at time.Duration) {
 					s.RedPullRequests += len(b.Chain)
 				}
 			}
-			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
+			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), b.guilty, b.flake)
 		}
 	}
 	s.tick()
@@ -687,7 +694,7 @@ func (s *Sim) push(b queue.Build) {
 		return
 	}
 	s.seen[b.SHA] = true
-	d, flake := s.shape.Build, s.shape.Flake
+	d, flake, guilty := s.shape.Build, s.shape.Flake, s.guilty(s.holds[b.SHA])
 	if b.Kind == queue.Probe {
 		flake = s.shape.ProbeFlake
 		if s.shape.Probe > 0 {
@@ -700,20 +707,24 @@ func (s *Sim) push(b queue.Build) {
 	if s.shape.Spread > 0 {
 		d += time.Duration(float64(d) * s.shape.Spread * (2*s.rng.Float64() - 1))
 	}
-	if s.shape.Fails > 0 && b.Kind != queue.Probe && s.guilty(s.holds[b.SHA]) {
+	if s.shape.Fails > 0 && b.Kind != queue.Probe && guilty {
 		d = time.Duration(float64(d) * s.shape.Fails)
 	}
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
 	}
-	if len(s.shape.Times) > 0 && b.Kind != queue.Probe {
-		d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
-		if b.Kind == queue.Check && s.shape.Whole > 0 {
-			d = s.shape.Whole
+	if b.Kind != queue.Probe {
+		if fails, ok := s.failing(b.SHA); ok {
+			d = fails
+		} else if len(s.shape.Times) > 0 {
+			d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
+			if b.Kind == queue.Check && s.shape.Whole > 0 {
+				d = s.shape.Whole
+			}
 		}
 	}
 
-	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
+	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost), guilty: guilty}
 	s.Minutes += d.Minutes()
 	if s.pool != nil {
 		sb.end = never
@@ -728,12 +739,37 @@ func (s *Sim) push(b queue.Build) {
 	} else {
 		sb.flake = s.chance(flake)
 	}
-	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || s.guilty(s.holds[b.SHA])) {
+	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || guilty) {
 		sb.end, sb.flake = sb.end+s.shape.Rerun, sb.flake && !s.chance(s.shape.Rescued)
 		s.Minutes += s.shape.Rerun.Minutes()
 	}
 	s.started++
 	s.builds[b.SHA] = sb
+}
+
+// failing is how long a whole build of this tree takes to fail by the recorded failing times of
+// the guilty heads it holds, where it holds one the record timed. It takes one draw in place of
+// the shared sample's, the shortest of the times it picks where the tree holds more than one.
+// It leaves two things as they were: where two guilty heads failed in the same recorded build,
+// that build's time is each of theirs, and a failing time runs from push to answered.
+func (s *Sim) failing(sha queue.SHA) (time.Duration, bool) {
+	if len(s.shape.Failing) == 0 {
+		return 0, false
+	}
+	var timed [][]time.Duration
+	for _, n := range slices.Sorted(maps.Keys(s.holds[sha])) {
+		if times := s.shape.Failing[s.prs[n].Head]; s.prs[n].breaks && len(times) > 0 {
+			timed = append(timed, times)
+		}
+	}
+	if len(timed) == 0 {
+		return 0, false
+	}
+	d, draw := never, s.rng.Int63()
+	for _, times := range timed {
+		d = min(d, times[draw%int64(len(times))])
+	}
+	return d, true
 }
 
 // pickup is how long after its push the CI takes a build up: one to ten seconds, by the commit

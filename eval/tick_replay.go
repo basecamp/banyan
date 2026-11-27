@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/basecamp/banyan/internal/queue"
@@ -19,12 +20,15 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	w.stop = to.Sub(start)
 	confirmed := confirmedMembers(recs)
 	builds := map[queue.SHA]queue.Build{}
+	green, red := map[queue.SHA]bool{}, map[queue.SHA]bool{}
 	broken := map[headKey]bool{}
 	for _, r := range recs {
 		for _, b := range r.World.Builds {
 			if len(b.Chain) > len(builds[b.SHA].Chain) {
 				builds[b.SHA] = b
 			}
+			green[b.SHA] = green[b.SHA] || b.Verdict == queue.Success
+			red[b.SHA] = red[b.SHA] || b.Verdict == queue.Failure
 		}
 		for _, a := range r.Actions {
 			if a.Do == "push" && len(a.Build.Chain) > len(builds[a.Build.SHA].Chain) {
@@ -49,6 +53,22 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			if !tied && !r.World.Now.Before(from) && r.World.Now.Before(to) {
 				w.unattributed++
 			}
+		}
+	}
+	left := brokeAndLeft(recs, builds, green, red, broken, confirmed)
+	for k := range left {
+		broken[k] = true
+	}
+	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
+	for _, b := range w.timed {
+		guilty := false
+		for _, m := range builds[b.sha].Chain {
+			if b.failed && broken[headKey{m.Number, m.Head}] {
+				w.failing[m.Head], guilty = append(w.failing[m.Head], b.took), true
+			}
+		}
+		if !guilty {
+			w.times = append(w.times, b.took)
 		}
 	}
 	for sha, b := range candidates {
@@ -228,12 +248,17 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			} else {
 				delete(holding, p.Number)
 			}
-			if !exists || old.Queued != p.Queued || old.First != p.First {
+			if !exists || old.Queued != p.Queued || old.First != p.First || old.Head != p.Head && broken[headKey{p.Number, old.Head}] {
 				q := p.Queued.Sub(start)
 				add(p.Number, Act{Do: "label", First: p.First, Queued: &q})
 			}
 		}
 		previous = present
+	}
+	for k := range left {
+		if slices.ContainsFunc(w.acts, func(a Act) bool { return a.Do == "head" && a.Number == k.number && a.Head == k.head }) {
+			w.unejectedGuilty++
+		}
 	}
 
 	// Population follows recorded labels and readiness, including repeated queueings.
@@ -291,6 +316,53 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	return nil
+}
+
+// brokeAndLeft is each head, beside those ejected as the cause, that the records hold to have
+// broken the build: a record queued it, no build of any kind that held it was ever read green,
+// no landing of it was confirmed, two or more whole builds that held it were read red with no
+// ejected culprit among their members, and a later record no longer queues it at that head.
+//
+// It leaves three things out. It takes no account of a red trunk, so a head that leaves while
+// the trunk fails is held guilty, the trunk's red builds counting with the rest of its evidence.
+// A head with a single failed build is never held guilty, even one that failed alone. And it
+// cannot tell a head from what it failed beside unless the record ejected the other, so two
+// heads failing in the same builds are both held guilty.
+//
+// The replay labels the pull request of any guilty head, these and those the record ejected,
+// again at the next head the record queues it at, as the replay's queue may have ejected it
+// there.
+func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, green, red map[queue.SHA]bool, ejected map[headKey]bool, confirmed [][]queue.Member) map[headKey]bool {
+	passed, landed, failed := map[headKey]bool{}, map[headKey]bool{}, map[headKey]int{}
+	for _, members := range confirmed {
+		for _, m := range members {
+			landed[headKey{m.Number, m.Head}] = true
+		}
+	}
+	for sha, b := range builds {
+		evidence := b.Kind != queue.Probe && red[sha] &&
+			!slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return ejected[headKey{m.Number, m.Head}] })
+		for _, m := range b.Chain {
+			k := headKey{m.Number, m.Head}
+			passed[k] = passed[k] || green[sha]
+			if evidence {
+				failed[k]++
+			}
+		}
+	}
+	last := map[headKey]int{}
+	for i, r := range recs {
+		for _, p := range r.World.PRs {
+			last[headKey{p.Number, p.Head}] = i
+		}
+	}
+	guilty := map[headKey]bool{}
+	for k, n := range failed {
+		if i, queued := last[k]; n >= 2 && !passed[k] && !landed[k] && !ejected[k] && queued && i+1 < len(recs) {
+			guilty[k] = true
+		}
+	}
+	return guilty
 }
 
 // heldBehind says the record shows this head refused onto a chain of pull requests ahead of it.

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -38,7 +39,7 @@ func TestReplayQueueAddedIncludesWaitForReplacementAfterRed(t *testing.T) {
 		added    *float64
 	}{
 		{"whole window", 0, 80, 1, 1, number(40)},
-		{"opens during red build", 33, 80, 0, 0, nil},
+		{"opens during red build", 33, 80, 0, 1, nil},
 		{"landing after window", 0, 70, 0, 1, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,8 +81,11 @@ func replayTick(minutes int, prs ...queue.PR) queue.Recording {
 func replayWindow(t *testing.T, recs []queue.Recording, minutes int) (Score, window, liveRow) {
 	return recordedWindow(t, recs, replayStart, replayStart.Add(time.Duration(minutes)*time.Minute))
 }
+func replayShape(w window) Shape {
+	return Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: w.build, Probe: w.probe, Times: w.times, Failing: w.failing}
+}
 func runReplay(w window) *Sim {
-	s := NewSim(Shape{Recorded: true, Acts: w.acts, Stop: w.stop, Build: w.build, Probe: w.probe, Times: w.times}, w.cfg, 1)
+	s := NewSim(replayShape(w), w.cfg, 1)
 	s.Run()
 	return s
 }
@@ -846,7 +850,8 @@ func TestReplayPerturbedRowKeepsLiveFields(t *testing.T) {
 func TestReplayPerturbTimesAndSettings(t *testing.T) {
 	first, next := dials(3, 12, true), dials(5, 2, false)
 	w := window{cfg: first, build: 10 * time.Minute, probe: 3 * time.Minute, times: []time.Duration{8 * time.Minute, 12 * time.Minute},
-		acts: []Act{{Do: "settings", Config: &first}, {At: time.Hour, Do: "settings", Config: &next}}}
+		failing: map[queue.SHA][]time.Duration{"d": {6 * time.Minute}},
+		acts:    []Act{{Do: "settings", Config: &first}, {At: time.Hour, Do: "settings", Config: &next}}}
 	for _, name := range []string{"builds-double", "builds-half", "one-slot", "no-batch"} {
 		t.Run(name, func(t *testing.T) {
 			got, err := w.perturb(name)
@@ -867,6 +872,9 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 						t.Fatal("sample build time was not scaled")
 					}
 				}
+				if float64(got.failing["d"][0])/float64(w.failing["d"][0]) != ratio {
+					t.Fatal("a guilty head's failing time was not scaled")
+				}
 			case "one-slot", "no-batch":
 				for _, a := range got.acts {
 					if name == "one-slot" && a.Config.Slots != 1 || name == "no-batch" && a.Config.MaxBatch != 1 {
@@ -876,10 +884,503 @@ func TestReplayPerturbTimesAndSettings(t *testing.T) {
 			}
 		})
 	}
-	if first != dials(3, 12, true) || next != dials(5, 2, false) || w.build != 10*time.Minute || !slices.Equal(w.times, []time.Duration{8 * time.Minute, 12 * time.Minute}) {
+	if first != dials(3, 12, true) || next != dials(5, 2, false) || w.build != 10*time.Minute || !slices.Equal(w.times, []time.Duration{8 * time.Minute, 12 * time.Minute}) || w.failing["d"][0] != 6*time.Minute {
 		t.Fatal("perturbation changed source window")
 	}
 	if _, err := w.perturb("unknown"); err == nil {
 		t.Fatal("unknown perturbation accepted")
+	}
+}
+
+func heldGuilty(w window, n int, head queue.SHA) bool {
+	return slices.ContainsFunc(w.acts, func(a Act) bool { return a.Do == "head" && a.Number == n && a.Head == head && a.Breaks })
+}
+
+// plannedDay runs the planner tick by tick from replayStart against the simulated CI, and keeps
+// every pass as the live queue records it. change acts on the world before each tick.
+func plannedDay(shape Shape, cfg queue.Config, minutes int, change func(*Sim)) []queue.Recording {
+	s := NewSim(shape, cfg, 1)
+	s.epoch = replayStart
+	var recs []queue.Recording
+	s.plan = func(w queue.World, c queue.Config) []queue.Action {
+		rec := queue.Record(w, c)
+		recs = append(recs, *rec)
+		return rec.Actions
+	}
+	for s.now < time.Duration(minutes)*time.Minute {
+		change(s)
+		s.Step()
+	}
+	return recs
+}
+
+// movesHead has the author of a pull request push a new head at a time; the builds of its old
+// head fail while they stand, and the new one breaks nothing.
+func movesHead(n int, head queue.SHA, at time.Duration) func(*Sim) {
+	return func(s *Sim) {
+		switch p := s.prs[n]; {
+		case s.now == at:
+			p.Head = head
+			s.byHead[head] = n
+		case s.now == at+tick:
+			p.breaks = false
+		}
+	}
+}
+
+func threeQueued(breaks ...int) Shape {
+	shape := Shape{Build: 10 * time.Minute, Probe: 4 * time.Minute}
+	for n := 1; n <= 3; n++ {
+		shape.Queue = append(shape.Queue, Queued{At: tick, Number: n, Breaks: slices.Contains(breaks, n)})
+	}
+	return shape
+}
+
+// guiltDay is the planner's own day: #3 breaks the build of #1, #2 and #3, the round on the
+// red candidate fails it again, and its author pushes a new head before the fair test that
+// would eject it ends.
+func guiltDay() []queue.Recording {
+	return plannedDay(threeQueued(3), dials(1, 3, false), 70, movesHead(3, "fix3", 32*time.Minute))
+}
+
+// readAt is the record read at that time with a pass of its planner.
+func readAt(recs []queue.Recording, minutes int) *queue.Recording {
+	for i := range recs {
+		if recs[i].World.Now.Equal(replayStart.Add(time.Duration(minutes) * time.Minute)) {
+			return &recs[i]
+		}
+	}
+	panic(fmt.Sprintf("no record at %dm", minutes))
+}
+
+// holdingHead3 is a build of #1, #2 and #3's breaking head on the trunk it opened on.
+func holdingHead3(recs []queue.Recording, sha queue.SHA, kind queue.Kind, v queue.Verdict) queue.Build {
+	chain := slices.Clone(readAt(recs, 12).World.Builds[0].Chain)
+	return queue.Build{SHA: sha, Kind: kind, Base: recs[0].World.Trunk, Chain: chain, Verdict: v}
+}
+
+func TestReplayHoldsGuiltyAHeadThatFailedTwiceNeverPassedAndLeft(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	if !heldGuilty(w, 3, "head3") || heldGuilty(w, 3, "fix3") || heldGuilty(w, 1, "head1") || heldGuilty(w, 2, "head2") {
+		t.Fatalf("guilt: head3 %v, fix3 %v", heldGuilty(w, 3, "head3"), heldGuilty(w, 3, "fix3"))
+	}
+	if w.unblamedRedCandidates != 0 || w.candidatesWithoutCulprit != 3 || w.flake != 0 {
+		t.Fatalf("unblamed red candidates %d of %d, flake %g", w.unblamedRedCandidates, w.candidatesWithoutCulprit, w.flake)
+	}
+}
+
+func TestReplayHoldsNoHeadGuiltyWithoutEvidenceAgainstIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		day  func() []queue.Recording
+	}{
+		{"a candidate holding it passed", func() []queue.Recording {
+			recs := guiltDay()
+			r := readAt(recs, 30)
+			r.World.Builds = append(r.World.Builds, holdingHead3(recs, "green", queue.Candidate, queue.Success))
+			return recs
+		}},
+		{"a check holding it passed", func() []queue.Recording {
+			recs := guiltDay()
+			r := readAt(recs, 30)
+			r.World.Builds = append(r.World.Builds, holdingHead3(recs, "green", queue.Check, queue.Success))
+			return recs
+		}},
+		{"a probe holding it passed", func() []queue.Recording {
+			recs := guiltDay()
+			r := readAt(recs, 30)
+			r.World.Builds = append(r.World.Builds, holdingHead3(recs, "green", queue.Probe, queue.Success))
+			return recs
+		}},
+		{"it failed once", func() []queue.Recording {
+			return plannedDay(threeQueued(3), dials(1, 3, false), 70, movesHead(3, "fix3", 12*time.Minute))
+		}},
+		{"its second failure was a probe", func() []queue.Recording {
+			return plannedDay(threeQueued(3), dials(1, 3, true), 70, movesHead(3, "fix3", 20*time.Minute))
+		}},
+		{"an ejected culprit failed beside it", func() []queue.Recording {
+			return plannedDay(threeQueued(2, 3), dials(1, 3, false), 90, movesHead(3, "fix3", 42*time.Minute))
+		}},
+		{"its landing was confirmed", func() []queue.Recording {
+			recs := guiltDay()
+			for i, a := range readAt(recs, 32).Actions {
+				if a.Do == "land" {
+					readAt(recs, 32).Actions[i].Members = append(slices.Clone(a.Members), queue.Member{Number: 3, Head: "head3"})
+				}
+			}
+			return recs
+		}},
+		{"it was still queued at the last record", func() []queue.Recording {
+			return plannedDay(threeQueued(3), dials(1, 3, false), 32, movesHead(3, "fix3", 32*time.Minute))
+		}},
+		{"a build that failed it was read green first", func() []queue.Recording {
+			recs := guiltDay()
+			for i, b := range readAt(recs, 30).World.Builds {
+				if b.Kind == queue.Check && len(b.Chain) == 3 && b.Round == 2 {
+					readAt(recs, 30).World.Builds[i].Verdict = queue.Success
+				}
+			}
+			return recs
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, w, _ := replayWindow(t, tc.day(), 100)
+			if heldGuilty(w, 3, "head3") || len(labelled(w, 3)) != 1 {
+				t.Fatalf("head3 held guilty %v, labelled at %v", heldGuilty(w, 3, "head3"), labelled(w, 3))
+			}
+		})
+	}
+}
+
+func TestReplayHoldsNoHeadGuiltyThatNoRecordQueued(t *testing.T) {
+	p := replayPR(1)
+	recs := []queue.Recording{replayTick(0, p)}
+	for i, minutes := range []int{4, 6} {
+		r := replayTick(10*(i+1), p)
+		r.World.Builds = []queue.Build{{SHA: queue.SHA(fmt.Sprintf("red%d", i)), Pushed: r.World.Now.Add(-time.Duration(minutes) * time.Minute), Verdict: queue.Failure,
+			Chain: []queue.Member{{Number: 9, Head: "gone9", Merge: queue.SHA(fmt.Sprintf("red%d", i))}}}}
+		recs = append(recs, r)
+	}
+	recs = append(recs, replayTick(30, p))
+	_, w, _ := replayWindow(t, recs, 40)
+	if len(w.failing) != 0 || !slices.Equal(slices.Sorted(slices.Values(w.times)), []time.Duration{4 * time.Minute, 6 * time.Minute}) || w.unblamedRedCandidates != 2 {
+		t.Fatalf("failing %v, shared sample %v, unblamed red candidates %d", w.failing, w.times, w.unblamedRedCandidates)
+	}
+}
+
+func labelled(w window, n int) []time.Duration {
+	var at []time.Duration
+	for _, a := range w.acts {
+		if a.Number == n && a.Do == "label" {
+			at = append(at, a.At)
+		}
+	}
+	return at
+}
+
+// fastReplay plays the window with every build taking two minutes, so the replay's queue
+// ejects a breaking head sooner than the record's would have.
+func fastReplay(w window) *Sim {
+	shape := replayShape(w)
+	shape.Times, shape.Probe = []time.Duration{2 * time.Minute}, 2*time.Minute
+	for head := range shape.Failing {
+		shape.Failing[head] = []time.Duration{2 * time.Minute}
+	}
+	s := NewSim(shape, w.cfg, 1)
+	s.Run()
+	return s
+}
+
+func TestReplayRequeuesAtItsNextHeadAPullRequestItEjectedFirst(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	if labels := labelled(w, 3); !slices.Equal(labels, []time.Duration{2 * time.Minute, 34 * time.Minute}) {
+		t.Fatalf("labelled at %v", labels)
+	}
+	for _, a := range w.acts {
+		if a.Number == 3 && a.Do == "label" && (a.Queued == nil || *a.Queued != 2*time.Minute) {
+			t.Fatalf("#3 labelled at %v as queued at %v, want the record's 2m", a.At, a.Queued)
+		}
+	}
+	s := fastReplay(w)
+	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || len(s.Broken) > 0 {
+		t.Fatalf("#3 left for %q, landed %v at head %s: %v", s.Left[3], p.landed, p.Head, s.Broken)
+	}
+	if p := s.prs[3]; p.arrived != 2*time.Minute || !p.Queued.Equal(s.epoch.Add(2*time.Minute)) {
+		t.Fatalf("#3 came back as arrived at %v, queued at %v", p.arrived, p.Queued.Sub(s.epoch))
+	}
+}
+
+func TestReplayLeavesAPullRequestTheRecordEjectedOutUntilItIsLabelledAgain(t *testing.T) {
+	recs := plannedDay(threeQueued(3), dials(1, 3, false), 70, func(s *Sim) {
+		switch p := s.prs[3]; s.now {
+		case 40 * time.Minute:
+			p.Head, p.breaks = "fix3", false
+			s.byHead[p.Head] = 3
+		case 50 * time.Minute:
+			p.queued, p.Queued = true, s.epoch.Add(s.now)
+		}
+	})
+	_, w, _ := replayWindow(t, recs, 80)
+	if labels := labelled(w, 3); !heldGuilty(w, 3, "head3") || !slices.Equal(labels, []time.Duration{2 * time.Minute, 52 * time.Minute}) {
+		t.Fatalf("guilty %v, labelled at %v", heldGuilty(w, 3, "head3"), labels)
+	}
+	s := fastReplay(w)
+	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || p.at < 52*time.Minute {
+		t.Fatalf("#3 left for %q, landed %v at head %s at %v", s.Left[3], p.landed, p.Head, p.at)
+	}
+}
+
+func TestReplayRequeuesAtItsNextHeadAPullRequestTheRecordEjectedAndLabelledAgain(t *testing.T) {
+	move := movesHead(3, "fix3", 56*time.Minute)
+	recs := plannedDay(threeQueued(3), dials(1, 3, false), 100, func(s *Sim) {
+		if p := s.prs[3]; s.now == 40*time.Minute {
+			p.queued, p.Queued = true, s.epoch.Add(s.now)
+		}
+		move(s)
+	})
+	_, w, _ := replayWindow(t, recs, 110)
+	if labels := labelled(w, 3); !heldGuilty(w, 3, "head3") || !slices.Equal(labels, []time.Duration{2 * time.Minute, 42 * time.Minute, 58 * time.Minute}) {
+		t.Fatalf("guilty %v, labelled at %v", heldGuilty(w, 3, "head3"), labels)
+	}
+	s := fastReplay(w)
+	if p := s.prs[3]; s.Left[3] != "culprit" || !p.landed || p.Head != "fix3" || p.at < 58*time.Minute {
+		t.Fatalf("#3 left for %q, landed %v at head %s at %v", s.Left[3], p.landed, p.Head, p.at)
+	}
+}
+
+// firstTreeHolding opens the replay, lets mark change the simulated queue, runs the planner's
+// first tick, and gives the first tree it pushed that holds this pull request.
+func firstTreeHolding(t *testing.T, w window, n int, change func(*Shape)) (*Sim, queue.SHA) {
+	t.Helper()
+	shape := replayShape(w)
+	change(&shape)
+	s := NewSim(shape, w.cfg, 1)
+	s.play()
+	for step := s.tick; s.now < w.stop; step = s.Step {
+		seen := maps.Clone(s.builds)
+		step()
+		for _, sha := range s.shas() {
+			if _, ok := seen[sha]; !ok && s.holds[sha][n] {
+				return s, sha
+			}
+		}
+	}
+	t.Fatal("no build holds the pull request")
+	return nil, ""
+}
+
+func firstBuildHolding(t *testing.T, w window, n int) time.Duration {
+	t.Helper()
+	s, sha := firstTreeHolding(t, w, n, func(*Shape) {})
+	return s.builds[sha].end - s.now
+}
+
+// timedGuiltDay is guiltDay with the three builds that fail #3 taking 6, 8 and 4 minutes, the
+// first, fourth and ninth pushed, and every other build its 10.
+func timedGuiltDay() []queue.Recording {
+	shape := threeQueued(3)
+	shape.Takes = make([]time.Duration, 9)
+	shape.Takes[0], shape.Takes[3], shape.Takes[8] = 6*time.Minute, 8*time.Minute, 4*time.Minute
+	return plannedDay(shape, dials(1, 3, false), 70, movesHead(3, "fix3", 32*time.Minute))
+}
+
+func TestReplayGuiltyHeadsFailingTimesLeaveTheSharedSample(t *testing.T) {
+	_, w, _ := replayWindow(t, timedGuiltDay(), 80)
+	failing := slices.Sorted(slices.Values(w.failing["head3"]))
+	if !heldGuilty(w, 3, "head3") || !slices.Equal(failing, []time.Duration{4 * time.Minute, 6 * time.Minute, 8 * time.Minute}) || len(w.failing) != 1 {
+		t.Fatalf("guilty %v, failing times %v", heldGuilty(w, 3, "head3"), w.failing)
+	}
+	if len(w.times) == 0 || slices.ContainsFunc(w.times, func(d time.Duration) bool { return d != 10*time.Minute }) {
+		t.Fatalf("shared sample %v", w.times)
+	}
+	if took := firstBuildHolding(t, w, 3); !slices.Contains(failing, took) {
+		t.Fatalf("the tree #3 breaks took %v, want one of its recorded %v", took, failing)
+	}
+}
+
+func TestReplayRowWaitsByTheGuiltyHeadsFailingTimes(t *testing.T) {
+	was, w, _ := replayWindow(t, timedGuiltDay(), 80)
+	_, timed := w.simulate(Shape{}, was)
+	w.failing = nil
+	_, shared := w.simulate(Shape{}, was)
+	if timed.WaitP50Minutes == nil || shared.WaitP50Minutes == nil || *timed.WaitP50Minutes >= *shared.WaitP50Minutes {
+		t.Fatalf("wait p50 %v with #3's failing times, %v with every build its 10m", timed.WaitP50Minutes, shared.WaitP50Minutes)
+	}
+}
+
+// cleanDay is the planner's own day of eight pull requests that break nothing, its builds taking
+// different times, so the simulated half rests on the shared draws alone.
+func cleanDay() []queue.Recording {
+	shape := Shape{Build: 10 * time.Minute, Probe: 4 * time.Minute}
+	for n := 1; n <= 8; n++ {
+		shape.Queue = append(shape.Queue, Queued{At: time.Duration(n) * 3 * tick, Number: n})
+	}
+	shape.Takes = []time.Duration{6 * time.Minute, 14 * time.Minute, 9 * time.Minute, 12 * time.Minute, 7 * time.Minute, 11 * time.Minute, 16 * time.Minute, 5 * time.Minute, 13 * time.Minute, 8 * time.Minute}
+	return plannedDay(shape, dials(1, 2, false), 150, func(*Sim) {})
+}
+
+// The simulated half of cleanDay's row as the replay before it held guilty a head that left
+// unejected, which had no count of those heads.
+const cleanDaySimulated = `{"over_live":{"landed":0,"wait_p50":0,"wait_p90":0.1111111111111111,"builds_per_landing":0.13100000000000006},"simulated":{"landed":8,"wait_p50":1.4,"wait_p90":2,"builds_per_landing":0.706875,"unblamed_red_candidates":0,"candidates_without_a_culprit":5,"culprits_unattributed":0,"departures_after_an_unconfirmed_plan":0,"invariant_failures":0,"waiting_at_open":0,"settings_in_window":1,"acts":{"checks":8,"conflict":0,"ejected":0,"head":8,"hold":8,"label":8,"settings":1,"unlabel":0,"wait":8},"unattributed_holds":0,"wait_p50_minutes":14,"wait_p90_minutes":20,"whole_builds":5.655,"probes":0,"red_builds":0,"queue_added_p50_minutes":4,"queue_added_p90_minutes":8,"queue_added_over_30":0,"red_candidates":0,"red_pull_requests":0,"ejected_as_cause":0,"left_waiting":0}}`
+
+func TestReplayLeavesTheSimulatedHalfOfACleanDayAsItWas(t *testing.T) {
+	out, err := captureLiveRun(t, writeLive(t, cleanDay()), "hey2", replayStart.Format(time.RFC3339), replayStart.Add(160*time.Minute).Format(time.RFC3339), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row, was struct {
+		Simulated map[string]any `json:"simulated"`
+		OverLive  map[string]any `json:"over_live"`
+	}
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(cleanDaySimulated), &was); err != nil {
+		t.Fatal(err)
+	}
+	if row.Simulated["unejected_guilty_heads"] != 0.0 {
+		t.Fatalf("unejected guilty heads %v", row.Simulated["unejected_guilty_heads"])
+	}
+	delete(row.Simulated, "unejected_guilty_heads")
+	if !reflect.DeepEqual(row, was) {
+		t.Fatalf("simulated half changed:\n%v\n%v", row, was)
+	}
+}
+
+func TestReplayRowCountsTheGuiltyHeadsTheRecordDidNotEject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		day  []queue.Recording
+		want int
+	}{
+		{"one left unejected", guiltDay(), 1},
+		{"only an ejected culprit", plannedDay(threeQueued(3), dials(1, 3, false), 70, func(*Sim) {}), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			was, w, _ := replayWindow(t, tc.day, 80)
+			if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != tc.want || !heldGuilty(w, 3, "head3") {
+				t.Fatalf("unejected guilty heads %d, head3 held guilty %v", sim.UnejectedGuiltyHeads, heldGuilty(w, 3, "head3"))
+			}
+		})
+	}
+	was, w, _ := recordedWindow(t, guiltDay(), replayStart.Add(40*time.Minute), replayStart.Add(80*time.Minute))
+	if _, sim := w.simulate(Shape{}, was); sim.UnejectedGuiltyHeads != 0 {
+		t.Fatalf("a window opening after head3 left counts %d unejected guilty heads", sim.UnejectedGuiltyHeads)
+	}
+}
+
+func TestReplayGuiltyHeadsBuildsDrawAmongItsFailingTimes(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	failing := []time.Duration{5 * time.Minute, 3 * time.Minute, 7 * time.Minute}
+	s, _ := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": failing}))
+	took := map[time.Duration]bool{}
+	for i := range 8 {
+		sha := queue.SHA(fmt.Sprintf("guilty%d", i))
+		s.holds[sha] = map[int]bool{3: true}
+		s.push(queue.Build{SHA: sha})
+		took[s.builds[sha].end-s.now] = true
+	}
+	if len(took) < 2 || slices.ContainsFunc(slices.Collect(maps.Keys(took)), func(d time.Duration) bool { return !slices.Contains(failing, d) }) {
+		t.Fatalf("eight trees #3 breaks took %v, want more than one of its recorded %v", slices.Sorted(maps.Keys(took)), failing)
+	}
+}
+
+// withTimes is how long builds take in a replay of guiltDay: the shared sample, and the failing
+// times of the heads that broke it.
+func withTimes(shared []time.Duration, failing map[queue.SHA][]time.Duration) func(*Shape) {
+	return func(shape *Shape) { shape.Times, shape.Failing = shared, failing }
+}
+
+var twoShared = []time.Duration{5 * time.Minute, 17 * time.Minute}
+
+func TestReplayGuiltyHeadFailsInItsOwnRecordedTime(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": {3 * time.Minute}}))
+	if took := s.builds[sha].end - s.now; took != 3*time.Minute {
+		t.Fatalf("the tree #3 breaks took %v, want its recorded 3m", took)
+	}
+}
+
+func TestReplayTreeOfTwoGuiltyHeadsFailsInTheShorterTime(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	for i, a := range w.acts {
+		if a.Do == "head" && a.Number == 2 {
+			w.acts[i].Breaks = true
+		}
+	}
+	for _, failing := range []map[queue.SHA][]time.Duration{
+		{"head2": {3 * time.Minute}, "head3": {8 * time.Minute}},
+		{"head2": {8 * time.Minute}, "head3": {3 * time.Minute}},
+	} {
+		s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, failing))
+		if !s.holds[sha][2] {
+			t.Fatalf("the tree does not hold #2: %v", s.holds[sha])
+		}
+		if took := s.builds[sha].end - s.now; took != 3*time.Minute {
+			t.Fatalf("the tree #2 and #3 break took %v with %v, want the shorter 3m", took, failing)
+		}
+	}
+}
+
+func TestReplayBuildKeepsTheGuiltOfTheHeadsItWasPushedWith(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	s, sha := firstTreeHolding(t, w, 3, func(*Shape) {})
+	s.act(Act{At: s.now, Number: 3, Do: "head", Head: "clean3"})
+	s.plan = func(queue.World, queue.Config) []queue.Action { return nil }
+	for s.now < s.builds[sha].end {
+		s.Step()
+	}
+	if b := s.builds[sha]; b.Verdict != queue.Failure || b.flake || b.errored || s.Red != 1 {
+		t.Fatalf("the tree pushed with head3 read %d after #3 moved to a clean head (flake %v, errored %v, red builds %d)", b.Verdict, b.flake, b.errored, s.Red)
+	}
+}
+
+func TestReplayProbeOfAGuiltyHeadKeepsTheProbeTime(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": {3 * time.Minute}}))
+	s.holds["probe"] = s.holds[sha]
+	s.push(queue.Build{SHA: "probe", Kind: queue.Probe})
+	if took := s.builds["probe"].end - s.now; took != w.probe || took == 3*time.Minute || len(s.Broken) > 0 {
+		t.Fatalf("the probe took %v, want the probe time %v: %v", took, w.probe, s.Broken)
+	}
+}
+
+func TestReplayGuiltyHeadWithNoFailingTimeDrawsFromTheSharedSample(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"another": {3 * time.Minute}}))
+	plain, same := firstTreeHolding(t, w, 3, withTimes(twoShared, nil))
+	if took, want := s.builds[sha].end-s.now, plain.builds[same].end-plain.now; took != want || !slices.Contains(twoShared, took) {
+		t.Fatalf("the tree #3 breaks took %v, want the shared sample's %v", took, want)
+	}
+}
+
+// cleanDraws pushes trees of #1 alone after the replay's first tick, and gives how long each
+// takes.
+func cleanDraws(s *Sim) []time.Duration {
+	var took []time.Duration
+	for i := range 8 {
+		sha := queue.SHA(fmt.Sprintf("clean%d", i))
+		s.holds[sha] = map[int]bool{1: true}
+		s.push(queue.Build{SHA: sha})
+		took = append(took, s.builds[sha].end-s.now)
+	}
+	return took
+}
+
+func TestReplayGuiltyBuildLeavesTheSharedDrawsAsTheyWere(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	guilty, _ := firstTreeHolding(t, w, 3, withTimes(twoShared, map[queue.SHA][]time.Duration{"head3": {3 * time.Minute}}))
+	plain, _ := firstTreeHolding(t, w, 3, withTimes(twoShared, nil))
+	if after, was := cleanDraws(guilty), cleanDraws(plain); !slices.Equal(after, was) {
+		t.Fatalf("shared draws after a guilty build %v, without one %v", after, was)
+	}
+}
+
+func TestReplayTakesNothingForFailingTimesWhereNoneIsRecorded(t *testing.T) {
+	_, w, _ := replayWindow(t, guiltDay(), 80)
+	s, sha := firstTreeHolding(t, w, 3, withTimes(twoShared, nil))
+	if allocs := testing.AllocsPerRun(10, func() { s.failing(sha) }); allocs != 0 {
+		t.Fatalf("failing with no failing times allocated %v times", allocs)
+	}
+}
+
+// The live half of guiltDay's row as the replay before it held guilty a head that left
+// unejected; only the commit the row names differs.
+const guiltDayLive = `{"arrivals":4,"backlog_longest_minutes":8,"build_median_minutes":10,"building_candidates_dropped":0,"builds_per_landing":4,"busiest_hour_landings":3,"busy_minutes":50,"context_ticks":0,"departures_after_an_unconfirmed_plan":0,"dropped_head_moved":0,"dropped_longest_built_minutes":0,"dropped_member_left":0,"dropped_members_still_queued":0,"ejected_p90":null,"ejected_p90_minutes":null,"ejections_as_cause":0,"first_candidate_over_30":0,"first_candidate_p90_minutes":8,"first_tick":"2026-11-18T12:02:00Z","from":"2026-11-18T12:00:00Z","good_builds":8,"held_first_dropped":0,"held_first_failed":0,"held_first_other":0,"held_first_overtaken":0,"held_first_passed":0,"held_first_waited":0,"labelled_p50":4,"labelled_p50_minutes":40,"labelled_p90":5,"labelled_p90_minutes":50,"labelled_slowest_20th":5,"labelled_slowest_20th_minutes":50,"landed":3,"landing_build_median_minutes":10,"landings_per_hour":3.5999999999999996,"last_tick":"2026-11-18T13:10:00Z","left_waiting":0,"longest_ready_gap_from":"2026-11-18T12:02:00Z","longest_ready_gap_minutes":30,"longest_ready_gap_to":"2026-11-18T12:32:00Z","non_passing_builds":0,"passing_candidates_thrown_away":0,"queue_added_over_30":0,"queue_added_over_30_sum_minutes":0,"queue_added_p50_minutes":20,"queue_added_p90_minutes":30,"queue_added_p95_minutes":30,"queue_added_sum_minutes":58,"ready_gaps":3,"ready_gaps_over_90":0,"red_candidates":1,"red_pull_requests":3,"red_read_median_minutes":null,"red_read_n":0,"red_read_sum_minutes":null,"settings_in_window":1,"split_landings":3,"split_ready_to_landed_p50_minutes":30,"split_ready_to_landed_p90_minutes":40,"thrown_away_head_moved":0,"thrown_away_member_left":0,"ticks":46,"to":"2026-11-18T13:20:00Z","unchecked":0,"unconfirmed_landing_plans":0,"unplanned_trunk_moves":0,"unreadable":0,"unsplit_landings":0,"wait_p50":3,"wait_p50_minutes":30,"wait_p90":4,"wait_p90_minutes":40,"waiting_at_open":0,"whole_builds":12,"withdrawn":0,"wrong_ejections":0,"wrong_per_1000":0}`
+
+func TestReplayLeavesTheLiveHalfOfTheRowAsItWas(t *testing.T) {
+	out, err := captureLiveRun(t, writeLive(t, guiltDay()), "hey2", replayStart.Format(time.RFC3339), replayStart.Add(80*time.Minute).Format(time.RFC3339), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"simulated", "over_live", "commit"} {
+		delete(row, key)
+	}
+	if live, _ := json.Marshal(row); string(live) != guiltDayLive {
+		t.Fatalf("live half changed:\n%s\n%s", live, guiltDayLive)
 	}
 }
