@@ -522,3 +522,117 @@ func TestReplayPlaysAFixedRedTrunkOnlyWhereItsFixLandsAfterTheReplayOpens(t *tes
 		})
 	}
 }
+
+func TestReplayHoldsTheRedBuildsWithoutTheFixTheTrunksUntilItLands(t *testing.T) {
+	recs := fixedRedTrunkDay()
+	at := func(minutes int) time.Time { return replayStart.Add(time.Duration(minutes) * time.Minute) }
+	late := queue.Build{SHA: "late", Base: "T", Pushed: at(55), Verdict: queue.Failure,
+		Chain: []queue.Member{{Number: 3, Head: replayPR(3).Head, Merge: "late"}}}
+	holding := queue.Build{SHA: "holding", Base: "T", Pushed: at(45), Verdict: queue.Failure,
+		Chain: []queue.Member{{Number: 2, Head: replayPR(2).Head, Merge: "two"}, {Number: 3, Head: replayPR(3).Head, Merge: "holding"}}}
+	recs = sortedByTime(append(recs, recordAt(recs, 65, late), recordAt(recs, 48, holding)))
+	if _, theirs := redTrunks(recs); !theirs["late"] || theirs["holding"] {
+		t.Fatalf("the trunk's: pushed after the fix's push without it %v, holding it %v", theirs["late"], theirs["holding"])
+	}
+	_, w, _ := replayWindow(t, recs, 100)
+	if w.unblamedRedCandidates != 1 || w.candidatesWithoutCulprit != 3 {
+		t.Fatalf("unblamed red candidates %d of %d", w.unblamedRedCandidates, w.candidatesWithoutCulprit)
+	}
+}
+
+func TestReplayPlaysARedTrunkWhoseFixsLandingTheRecordsRefused(t *testing.T) {
+	recs := fixedRedTrunkDay()
+	queued := slices.Clone(readAt(recs, 70).World.PRs)
+	for i := range recs {
+		if recs[i].World.Now.After(replayStart.Add(70 * time.Minute)) {
+			recs[i].World.Trunk, recs[i].World.PRs = "T", slices.Clone(queued)
+		}
+	}
+	_, w, _ := recordedWindow(t, recs, replayStart.Add(leadIn+75*time.Minute), replayStart.Add(leadIn+115*time.Minute))
+	if want := []Episode{{At: -leadIn, NeedsFix: true, Fixes: []int{2}}}; !reflect.DeepEqual(w.episodes, want) {
+		t.Fatalf("episodes %v, want %v", w.episodes, want)
+	}
+}
+
+func TestReplayPlaysNoRedTrunkWhereAGreenBuildPushedOnItIsReadOnALaterBase(t *testing.T) {
+	recs := redTrunkDay()
+	check := queue.Build{SHA: "check", Kind: queue.Check, Base: "T", Pushed: replayStart.Add(25 * time.Minute)}
+	pushed := recordAt(recs, 25, queue.Build{})
+	pushed.World.Builds, pushed.Actions = nil, []queue.Action{{Do: "push", Build: check}}
+	check.Base, check.Verdict = "g", queue.Success
+	recs = sortedByTime(append(recs, pushed, recordAt(recs, 74, check)))
+	if _, w, _ := replayWindow(t, recs, 100); len(w.episodes) != 0 {
+		t.Fatalf("episodes %v", w.episodes)
+	}
+}
+
+func TestReplayStartsARedTrunkAtTheLastGreenBuildOnItBeforeItsProbes(t *testing.T) {
+	recs := redTrunkDay()
+	check := queue.Build{SHA: "check", Kind: queue.Check, Base: "T", Pushed: replayStart.Add(15 * time.Minute), Verdict: queue.Success}
+	recs = sortedByTime(append(recs, recordAt(recs, 18, check)))
+	_, w, _ := replayWindow(t, recs, 100)
+	if want := []Episode{{At: 15 * time.Minute, For: 35 * time.Minute}}; !reflect.DeepEqual(w.episodes, want) {
+		t.Fatalf("episodes %v, want %v", w.episodes, want)
+	}
+}
+
+func TestRedTrunkFailsATreeWithoutTheFixStillRunningWhenTheFixLands(t *testing.T) {
+	shape := Shape{Build: 10 * time.Minute, Probe: 4 * time.Minute, Recorded: true, Stop: 2 * time.Hour, Instant: true,
+		Episodes: []Episode{{At: 5 * time.Minute, NeedsFix: true, Fixes: []int{2}}}}
+	s := NewSim(shape, dials(2, 1, false), 1)
+	s.plan = func(queue.World, queue.Config) []queue.Action { return nil }
+	for n := 1; n <= 2; n++ {
+		p := &simPR{back: never, queued: true}
+		p.Number, p.Head, p.Checks = n, queue.SHA(rune('a'+n)), queue.Success
+		s.prs[n], s.byHead[p.Head] = p, n
+	}
+	s.step(6 * time.Minute)
+	fix := s.commit(s.trunk, "b", "", 2)
+	s.push(queue.Build{SHA: fix, Chain: []queue.Member{{Number: 2, Head: "b", Merge: fix}}})
+	s.Step()
+	one := s.commit(s.trunk, "a", "", 1)
+	s.push(queue.Build{SHA: one, Chain: []queue.Member{{Number: 1, Head: "a", Merge: one}}})
+	for s.builds[fix].Verdict == queue.Pending && s.now < time.Hour {
+		s.Step()
+	}
+	if s.builds[fix].Verdict != queue.Success || s.builds[one].Verdict != queue.Pending {
+		t.Fatalf("the fix read %d; the tree without it read %d before the fix landed", s.builds[fix].Verdict, s.builds[one].Verdict)
+	}
+	s.land(queue.Action{Do: "land", SHA: fix, Members: []queue.Member{{Number: 2, Head: "b", Merge: fix}}})
+	for s.builds[one].Verdict == queue.Pending && s.now < time.Hour {
+		s.Step()
+	}
+	if s.builds[one].Verdict != queue.Failure {
+		t.Fatalf("a tree without the fix pushed before it landed read %d", s.builds[one].Verdict)
+	}
+}
+
+func TestReplayEndsARedTrunkNoFixEndsForACandidateInTheRecordThatPushesItsGreenBuild(t *testing.T) {
+	_, w, _ := replayWindow(t, redTrunkDay(), 100)
+	for _, tc := range []struct {
+		name   string
+		pushed time.Duration
+		want   queue.Verdict
+	}{
+		{"in that record", 50 * time.Minute, queue.Success},
+		{"a tick before it", 50*time.Minute - tick, queue.Failure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shape := Shape{Build: 10 * time.Minute, Probe: 4 * time.Minute, Recorded: true, Stop: 2 * time.Hour, Episodes: w.episodes}
+			s := NewSim(shape, dials(1, 1, false), 1)
+			s.plan = func(queue.World, queue.Config) []queue.Action { return nil }
+			p := &simPR{back: never, queued: true}
+			p.Number, p.Head, p.Checks = 1, "a", queue.Success
+			s.prs[1], s.byHead[p.Head] = p, 1
+			s.step(tc.pushed)
+			sha := s.commit(s.trunk, "a", "", 1)
+			s.push(queue.Build{SHA: sha, Chain: []queue.Member{{Number: 1, Head: "a", Merge: sha}}})
+			for s.now < 90*time.Minute {
+				s.Step()
+			}
+			if s.builds[sha].Verdict != tc.want {
+				t.Fatalf("a candidate pushed at %v read %d", tc.pushed, s.builds[sha].Verdict)
+			}
+		})
+	}
+}

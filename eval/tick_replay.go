@@ -410,29 +410,43 @@ func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, gree
 
 // redTrunk is a span in which the records read the trunk at one commit failing for its own
 // reason. Where fixes is set the span ends when one of them lands, which until gives as the
-// records landed it, or the last record where they did not.
+// record that planned a landing the records confirmed, or the last record where none was.
 type redTrunk struct {
 	from, until time.Time
 	fixes       []int
 }
 
 // redTrunks is each span in which the records read the trunk itself red, with the builds that are
-// its. The trunk at T is red where two probes of the bare trunk on T were read red and no build
-// on T pushed between their pushes was read green. It is red from the record that made T the
-// trunk. Its end is the first build on T read green that was pushed after the first of those
-// probes: a candidate holding pull requests that go first in the record that pushed it is
-// their fix, and the span ends when one of them lands; any other ends it at its push. Where no
-// build on T was read green the span runs to the last record. A build is the trunk's where the
-// record that first read it red stands it on T, and it was pushed before that end's push: the
-// records rewrite a build's base as the trunk moves, so one pushed before T landed can stand on
-// it by then.
+// its. A build is read green on a base where a record reads it green standing on it, and on the
+// base it was pushed on. The trunk at T is red where two probes of the bare trunk on T were read
+// red and no build read green on T was pushed between their pushes. It is red from the record
+// that made T the trunk, or from the push of the last build read green on T pushed before the
+// first of those probes where that is later. Its end is the first build read green on T pushed
+// after the first of those probes: a candidate holding pull requests that go first in the record
+// that pushed it is their fix, and the span ends when one of them lands; any other ends it at
+// its push. Where no build on T was read green the span runs to the last record. A build is the
+// trunk's where the record that first read it red stands it on T: one ended by its push where it
+// was pushed before that push, one ended by its fix where it holds none of the fixes and was
+// pushed before the fix landed. The records rewrite a build's base as the trunk moves, so one
+// pushed before T landed can stand on it by then.
 func redTrunks(recs []queue.Recording) ([]redTrunk, map[queue.SHA]bool) {
 	pushes := pushTimes(recs)
+	confirmed := confirmedMembers(recs)
 	planned, became := map[queue.SHA]time.Time{}, map[queue.SHA]time.Time{}
 	var trunks []queue.SHA
 	failed := map[queue.SHA]queue.Build{}
 	passedOn := map[queue.SHA]map[queue.SHA]bool{}
 	pushedIn := map[queue.SHA]int{}
+	pushedOn, shownOn := map[queue.SHA]queue.SHA{}, map[queue.SHA]queue.SHA{}
+	pass := func(base, sha queue.SHA) {
+		if sha != base {
+			if passedOn[base] == nil {
+				passedOn[base] = map[queue.SHA]bool{}
+			}
+			passedOn[base][sha] = true
+		}
+	}
+	var greens []queue.SHA
 	for i, r := range recs {
 		if _, ok := became[r.World.Trunk]; !ok {
 			became[r.World.Trunk] = cmp.Or(planned[r.World.Trunk], r.World.Now)
@@ -442,11 +456,12 @@ func redTrunks(recs []queue.Recording) ([]redTrunk, map[queue.SHA]bool) {
 			if _, ok := failed[b.SHA]; !ok && b.Verdict == queue.Failure {
 				failed[b.SHA] = b
 			}
-			if b.Verdict == queue.Success && b.SHA != b.Base {
-				if passedOn[b.Base] == nil {
-					passedOn[b.Base] = map[queue.SHA]bool{}
-				}
-				passedOn[b.Base][b.SHA] = true
+			if _, ok := shownOn[b.SHA]; !ok {
+				shownOn[b.SHA] = b.Base
+			}
+			if b.Verdict == queue.Success {
+				pass(b.Base, b.SHA)
+				greens = append(greens, b.SHA)
 			}
 		}
 		for _, a := range r.Actions {
@@ -454,8 +469,15 @@ func redTrunks(recs []queue.Recording) ([]redTrunk, map[queue.SHA]bool) {
 				planned[a.SHA] = r.World.Now
 			}
 			if _, ok := pushedIn[a.Build.SHA]; a.Do == "push" && !ok {
-				pushedIn[a.Build.SHA] = i
+				pushedIn[a.Build.SHA], pushedOn[a.Build.SHA] = i, a.Build.Base
 			}
+		}
+	}
+	for _, sha := range greens {
+		if base, ok := pushedOn[sha]; ok {
+			pass(base, sha)
+		} else {
+			pass(shownOn[sha], sha)
 		}
 	}
 	var spans []redTrunk
@@ -483,26 +505,31 @@ func redTrunks(recs []queue.Recording) ([]redTrunk, map[queue.SHA]bool) {
 				continue
 			}
 			last := recs[len(recs)-1].World.Now
+			span, end := redTrunk{from: became[t], until: last}, last
 			var ends []queue.SHA
 			for sha := range passedOn[t] {
 				if pushes[sha].After(first) && pushes[sha].Before(last) {
 					ends = append(ends, sha)
 				}
+				if pushes[sha].Before(first) && pushes[sha].After(span.from) {
+					span.from = pushes[sha]
+				}
 			}
-			span, end := redTrunk{from: became[t], until: last}, last
 			if len(ends) > 0 {
 				g := slices.MinFunc(ends, byPush)
 				end, span.until = pushes[g], pushes[g]
 				if at, ok := pushedIn[g]; ok {
 					span.fixes = fixesIn(recs, at, g)
 					if span.fixes != nil {
-						span.until = landedAfter(recs, at, span.fixes)
+						span.until = landedAfter(recs, confirmed, at, span.fixes)
+						end = span.until
 					}
 				}
 			}
 			spans = append(spans, span)
 			for sha, b := range failed {
-				if b.Base == t && pushes[sha].Before(end) {
+				fixed := slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return slices.Contains(span.fixes, m.Number) })
+				if b.Base == t && pushes[sha].Before(end) && !fixed {
 					theirs[sha] = true
 				}
 			}
@@ -528,13 +555,17 @@ func fixesIn(recs []queue.Recording, at int, sha queue.SHA) []int {
 	return fixes
 }
 
-// landedAfter is the first record from the one at that index on that lands any of those pull
-// requests, or the last record where none does.
-func landedAfter(recs []queue.Recording, at int, numbers []int) time.Time {
-	for _, r := range recs[at:] {
+// landedAfter is the record from the one at that index on that planned the first landing of any of
+// those pull requests the trunk's next observation confirmed, or the last record where none was.
+func landedAfter(recs []queue.Recording, confirmed [][]queue.Member, at int, numbers []int) time.Time {
+	planned := map[queue.SHA]time.Time{}
+	for i, r := range recs[at:] {
+		if slices.ContainsFunc(confirmed[at+i], func(m queue.Member) bool { return slices.Contains(numbers, m.Number) }) {
+			return cmp.Or(planned[r.World.Trunk], r.World.Now)
+		}
 		for _, a := range r.Actions {
-			if a.Do == "land" && slices.ContainsFunc(a.Members, func(m queue.Member) bool { return slices.Contains(numbers, m.Number) }) {
-				return r.World.Now
+			if a.Do == "land" {
+				planned[a.SHA] = r.World.Now
 			}
 		}
 	}
