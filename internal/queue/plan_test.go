@@ -724,3 +724,378 @@ func TestKeepZeroAddsNothingToARecording(t *testing.T) {
 		t.Fatalf("zero config JSON = %s, want %s", c, want)
 	}
 }
+
+// ticks is a queue played tick by tick: each world is the last one with the planner's own
+// pushes, deletes, landings and ejections applied, and whatever CI said since. Its git
+// remembers what was pushed, so a build begun again is a new commit.
+type ticks struct {
+	t     *testing.T
+	w     World
+	c     Config
+	seen  map[SHA]bool
+	acts  [][]Action
+	built []Build
+}
+
+func (s *ticks) Merge(parent SHA, pr PR, note string) (SHA, bool) {
+	return commits{}.Merge(parent, pr, note)
+}
+func (s *ticks) Mark(parent SHA, note string) SHA { return commits{}.Mark(parent, note) }
+func (s *ticks) Seen(sha SHA) bool                { return s.seen[sha] }
+
+func newTicks(t *testing.T, c Config, numbers ...int) *ticks {
+	now := time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC)
+	s := &ticks{t: t, c: c, seen: map[SHA]bool{}}
+	s.w = World{Now: now, Trunk: "trunk", Repo: s, PRs: queuedAt(now.Add(-time.Hour), numbers...)}
+	return s
+}
+
+// tick plans the world a minute on, and applies what the plan says. CI begins every build
+// it is pushed at once.
+func (s *ticks) tick() []Action {
+	s.w.Now = s.w.Now.Add(time.Minute)
+	acts := Plan(s.w, s.c)
+	for _, a := range acts {
+		switch a.Do {
+		case "push":
+			b := a.Build
+			b.Started = s.w.Now
+			s.seen[b.SHA] = true
+			s.w.Builds = append(s.w.Builds, b)
+			s.built = append(s.built, b)
+		case "delete":
+			s.w.Builds = slices.DeleteFunc(s.w.Builds, func(b Build) bool { return b.SHA == a.SHA })
+		case "land":
+			s.w.Trunk = a.SHA
+			s.w.Builds = slices.DeleteFunc(s.w.Builds, func(b Build) bool { return b.SHA == a.SHA })
+			s.w.PRs = slices.DeleteFunc(s.w.PRs, func(pr PR) bool {
+				return slices.ContainsFunc(a.Members, func(m Member) bool { return m.Number == pr.Number })
+			})
+		case "eject":
+			s.w.PRs = slices.DeleteFunc(s.w.PRs, func(pr PR) bool { return pr.Number == a.PR })
+		}
+	}
+	s.acts = append(s.acts, acts)
+	return acts
+}
+
+// ci says what CI has said of each standing build that answer judges, by its SHA.
+func (s *ticks) ci(answer func(b Build) (Verdict, []string, bool)) {
+	for i, b := range s.w.Builds {
+		if v, failed, ok := answer(b); ok {
+			s.w.Builds[i].Verdict, s.w.Builds[i].Failed = v, failed
+		}
+	}
+}
+
+func holds(b Build, n int) bool {
+	return slices.ContainsFunc(b.Chain, func(m Member) bool { return m.Number == n })
+}
+
+// ci is a CI that answers every build pushed so far but the candidate the test speaks for,
+// failing those fails says fail, with job, and passing the rest.
+func ci(fails func(Build) bool, job string, except SHA) func(Build) (Verdict, []string, bool) {
+	return func(b Build) (Verdict, []string, bool) {
+		if b.SHA == except || b.Verdict != Pending {
+			return 0, nil, false
+		}
+		if fails(b) {
+			return Failure, []string{job}, true
+		}
+		return Success, nil, true
+	}
+}
+
+// breaks says a build fails because it holds culprit: a whole build always, and a probe where
+// it runs job. A probe that names no job runs none.
+func breaks(culprit int, job string) func(Build) bool {
+	return func(b Build) bool {
+		return holds(b, culprit) && (b.Kind != Probe || strings.Contains(b.SHA, "Banyan-Probe-Failed: "+job))
+	}
+}
+
+func (s *ticks) set(sha SHA, v Verdict, failed ...string) {
+	s.ci(func(b Build) (Verdict, []string, bool) { return v, failed, b.SHA == sha })
+}
+
+// landed is the pull requests the trunk took, in the order it took them, and ejected those
+// that left.
+func (s *ticks) outcome() (landed [][]int, ejected []int) {
+	for _, acts := range s.acts {
+		for _, a := range acts {
+			switch a.Do {
+			case "land":
+				landed = append(landed, chainNumbers(a.Members))
+			case "eject":
+				ejected = append(ejected, a.PR)
+			}
+		}
+	}
+	return landed, ejected
+}
+
+// when is the first tick that took an action a matches, or -1.
+func (s *ticks) when(match func(Action) bool) int {
+	for i, acts := range s.acts {
+		if slices.ContainsFunc(acts, match) {
+			return i
+		}
+	}
+	return -1
+}
+
+func chainNumbers(chain []Member) (ns []int) {
+	for _, m := range chain {
+		ns = append(ns, m.Number)
+	}
+	return ns
+}
+
+var early = Config{Slots: 2, MaxBatch: 2, Probes: true, Timeout: 90 * time.Minute, Recheck: 10 * time.Minute}
+
+// #2 breaks linux. Read at its gate, the candidate of #1 and #2 goes red ten ticks after it
+// was pushed. Read early, linux's failure dooms it at the first. From the tick each reads it
+// red, the two queues act alike, tick for tick, and the gate's own failure changes nothing in
+// the early one: #1 lands, and #2 leaves nine ticks sooner. The early queue deletes the
+// candidate's branch as #2 leaves, before its gate has reported.
+func TestACandidateReadFailedEarlyIsNarrowedAsItWouldBeAtItsGate(t *testing.T) {
+	play := func(red int) *ticks {
+		s := newTicks(t, early, 1, 2)
+		s.tick()
+		c := s.candidate(1, 2)
+		for i := 1; i < 30; i++ {
+			if i == red || i == 10 {
+				s.set(c.SHA, Failure, "linux")
+			}
+			s.ci(ci(breaks(2, "linux"), "linux", c.SHA))
+			s.tick()
+		}
+		return s
+	}
+	gate, doomed := play(10), play(1)
+	same := func(acts []Action) string {
+		var out []Action
+		for _, a := range acts {
+			a.Build.Pushed = time.Time{}
+			out = append(out, a)
+		}
+		data, _ := json.Marshal(out)
+		return string(data)
+	}
+	for i := 0; i < 20; i++ {
+		if a, b := same(doomed.acts[1+i]), same(gate.acts[10+i]); a != b {
+			t.Errorf("%d ticks after the red was read, the early queue did\n%s\nwhere the one that read it at its gate did\n%s", i, a, b)
+		}
+	}
+	for _, s := range []*ticks{gate, doomed} {
+		if landed, ejected := s.outcome(); fmt.Sprint(landed, ejected) != "[[1]] [2]" {
+			t.Errorf("landed %v and ejected %v, where #1 lands and #2 leaves", landed, ejected)
+		}
+	}
+	left := func(s *ticks) int { return s.when(func(a Action) bool { return a.Do == "eject" }) }
+	if left(gate)-left(doomed) != 9 {
+		t.Errorf("#2 left at tick %d read early and %d read at the gate, where it leaves nine ticks sooner", left(doomed), left(gate))
+	}
+	c := doomed.built[0].SHA
+	if gone := doomed.when(func(a Action) bool { return a.Do == "delete" && a.SHA == c }); gone < 0 || gone >= 10 {
+		t.Errorf("the early queue deleted the candidate's branch at tick %d, where it goes as #2 leaves, before the gate reports at 10", gone)
+	}
+}
+
+func (s *ticks) candidate(numbers ...int) Build {
+	s.t.Helper()
+	for _, b := range s.w.Builds {
+		if b.Kind == Candidate && b.Round == 0 && fmt.Sprint(chainNumbers(b.Chain)) == fmt.Sprint(numbers) {
+			return b
+		}
+	}
+	s.t.Fatalf("no candidate of %v stands: %+v", numbers, s.w.Builds)
+	return Build{}
+}
+
+// noted is how a commit of the fake git spells a line of its note.
+func noted(line string) string { return strings.Trim(fmt.Sprintf("%q", line), `"`) }
+
+// emptyProbes is the probes pushed at or after tick from that name no build to probe and no
+// job to run.
+func (s *ticks) emptyProbes(from int) (n int) {
+	for _, acts := range s.acts[from:] {
+		for _, a := range acts {
+			if a.Do == "push" && a.Build.Kind == Probe && strings.HasSuffix(a.Build.SHA, `Banyan-Probe-Of: ")`) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// #1 and #2's candidate read failed on linux, and its first round of probes began. Then
+// linux was retried by hand and the candidate's whole build passed: nothing is broken. Nothing
+// reads that pass. The candidate never lands, and its rounds go on as though it had failed,
+// every probe pushed since naming no failed build and no job. Where those probes pass, #1 and
+// #2 land one at a time, each built again. Where the probes of #1 fail, as a flaky job's may,
+// #1 leaves, though every whole build that held it passed.
+func TestACandidateThatPassesAfterReadingFailedIsNarrowedAndNeverLands(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fails   func(Build) bool
+		landed  string
+		ejected string
+	}{
+		{"its probes pass", func(Build) bool { return false }, "[[1] [2]]", "[]"},
+		{"its probes of #1 fail", func(b Build) bool { return b.Kind == Probe && holds(b, 1) }, "[[2]]", "[1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTicks(t, early, 1, 2)
+			s.tick()
+			c := s.candidate(1, 2)
+			s.set(c.SHA, Failure, "linux")
+			s.tick()
+			s.set(c.SHA, Success)
+			for i := 0; i < 20; i++ {
+				s.ci(ci(tc.fails, "linux", c.SHA))
+				s.tick()
+			}
+			if s.when(func(a Action) bool { return a.Do == "land" && a.SHA == c.SHA }) >= 0 {
+				t.Errorf("the candidate landed on its pass")
+			}
+			if landed, ejected := s.outcome(); fmt.Sprint(landed) != tc.landed || fmt.Sprint(ejected) != tc.ejected {
+				t.Errorf("landed %v and ejected %v, want %s and %s", landed, ejected, tc.landed, tc.ejected)
+			}
+			if s.emptyProbes(2) == 0 {
+				t.Errorf("no probe pushed after the pass names nothing, where each does")
+			}
+		})
+	}
+}
+
+// #1 and #2's candidate read failed on linux, and its first round of probes began. Then
+// linux was retried, and the candidate reads pending again a tick later. It stays the red
+// candidate: its branch stands, it is not built again, and its rounds go on with probes that
+// name no failed build and no job, while the pull request its first round cleared is built
+// on its own.
+//
+// Where #1 breaks linux and the gate fails at tick 3, the probes pushed after it name the
+// candidate and linux again, and #1 leaves on the candidate's own rounds: the pass between its
+// two failures is a probe of the trunk pushed while the candidate read pending, which ran no
+// job at all. Where the gate fails
+// only at tick 8, a probe of #1 that ran nothing has passed by then: the rounds read #1 as
+// cleared and #2, which has landed, as the suspect, and the candidate and its rounds go. #1
+// is built again, goes red again, and leaves on that candidate's rounds. Where nothing is
+// broken and the gate passes, nobody leaves and both land, each built again.
+func TestACandidateWhoseFailedJobClearsStaysRedWhileItsRoundsGoOn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		at      int
+		gate    Verdict
+		fails   func(Build) bool
+		landed  string
+		ejected string
+		own     bool
+		empty   bool
+	}{
+		{"#1 breaks linux, the gate fails at 3", 3, Failure, breaks(1, "linux"), "[[2]]", "[1]", true, true},
+		{"#1 breaks linux, the gate fails at 8", 8, Failure, breaks(1, "linux"), "[[2]]", "[1]", false, false},
+		{"nothing is broken", 8, Success, func(Build) bool { return false }, "[[1] [2]]", "[]", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTicks(t, early, 1, 2)
+			s.tick()
+			c := s.candidate(1, 2)
+			s.set(c.SHA, Failure, "linux")
+			s.tick()
+			s.set(c.SHA, Pending)
+			for i := 2; i < 30; i++ {
+				if i == tc.at {
+					s.set(c.SHA, tc.gate, "linux")
+				}
+				s.ci(ci(tc.fails, "linux", c.SHA))
+				s.tick()
+			}
+			if gone := s.when(func(a Action) bool { return a.Do == "delete" && a.SHA == c.SHA }); gone >= 0 && gone < tc.at {
+				t.Errorf("the candidate's branch was deleted at tick %d, while it read pending", gone)
+			}
+			for _, b := range s.built[1:] {
+				if b.Kind == Candidate && fmt.Sprint(chainNumbers(b.Chain)) == "[1 2]" {
+					t.Errorf("the candidate's tree was built again as %s", b.SHA)
+				}
+			}
+			if landed, ejected := s.outcome(); fmt.Sprint(landed) != tc.landed || fmt.Sprint(ejected) != tc.ejected {
+				t.Errorf("landed %v and ejected %v, want %s and %s", landed, ejected, tc.landed, tc.ejected)
+			}
+			if s.emptyProbes(2)-s.emptyProbes(tc.at) == 0 {
+				t.Errorf("no probe pushed while the candidate read pending names nothing, where each does")
+			}
+			for _, acts := range s.acts[tc.at:] {
+				for _, a := range acts {
+					if a.Do == "push" && a.Build.Kind == Probe && a.Build.Of == c.Tests() && !strings.Contains(a.Build.SHA, noted("Banyan-Probe-Of: "+c.SHA+"\nBanyan-Probe-Failed: linux")) {
+						t.Errorf("a probe pushed after the gate failed is %s, where it names the candidate and linux", a.Build.SHA)
+					}
+				}
+			}
+			for _, acts := range s.acts {
+				for _, a := range acts {
+					if a.Do == "eject" && strings.Contains(a.Evidence[0], noted("Banyan-Of: "+c.Tests())) != tc.own {
+						t.Errorf("#%d left on %v, where it leaves on the candidate's own rounds: %v", a.PR, a.Evidence, tc.own)
+					}
+					if a.Do == "eject" && strings.HasSuffix(a.Evidence[0], `Banyan-Probe-Of: ")`) != tc.empty {
+						t.Errorf("#%d left on a pass without it of %s, where that pass ran no job: %v", a.PR, a.Evidence[0], tc.empty)
+					}
+				}
+			}
+		})
+	}
+}
+
+// #1 breaks mac, which the candidate of #1 and #2 reports only at its gate. It read failed
+// early on linux, which flaked, so its first rounds probe linux alone. They clear #1 and put
+// #2 to the test. Where linux flakes once more on #2's first probe, #2's test reads: #1 and #2
+// failed, on linux; #1 alone passed, running linux alone; #1 and #2 failed again, on mac, once
+// the gate had named it. #2 leaves, though it broke nothing, and #1 leaves later on a
+// candidate of its own. Where linux does not flake again, the probes of #1 and #2 pass, a
+// whole build of the red tree decides, and only #1 leaves.
+func TestAGateThatFailsMoreJobsLaterCanBlameAnInnocentOnAPassThatRanFewer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		flakes  int
+		ejected string
+	}{
+		{"linux flakes once more", 1, "[2 1]"},
+		{"linux does not flake again", 0, "[1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTicks(t, early, 1, 2)
+			s.tick()
+			c := s.candidate(1, 2)
+			s.set(c.SHA, Failure, "linux")
+			flakes := tc.flakes
+			mac := func(b Build) bool {
+				return holds(b, 1) && (b.Kind != Probe || strings.Contains(b.SHA, noted("Banyan-Probe-Failed: mac")))
+			}
+			for i := 1; i < 30; i++ {
+				s.tick()
+				if i == 3 {
+					s.set(c.SHA, Failure, "linux", "mac")
+				}
+				s.ci(ci(func(b Build) bool {
+					if b.Kind == Probe && len(b.Chain) == 2 && flakes > 0 && !mac(b) {
+						flakes--
+						return true
+					}
+					return mac(b)
+				}, "mac", c.SHA))
+			}
+			if _, ejected := s.outcome(); fmt.Sprint(ejected) != tc.ejected {
+				t.Errorf("ejected %v, want %s", ejected, tc.ejected)
+			}
+			ranMac := noted("Banyan-Probe-Failed: mac")
+			for _, acts := range s.acts {
+				for _, a := range acts {
+					if a.Do == "eject" && a.PR == 2 && (strings.Contains(a.Evidence[0], ranMac) || !strings.Contains(a.Evidence[2], ranMac)) {
+						t.Errorf("#2 left on %v, where the pass without it ran linux alone and the failure after it ran mac", a.Evidence)
+					}
+				}
+			}
+		})
+	}
+}

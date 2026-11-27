@@ -2,6 +2,7 @@ package run
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,8 +76,10 @@ type comment struct {
 type status struct {
 	Context, State, Description, URL string
 	At                               time.Time
-	Check                            bool
-	App                              int
+	// Ended is when a check run completed, where it differs from when it began.
+	Ended time.Time
+	Check bool
+	App   int
 }
 
 func (h *hub) open(n int, file, content string) *pull {
@@ -182,7 +185,7 @@ func (h *hub) rollup(sha, after string, first int) any {
 			node := map[string]any{"__typename": "CheckRun", "name": s.Context, "status": strings.ToUpper(s.State), "detailsUrl": s.URL, "startedAt": s.At,
 				"checkSuite": map[string]any{"app": map[string]any{"databaseId": s.App}}}
 			if s.State != "queued" && s.State != "in_progress" {
-				node["status"], node["conclusion"] = "COMPLETED", strings.ToUpper(s.State)
+				node["status"], node["conclusion"], node["completedAt"] = "COMPLETED", strings.ToUpper(s.State), cmp.Or(s.Ended, s.At)
 			}
 			nodes = append(nodes, node)
 			continue
@@ -2575,5 +2578,151 @@ func TestKeepCancelsRunningLowerCandidateAtOnce(t *testing.T) {
 	keepTick(t, w)
 	if w.o.Branches("merge-queue/")["refs/heads/merge-queue/main/"+lower.SHA[:12]] != "" || w.last(lower.SHA, w.q.Status).State != "pending" {
 		t.Fatal("running lower was marked or retained where CI cancels")
+	}
+}
+
+// doomedWorld queues one pull request under config and pushes its candidate, which CI is still
+// building: the build's own contexts have yet to report.
+func doomedWorld(t *testing.T, config string) (*world, string) {
+	t.Helper()
+	w := newWorld(t, config)
+	w.queue(1, "a", "1\n")
+	w.now = w.now.Add(time.Minute)
+	if err := w.q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	var cand string
+	for _, sha := range w.o.Branches("merge-queue/") {
+		cand = sha
+	}
+	w.check(cand, "changes (buildkite)", "success", w.now)
+	w.check(cand, "gate (buildkite)", "in_progress", w.now)
+	return w, cand
+}
+
+func readVerdict(t *testing.T, w *world, sha string) queue.Verdict {
+	t.Helper()
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range r.World.Builds {
+		if b.SHA == sha {
+			return b.Verdict
+		}
+	}
+	t.Fatalf("%.12s is not among the builds read: %+v", sha, r.World.Builds)
+	return queue.Pending
+}
+
+// A candidate whose gate has yet to report reads failed once a job named in dooms has failed
+// and stood so for stood, and not a second before. A job not named, and a queue that sets only
+// one of the two keys, read it as CI does: pending.
+func TestAJobNamedInDoomsFailsACandidateStillBuildingOnceItHasStood(t *testing.T) {
+	const build = `"build": ["changes (buildkite)", "gate (buildkite)"]`
+	for _, tc := range []struct {
+		name, config, job string
+		young, stood      queue.Verdict
+	}{
+		{"named", `{` + build + `, "dooms": ["linux (buildkite)"], "stood": "5m"}`, "linux (buildkite)", queue.Pending, queue.Failure},
+		{"not named", `{` + build + `, "dooms": ["linux (buildkite)"], "stood": "5m"}`, "publish (buildkite)", queue.Pending, queue.Pending},
+		{"unset", `{` + build + `}`, "linux (buildkite)", queue.Pending, queue.Pending},
+		{"dooms alone", `{` + build + `, "dooms": ["linux (buildkite)"]}`, "linux (buildkite)", queue.Pending, queue.Pending},
+		{"stood alone", `{` + build + `, "stood": "5m"}`, "linux (buildkite)", queue.Pending, queue.Pending},
+		{"stood zero", `{` + build + `, "dooms": ["linux (buildkite)"], "stood": "0s"}`, "linux (buildkite)", queue.Failure, queue.Failure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, cand := doomedWorld(t, tc.config)
+			w.set(cand, tc.job, "failure")
+			failed := w.now
+			w.now = failed.Add(5*time.Minute - time.Second)
+			if got := readVerdict(t, w, cand); got != tc.young {
+				t.Errorf("4m59s after %s failed, the candidate reads %v, want %v", tc.job, got, tc.young)
+			}
+			w.now = failed.Add(5 * time.Minute)
+			if got := readVerdict(t, w, cand); got != tc.stood {
+				t.Errorf("5m after %s failed, the candidate reads %v, want %v", tc.job, got, tc.stood)
+			}
+		})
+	}
+}
+
+// A check run's time is when it began. A job that ran for twenty minutes and has just failed
+// has stood for no time at all.
+func TestAJobThatFailedAsACheckRunStandsFromWhenItCompleted(t *testing.T) {
+	w, cand := doomedWorld(t, `{"build": ["changes (buildkite)", "gate (buildkite)"], "dooms": ["linux (buildkite)"], "stood": "5m"}`)
+	began := w.now
+	w.now = began.Add(20 * time.Minute)
+	w.statuses[cand] = append(w.statuses[cand], status{Context: "linux (buildkite)", State: "failure", URL: "https://ci.example/" + cand[:12], At: began, Ended: w.now, Check: true})
+	failed := w.now
+	if got := readVerdict(t, w, cand); got != queue.Pending {
+		t.Errorf("as linux failed, 20m after it began, the candidate reads %v, want pending", got)
+	}
+	w.now = failed.Add(5 * time.Minute)
+	if got := readVerdict(t, w, cand); got != queue.Failure {
+		t.Errorf("5m after linux failed, the candidate reads %v, want failure", got)
+	}
+}
+
+// What CI said of a build it has finished stands, and dooms reads nothing but a candidate:
+// a round's probe and its whole build go on reading pending until their own context reports.
+func TestDoomsLeavesAVerdictAProbeAndACheckAsCISaysThem(t *testing.T) {
+	w, cand := doomedWorld(t, `{"build": ["changes (buildkite)", "gate (buildkite)"], "probe": "probe (buildkite)", "dooms": ["linux (buildkite)"], "stood": "5m"}`)
+	w.set(cand, "linux (buildkite)", "failure")
+	w.check(cand, "gate (buildkite)", "success", w.now)
+	trunk, _, err := w.q.Git.Fetch([]int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rounds []string
+	for _, note := range []string{"Banyan-Try: 1\nBanyan-Round: 1\nBanyan-Of: red\nBanyan-Probe-Of: red", "Banyan-Try: 1\nBanyan-Round: 1\nBanyan-Of: red\nBanyan-Check: whole"} {
+		sha := w.q.Git.Mark(trunk, note)
+		if err := w.q.Git.Push(sha); err != nil {
+			t.Fatal(err)
+		}
+		w.set(sha, w.q.Status, "pending")
+		w.set(sha, "linux (buildkite)", "failure")
+		rounds = append(rounds, sha)
+	}
+	w.now = w.now.Add(time.Hour)
+	r, err := w.q.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := map[string]queue.Build{}
+	for _, b := range r.World.Builds {
+		read[b.SHA] = b
+	}
+	if b := read[cand]; b.Verdict != queue.Success {
+		t.Errorf("the candidate whose gate passed reads %v, want success", b.Verdict)
+	}
+	for _, sha := range rounds {
+		if b, ok := read[sha]; !ok || b.Round != 1 || b.Kind == queue.Candidate || b.Verdict != queue.Pending {
+			t.Errorf("a round's build with linux failed an hour ago reads %+v, want a pending probe or check of round 1", b)
+		}
+	}
+}
+
+func TestStoodConfig(t *testing.T) {
+	for _, value := range []string{"bad", "-1s", "0s", "5m", ""} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "queue.json")
+			if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"dooms":["linux (buildkite)"],"stood":%q}`, value)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if value == "bad" || value == "-1s" {
+				if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "stood") {
+					t.Fatalf("Load = %v, want file and stood refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(c.Dooms, []string{"linux (buildkite)"}) || c.Stood != value {
+				t.Fatalf("dooms %v and stood %q, want [linux (buildkite)] and %q", c.Dooms, c.Stood, value)
+			}
+		})
 	}
 }

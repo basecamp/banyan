@@ -45,6 +45,8 @@ type Config struct {
 	Gather   int      `json:"gather"` // a candidate built while another is building adds at least this many
 	Timeout  string   `json:"timeout"`
 	Keep     string   `json:"keep,omitzero"`
+	Dooms    []string `json:"dooms,omitzero"` // the contexts whose failure fails a candidate still building, once it has stood for stood
+	Stood    string   `json:"stood,omitzero"`
 	Recheck  string   `json:"recheck"`
 	Author   struct {
 		Name  string `json:"name"`
@@ -105,6 +107,14 @@ func Load(path string) (Config, error) {
 			err = fmt.Errorf("%s: keep: %w", path, bad)
 		} else if d < 0 {
 			err = fmt.Errorf("%s: keep is %q, and may not be negative", path, c.Keep)
+		}
+	}
+	if err == nil && c.Stood != "" {
+		d, bad := time.ParseDuration(c.Stood)
+		if bad != nil {
+			err = fmt.Errorf("%s: stood: %w", path, bad)
+		} else if d < 0 {
+			err = fmt.Errorf("%s: stood is %q, and may not be negative", path, c.Stood)
 		}
 	}
 	return c, err
@@ -247,6 +257,7 @@ func (q *Queue) Read() (*Read, error) {
 				}
 			}
 		}
+		doomed := b.Verdict == queue.Pending && b.Kind == queue.Candidate && b.Round == 0 && q.doomed(st, r.World.Now)
 		if q.dials().Keep > 0 && b.Kind == queue.Candidate && b.Round == 0 && q.Git.Holds(trunk, b.SHA) {
 			if st[q.Status].State == queue.Success {
 				b.Landed = st[q.Status].At
@@ -259,9 +270,26 @@ func (q *Queue) Read() (*Read, error) {
 				b.Landed = r.World.Now
 			}
 		}
+		if doomed {
+			b.Verdict = queue.Failure
+		}
 		r.World.Builds = append(r.World.Builds, b)
 	}
 	return r, nil
+}
+
+// doomed says a context named in dooms has failed on the commit and stood so for stood.
+func (q *Queue) doomed(st map[string]github.Status, now time.Time) bool {
+	stood, err := time.ParseDuration(q.Stood)
+	if err != nil {
+		return false
+	}
+	for _, c := range q.Dooms {
+		if s := st[c]; s.State == queue.Failure && !s.Ended.IsZero() && now.Sub(s.Ended) >= stood {
+			return true
+		}
+	}
+	return false
 }
 
 // earlier is the earlier of two times a build is said to have begun, zero being no time.

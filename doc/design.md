@@ -101,6 +101,8 @@ A verdict belongs to one commit for good. A retry is the same merge carrying `Ba
 
 4. **When a build began, optionally.** Where the statuses say CI has begun a build, a fair test's rounds overlap and it answers in about one build time. Where they do not, it takes three. A check run says so itself. A commit status says so in words, and `started` names a word its pending status carries once the build runs: Buildkite's reads "Build #7 started". Where neither says so, `begins` names a context that answers once CI has queued the build's jobs, a pipeline's first step: the order of a test then rests on CI taking jobs up in the order it queued them.
 
+5. **Each job as a context, optionally.** Where CI reports each job as it finishes, the red build's jobs that failed are what a probe runs. `dooms` names the jobs whose failure fails the whole build, and a candidate whose gate has yet to answer reads failed once one of them has failed and stood for `stood`, so its rounds begin while the rest of its build runs. Its branch stands while its rounds run, so its build runs on beside them and holds no slot; where the rounds end first, the branch goes with them. A probe pushed before the gate reports runs only the jobs failed when it was pushed. A failed job retried within `stood` is waited for; one retried later leaves the candidate red, and the planner does not read the build's own pass.
+
 The queue never calls a CI provider's API and never reads a log.
 
 ## Statuses

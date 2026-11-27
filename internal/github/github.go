@@ -47,6 +47,9 @@ type Status struct {
 	Description string
 	URL         string
 	At          time.Time
+	// Ended is when it reported the state it holds: a commit status when it was posted, a
+	// check run when it completed, and zero for a check run still running.
+	Ended time.Time
 	// Running is a check run saying it has begun. A commit status has only its description.
 	Running bool
 }
@@ -182,6 +185,7 @@ type contextNode struct {
 	Conclusion  string
 	DetailsURL  string `json:"detailsUrl"`
 	StartedAt   time.Time
+	CompletedAt time.Time
 	CheckSuite  struct {
 		App struct {
 			DatabaseID int `json:"databaseId"`
@@ -210,7 +214,7 @@ func (n Names) contextFields() string {
 	}
 	return `pageInfo { hasNextPage endCursor } nodes { __typename
 	... on StatusContext { ` + statusFields + ` }
-	... on CheckRun { name status conclusion detailsUrl startedAt` + app + ` } }`
+	... on CheckRun { name status conclusion detailsUrl startedAt completedAt` + app + ` } }`
 }
 
 func (n Names) rollupFields() string {
@@ -225,9 +229,9 @@ func (r *rollup) statuses(names Names) map[string]Status {
 		return out
 	}
 	for _, n := range r.Contexts.Nodes {
-		name, s := n.Context, Status{Description: n.Description, URL: n.TargetURL, At: n.CreatedAt}
+		name, s := n.Context, Status{Description: n.Description, URL: n.TargetURL, At: n.CreatedAt, Ended: n.CreatedAt}
 		if n.Typename == "CheckRun" {
-			name, s = n.Name, Status{URL: n.DetailsURL, At: n.StartedAt, Running: n.Status == "IN_PROGRESS"}
+			name, s = n.Name, Status{URL: n.DetailsURL, At: n.StartedAt, Ended: n.CompletedAt, Running: n.Status == "IN_PROGRESS"}
 			switch {
 			case n.Status != "COMPLETED":
 				s.State = queue.Pending
