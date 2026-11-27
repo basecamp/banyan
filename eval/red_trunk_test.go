@@ -86,6 +86,20 @@ func TestReplayPlaysNoRedTrunkTheRecordsClear(t *testing.T) {
 			readAt(recs, 45).World.Builds[0].Verdict = queue.Success
 			return recs
 		}},
+		{"two red probes of the trunk with members", func() []queue.Recording {
+			recs := redTrunkDay()
+			for _, minutes := range []int{30, 45} {
+				readAt(recs, minutes).World.Builds[0].Chain = []queue.Member{{Number: 3, Head: replayPR(3).Head, Merge: "m"}}
+			}
+			return recs
+		}},
+		{"two red checks of the trunk", func() []queue.Recording {
+			recs := redTrunkDay()
+			for _, minutes := range []int{30, 45} {
+				readAt(recs, minutes).World.Builds[0].Kind = queue.Check
+			}
+			return recs
+		}},
 		{"two red probes with a green build on the trunk pushed between them", func() []queue.Recording {
 			recs := redTrunkDay()
 			check := queue.Build{SHA: "check", Kind: queue.Check, Base: "T", Pushed: replayStart.Add(25 * time.Minute), Verdict: queue.Success}
@@ -200,22 +214,53 @@ func TestReplayHoldsNoHeadGuiltyForTheRedTrunksBuilds(t *testing.T) {
 	}
 }
 
+// reversedRedTrunkDay is redTrunkDay with its probes pushed at 2m and 5m, before T landed, and a
+// check on T pushed at 7m read green at 46m, so the span the records show ends before it begins.
+func reversedRedTrunkDay() []queue.Recording {
+	recs := redTrunkDay()
+	recs[3].Actions, recs[5].Actions = nil, nil
+	readAt(recs, 30).World.Builds[0].Pushed = replayStart.Add(2 * time.Minute)
+	readAt(recs, 45).World.Builds[0].Pushed = replayStart.Add(5 * time.Minute)
+	check := queue.Build{SHA: "check", Kind: queue.Check, Base: "T", Pushed: replayStart.Add(7 * time.Minute), Verdict: queue.Success}
+	return sortedByTime(append(recs, recordAt(recs, 46, check)))
+}
+
 func TestReplayCountsTheRedTrunksNoFixEndsThatOverlapTheWindow(t *testing.T) {
+	if found, want := foundSpans(reversedRedTrunkDay()), []foundSpan{{10 * time.Minute, 7 * time.Minute, nil}}; !reflect.DeepEqual(found, want) {
+		t.Fatalf("the reversed day's spans %v, want %v", found, want)
+	}
 	for _, tc := range []struct {
-		name string
-		from time.Duration
-		want int
+		name          string
+		day           func() []queue.Recording
+		from, minutes time.Duration
+		want          int
+		inside        float64
 	}{
-		{"inside the window", 0, 1},
-		{"straddling its opening", 30 * time.Minute, 1},
-		{"wholly in the lead-in", 60 * time.Minute, 0},
+		{"inside the window", redTrunkDay, 0, 100 * time.Minute, 1, 40},
+		{"straddling its opening", redTrunkDay, 30 * time.Minute, 40 * time.Minute, 1, 20},
+		{"ending exactly at its opening", redTrunkDay, 50 * time.Minute, 40 * time.Minute, 0, 0},
+		{"wholly in the lead-in", redTrunkDay, 60 * time.Minute, 40 * time.Minute, 0, 0},
+		{"starting exactly at its stop", redTrunkDay, -30 * time.Minute, 40 * time.Minute, 0, 0},
+		{"ending before it begins", reversedRedTrunkDay, 0, 100 * time.Minute, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			was, w, _ := recordedWindow(t, redTrunkDay(), replayStart.Add(tc.from), replayStart.Add(tc.from+40*time.Minute))
-			if _, sim := w.simulate(Shape{}, was); sim.UnplayedRedTrunkSpans != tc.want || sim.RedTrunkSpans != 0 {
-				t.Fatalf("unplayed red trunk spans %d, want %d; played %d", sim.UnplayedRedTrunkSpans, tc.want, sim.RedTrunkSpans)
+			was, w, _ := recordedWindow(t, tc.day(), replayStart.Add(tc.from), replayStart.Add(tc.from+tc.minutes))
+			if _, sim := w.simulate(Shape{}, was); sim.UnplayedRedTrunkSpans != tc.want || sim.UnplayedRedTrunkMinutes != tc.inside || sim.RedTrunkSpans != 0 {
+				t.Fatalf("unplayed red trunk spans %d over %v min, want %d over %v; played %d", sim.UnplayedRedTrunkSpans, sim.UnplayedRedTrunkMinutes, tc.want, tc.inside, sim.RedTrunkSpans)
 			}
 		})
+	}
+}
+
+func TestReplayFindsARedTrunkNoGreenBuildEndsRunningToTheLastRecord(t *testing.T) {
+	recs := redTrunkDay()[:9]
+	recs = append(recs, recordAt(recs, 100, recs[8].World.Builds[0]))
+	if found, want := foundSpans(recs), []foundSpan{{10 * time.Minute, 100 * time.Minute, nil}}; !reflect.DeepEqual(found, want) {
+		t.Fatalf("spans %v, want %v", found, want)
+	}
+	was, w, _ := replayWindow(t, recs, 80)
+	if _, sim := w.simulate(Shape{}, was); sim.UnplayedRedTrunkSpans != 1 || sim.UnplayedRedTrunkMinutes != 70 || sim.RedTrunkSpans != 0 {
+		t.Fatalf("unplayed red trunk spans %d over %v min; played %d", sim.UnplayedRedTrunkSpans, sim.UnplayedRedTrunkMinutes, sim.RedTrunkSpans)
 	}
 }
 
@@ -240,12 +285,13 @@ func TestReplayLeavesTheSimulatedHalfOfADayWithNoRedTrunkAsItWas(t *testing.T) {
 	if err := json.Unmarshal([]byte(clearedRedTrunkSimulated), &was); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	if row.Simulated["red_trunk_spans"] != 0.0 || row.Simulated["unfixed_red_trunk_spans"] != 0.0 || row.Simulated["unplayed_red_trunk_spans"] != 0.0 {
-		t.Fatalf("red trunk spans %v, unfixed %v, unplayed %v", row.Simulated["red_trunk_spans"], row.Simulated["unfixed_red_trunk_spans"], row.Simulated["unplayed_red_trunk_spans"])
+	if row.Simulated["red_trunk_spans"] != 0.0 || row.Simulated["unfixed_red_trunk_spans"] != 0.0 || row.Simulated["unplayed_red_trunk_spans"] != 0.0 || row.Simulated["unplayed_red_trunk_minutes"] != 0.0 {
+		t.Fatalf("red trunk spans %v, unfixed %v, unplayed %v over %v min", row.Simulated["red_trunk_spans"], row.Simulated["unfixed_red_trunk_spans"], row.Simulated["unplayed_red_trunk_spans"], row.Simulated["unplayed_red_trunk_minutes"])
 	}
 	delete(row.Simulated, "red_trunk_spans")
 	delete(row.Simulated, "unfixed_red_trunk_spans")
 	delete(row.Simulated, "unplayed_red_trunk_spans")
+	delete(row.Simulated, "unplayed_red_trunk_minutes")
 	if !reflect.DeepEqual(row, was) {
 		t.Fatalf("simulated half changed:\n%v\n%v", row, was)
 	}
@@ -425,9 +471,11 @@ func TestReplayHoldsTheRedBuildsWithoutTheFixTheTrunksUntilItLands(t *testing.T)
 		Chain: []queue.Member{{Number: 3, Head: replayPR(3).Head, Merge: "late"}}}
 	holding := queue.Build{SHA: "holding", Base: "T", Pushed: at(45), Verdict: queue.Failure,
 		Chain: []queue.Member{{Number: 2, Head: replayPR(2).Head, Merge: "two"}, {Number: 3, Head: replayPR(3).Head, Merge: "holding"}}}
+	after := queue.Build{SHA: "after", Base: "T", Pushed: at(75), Verdict: queue.Failure,
+		Chain: []queue.Member{{Number: 3, Head: replayPR(3).Head, Merge: "after"}}}
 	recs = sortedByTime(append(recs, recordAt(recs, 65, late), recordAt(recs, 48, holding)))
-	if _, theirs := redTrunks(recs); !theirs["late"] || theirs["holding"] {
-		t.Fatalf("the trunk's: pushed after the fix's push without it %v, holding it %v", theirs["late"], theirs["holding"])
+	if _, theirs := redTrunks(sortedByTime(append(slices.Clone(recs), recordAt(recs, 80, after)))); !theirs["late"] || theirs["holding"] || theirs["after"] {
+		t.Fatalf("the trunk's: pushed after the fix's push without it %v, holding it %v, pushed after its landing %v", theirs["late"], theirs["holding"], theirs["after"])
 	}
 	_, w, _ := replayWindow(t, recs, 100)
 	if w.unblamedRedCandidates != 1 || w.candidatesWithoutCulprit != 3 {

@@ -526,3 +526,29 @@ func TestDailyRowSaysWhatBecameOfTheFirstCandidateOfALandingHeldOver30Minutes(t 
 		})
 	}
 }
+
+func TestDailyRowSaysWhenTheReplayLandedThroughARedTrunkNoFixEnded(t *testing.T) {
+	sim := `,"over_live":{"wait_p50":0.1,"wait_p90":0.1,"builds_per_landing":0,"landed":0},"simulated":{"landed":1`
+	for _, c := range []struct {
+		name, live, line string
+	}{
+		{"one span", sim + `,"unplayed_red_trunk_spans":1,"unplayed_red_trunk_minutes":63.6}`, "| Red trunk no fix ended, not replayed | 1 span, 64 min of the window: the replay landed through it |\n"},
+		{"two spans", sim + `,"unplayed_red_trunk_spans":2,"unplayed_red_trunk_minutes":90.2}`, "| Red trunk no fix ended, not replayed | 2 spans, 90 min of the window: the replay landed through them |\n"},
+		{"none", sim + `,"unplayed_red_trunk_spans":0,"unplayed_red_trunk_minutes":0}`, ""},
+		{"an older row", sim + `}`, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := standIns(t)
+			recordBefore(t, dir, "o/app")
+			if status, _ := dailyRow(t, dir, "COMMIT="+strings.Repeat("a", 40), "LIVE="+c.live, "BEFORE_LIVE="+beforeLive+sim+`,"unplayed_red_trunk_spans":3,"unplayed_red_trunk_minutes":5}`); status != 0 {
+				t.Fatalf("status %d", status)
+			}
+			data, _ := os.ReadFile(filepath.Join(dir, "state", "app", "rows", "2026-11-18.md"))
+			row := string(data)
+			simulator := "| Simulator over live: median, p90, builds per landing, landings | +10%, +10%, 0%, 0% |\n"
+			if !strings.Contains(row, simulator+c.line) || strings.Count(row, "| Red trunk no fix ended") != min(len(c.line), 1) {
+				t.Fatalf("a row of %s reads:\n%s", c.live, row)
+			}
+		})
+	}
+}

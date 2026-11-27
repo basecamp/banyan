@@ -67,6 +67,7 @@ def later_row:
   ($t | takeouts_row, later_row),
   "| Of those, the same head has landed since | \(if $pulls_unread > 0 then "at least " else "" end)\($same)\(if $pulls_unread > 0 then "; \($pulls_unread) not read" else "" end) |",
   (if $l.simulated then "| Simulator over live: median, p90, builds per landing, landings | \($l.over_live.wait_p50 | pct), \($l.over_live.wait_p90 | pct), \($l.over_live.builds_per_landing | pct), \($l.over_live.landed | pct) |" else empty end),
+  ($l.simulated // {} | .unplayed_red_trunk_spans as $n | if ($n // 0) > 0 then "| Red trunk no fix ended, not replayed | \($n) span\(if $n == 1 then "" else "s" end), \(.unplayed_red_trunk_minutes | if . == null then "minutes not measured" else "\(round) min of the window" end): the replay landed through \(if $n == 1 then "it" else "them" end) |" else empty end),
   "",
   (if ($trips | length) > 0 then "**Tripwires:** " + ($trips | join("; ")) + "." else "No tripwire breached." end),
   "",

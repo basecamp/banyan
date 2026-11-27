@@ -1449,13 +1449,14 @@ func TestReplayLeavesTheSimulatedHalfOfACleanDayAsItWas(t *testing.T) {
 	if err := json.Unmarshal([]byte(cleanDaySimulated), &was); err != nil {
 		t.Fatal(err)
 	}
-	if row.Simulated["unejected_guilty_heads"] != 0.0 || row.Simulated["red_trunk_spans"] != 0.0 || row.Simulated["unfixed_red_trunk_spans"] != 0.0 || row.Simulated["unplayed_red_trunk_spans"] != 0.0 {
-		t.Fatalf("unejected guilty heads %v, red trunk spans %v, unfixed %v, unplayed %v", row.Simulated["unejected_guilty_heads"], row.Simulated["red_trunk_spans"], row.Simulated["unfixed_red_trunk_spans"], row.Simulated["unplayed_red_trunk_spans"])
+	if row.Simulated["unejected_guilty_heads"] != 0.0 || row.Simulated["red_trunk_spans"] != 0.0 || row.Simulated["unfixed_red_trunk_spans"] != 0.0 || row.Simulated["unplayed_red_trunk_spans"] != 0.0 || row.Simulated["unplayed_red_trunk_minutes"] != 0.0 {
+		t.Fatalf("unejected guilty heads %v, red trunk spans %v, unfixed %v, unplayed %v over %v min", row.Simulated["unejected_guilty_heads"], row.Simulated["red_trunk_spans"], row.Simulated["unfixed_red_trunk_spans"], row.Simulated["unplayed_red_trunk_spans"], row.Simulated["unplayed_red_trunk_minutes"])
 	}
 	delete(row.Simulated, "unejected_guilty_heads")
 	delete(row.Simulated, "red_trunk_spans")
 	delete(row.Simulated, "unfixed_red_trunk_spans")
 	delete(row.Simulated, "unplayed_red_trunk_spans")
+	delete(row.Simulated, "unplayed_red_trunk_minutes")
 	if !reflect.DeepEqual(row, was) {
 		t.Fatalf("simulated half changed:\n%v\n%v", row, was)
 	}

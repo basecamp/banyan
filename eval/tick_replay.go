@@ -81,12 +81,13 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	opens := min(max(recs[firstIndex].World.Now.Sub(start), -leadIn), 0)
-	w.episodes, w.unplayed = nil, 0
+	w.episodes, w.unplayed, w.unplayedFor = nil, 0, 0
 	for _, span := range spans {
 		at, until := max(span.from.Sub(start), opens), span.until.Sub(start)
+		inside := min(until, w.stop) - max(at, 0)
 		switch {
-		case span.fixes == nil && until > 0 && at < w.stop:
-			w.unplayed++
+		case span.fixes == nil && inside > 0:
+			w.unplayed, w.unplayedFor = w.unplayed+1, w.unplayedFor+inside
 		case span.fixes != nil && until > at && at < w.stop:
 			w.episodes = append(w.episodes, Episode{At: at, NeedsFix: true, Fixes: span.fixes})
 		}
