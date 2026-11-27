@@ -223,7 +223,16 @@ func (q *Queue) Read() (*Read, error) {
 		}
 		b.Verdict, _ = github.Verdict(st, contexts)
 		for name, s := range st {
-			if s.State == queue.Failure && name != q.Status && !slices.Contains(contexts, name) && !strings.ContainsFunc(name, unicode.IsControl) {
+			if name == q.Status || slices.Contains(contexts, name) || strings.ContainsFunc(name, unicode.IsControl) || s.Skipped {
+				continue
+			}
+			if !slices.Contains(q.Build, name) && name != q.Probe {
+				if b.Jobs == nil {
+					b.Jobs = map[string]queue.Verdict{}
+				}
+				b.Jobs[name] = s.State
+			}
+			if s.State == queue.Failure {
 				b.Failed = append(b.Failed, name)
 			}
 		}
