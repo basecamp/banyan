@@ -116,7 +116,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			w.times = append(w.times, b.took)
 		}
 	}
-	w.nearby, w.nearbyRed = nil, false
+	w.nearby = nil
 	for sha, b := range builds {
 		if b.Kind != queue.Candidate || theirs[sha] || blamed(b, broken) {
 			continue
@@ -130,9 +130,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		if b.Pushed.IsZero() || !green[sha] && !failed[sha] {
 			continue
 		}
-		c := answeredCandidate{at: b.Pushed.Sub(start), red: !green[sha]}
-		w.nearby = append(w.nearby, c)
-		w.nearbyRed = w.nearbyRed || c.red && c.at > -leadIn-time.Hour && c.at < w.stop+time.Hour
+		w.nearby = append(w.nearby, answeredCandidate{at: b.Pushed.Sub(start), red: !green[sha]})
 	}
 	if w.candidatesWithoutCulprit > 0 {
 		w.flake = float64(w.unblamedRedCandidates) / float64(w.candidatesWithoutCulprit)

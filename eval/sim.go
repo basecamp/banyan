@@ -57,9 +57,8 @@ type Shape struct {
 	Failing map[queue.SHA][]time.Duration
 	// A recorded window's answered candidates with no culprit. A candidate or check pushed at t
 	// whose build takes d fails with the red share of those pushed within d of t, ends included,
-	// in place of Flake where there are any; NearbyRed says one red is near enough to play.
-	Nearby    []answeredCandidate
-	NearbyRed bool
+	// in place of Flake where there are any.
+	Nearby []answeredCandidate
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
 	Rerun   time.Duration
@@ -165,6 +164,7 @@ type Sim struct {
 	alone   *pool // the same pool and the same other builds, with no queue
 
 	crashAfterPush bool
+	drewFlake      bool // a build took a chance above zero from Nearby
 
 	Trace   io.Writer
 	Broken  []string       // invariants broken, each with what happened
@@ -440,7 +440,8 @@ func agent(sha queue.SHA) float64 {
 	return float64(n%10000) / 10000
 }
 
-// flakes says whether any build of this world may fail on a good tree.
+// flakes says whether any build of this world may fail on a good tree, or in a recorded replay
+// whether one has taken a chance above zero from Nearby.
 func (s *Sim) flakes() bool {
 	for _, e := range s.shape.Episodes {
 		if e.Share > 0 {
@@ -452,7 +453,7 @@ func (s *Sim) flakes() bool {
 			return true
 		}
 	}
-	return s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0 || s.shape.NearbyRed)
+	return s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0 || s.drewFlake)
 }
 
 // nearbyShare is the red share of the candidates pushed within d of at, ends included, and
@@ -787,7 +788,7 @@ func (s *Sim) push(b queue.Build) {
 	if s.shape.Recorded {
 		if b.Kind != queue.Probe {
 			if share, ok := nearbyShare(s.shape.Nearby, s.now, d); ok {
-				flake = share
+				flake, s.drewFlake = share, s.drewFlake || share > 0
 			}
 		}
 		fate := s.rng.Float64()
