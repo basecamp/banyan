@@ -1208,11 +1208,11 @@ func TestCheckerCallsAPullRequestACulpritWhenTheOneItNeedsConflictsWithTheTrunk(
 	}
 }
 
-func TestCheckerKillsGoingOnBesideAStackedCandidateOnlyWhereAPullRequestNeedsAnother(t *testing.T) {
+func TestCheckerKillsGoingOnBesideAStackedCandidateWhereAPullRequestNeedsAnother(t *testing.T) {
 	m := mutant{plan: besideStacked, verify: queue.Verify}
 	for _, w := range needsWorlds()[:1] {
-		if res := explore(w, m); res.Broken != "invariant 3: #3 is innocent and was ejected with no flake in play" {
-			t.Errorf("%s: broken %q, want #3 innocent on invariant 3", w.Name, res.Broken)
+		if res := explore(w, m); res.Broken != "invariant 3: #3 is innocent and was ejected with no flake in play" || res.Capped {
+			t.Errorf("%s: broken %q, capped %v, want #3 innocent on invariant 3 in a search not stopped at the cap", w.Name, res.Broken, res.Capped)
 		}
 	}
 	var plain []checkWorld
@@ -1222,7 +1222,8 @@ func TestCheckerKillsGoingOnBesideAStackedCandidateOnlyWhereAPullRequestNeedsAno
 		}
 	}
 	sum := checkSuite(plain, m)
-	t.Logf("%d worlds with probes and no pull request that needs another: %d whole, %d capped, %d states", sum.worlds, sum.whole, sum.capped, sum.states)
+	t.Logf("passed in %d worlds with probes, no keep and no pull request that needs another: %d explored whole, %d stopped at the cap, %d states",
+		sum.worlds, sum.whole, sum.capped, sum.states)
 	for _, inv := range sum.brokenInvs {
 		t.Errorf("%s is broken in %s:\n%s", inv, sum.bestByInv[inv].world.Name, formatTrace(sum.bestByInv[inv].result))
 	}
