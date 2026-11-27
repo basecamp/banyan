@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -78,6 +79,9 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		pushed     = map[queue.SHA]queue.Build{}
 		pushTimes  = map[queue.SHA]time.Time{}
 		answered   = map[queue.SHA]time.Time{}
+		hadMembers = map[queue.SHA]bool{}
+		deleted    = map[queue.SHA]bool{}
+		overtaken  []overtakenBuild
 		candidates = map[queue.SHA]queue.Build{}
 		ready      = map[recordedHead]time.Time{}
 		seen       = map[recordedHead]bool{}
@@ -157,6 +161,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				before[b.SHA] = true
 			}
 			observed[b.SHA] = true
+			hadMembers[b.SHA] = hadMembers[b.SHA] || len(b.Chain) > 0
 			if _, seen := firstPush[b.SHA]; !seen {
 				firstPush[b.SHA] = b.Pushed
 			}
@@ -208,6 +213,16 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 					firstPush[a.Build.SHA] = now
 				}
 				observed[a.Build.SHA] = true
+				hadMembers[a.Build.SHA] = hadMembers[a.Build.SHA] || len(a.Build.Chain) > 0
+			case a.Do == "delete" && !deleted[a.SHA]:
+				b, ok := buildingOnLandedChain(rec, a.SHA)
+				pushedAt := cmp.Or(b.Pushed, pushTimes[a.SHA])
+				if ok && hadMembers[a.SHA] && !pushedAt.IsZero() && now.After(pushedAt) {
+					deleted[a.SHA] = true
+					if opts.contains(now) {
+						overtaken = append(overtaken, overtakenBuild{b.Kind, timedBuild{b.SHA, false, time.Duration(now.Sub(pushedAt).Minutes() * float64(time.Minute)), now}})
+					}
+				}
 			case a.Do == "eject" && a.Cause == "culprit":
 				if opts.contains(now) {
 					causes++
@@ -334,6 +349,11 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 	}
 	if opts.from != nil && opts.to != nil {
 		win.stop = opts.to.Sub(*opts.from)
+		for _, o := range overtaken {
+			if _, counted := answered[o.sha]; !counted {
+				timed[o.kind] = append(timed[o.kind], o.timedBuild)
+			}
+		}
 		win.timed, win.failedBefore = append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...), failedBefore
 		win.probe = win.build
 		if len(took[queue.Probe]) > 0 {
@@ -433,7 +453,7 @@ const unrecordedStretch = 30 * time.Minute
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
 	arrivals                                        []time.Duration
-	timed                                           []timedBuild                  // a bounded window's whole builds whose time the record holds
+	timed                                           []timedBuild                  // a bounded window's whole builds whose time the record holds, with lower bounds for candidates still building when the queue dropped them with every member landed
 	failedBefore                                    []timedBuild                  // the same of the failed ones answered before it
 	times                                           []time.Duration               // the same, each as long as it took, less those a guilty head failed
 	failing                                         map[queue.SHA][]time.Duration // each guilty head's failed builds among both, answered from the replay's opening record on, each as long as it took
@@ -457,7 +477,7 @@ type window struct {
 }
 
 // timedBuild is a whole build whose time the record holds, whether it failed, and when it was
-// answered.
+// answered, or for a candidate overtaken while building, when the record planned its delete.
 type timedBuild struct {
 	sha      queue.SHA
 	failed   bool
@@ -634,6 +654,27 @@ func planAgain(path string) error {
 		fmt.Println(string(line))
 	}
 	return nil
+}
+
+type overtakenBuild struct {
+	kind queue.Kind
+	timedBuild
+}
+
+// buildingOnLandedChain says whether the record plans to delete a candidate still building, not
+// yet late, once the trunk holds every member of its chain, which the record reads as an empty
+// chain. The record only plans the delete: the remote can refuse it, and a later record plan it
+// again. It does not see a retry that keeps its member in its chain though the trunk holds it,
+// nor a build that answers more than an hour after the window's end, which that window never
+// reads.
+func buildingOnLandedChain(rec queue.Recording, sha queue.SHA) (queue.Build, bool) {
+	for _, b := range rec.World.Builds {
+		if b.SHA == sha {
+			late := rec.Config.Timeout > 0 && rec.World.Now.Sub(b.Pushed) > rec.Config.Timeout
+			return b, b.Kind == queue.Candidate && b.Verdict == queue.Pending && !late && b.Landed.IsZero() && len(b.Chain) == 0
+		}
+	}
+	return queue.Build{}, false
 }
 
 type ejection struct {
