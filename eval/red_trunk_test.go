@@ -215,10 +215,14 @@ func TestReplayHoldsNoHeadGuiltyForTheRedTrunksBuilds(t *testing.T) {
 }
 
 // behindRedBuildsAlone is redTrunkDay with two red builds of #3 and #4 read red on the trunk
-// before T, two red probes of #4 alone read red on T where onTheRedTrunk says so and on the trunk
-// before T where it does not, and #3 leaving at 60m.
-func behindRedBuildsAlone(onTheRedTrunk bool) []queue.Recording {
-	recs := redTrunkDay()
+// before T, two red probes of #4 alone pushed on T before it landed and read red on it, and #3
+// leaving at 60m. Where redTrunk is false the second probe of the bare trunk is read green, so
+// T is not red and the probes of #4 are not the trunk's.
+func behindRedBuildsAlone(redTrunk bool) []queue.Recording {
+	day := redTrunkDay()
+	if !redTrunk {
+		readAt(day, 45).World.Builds[0].Verdict = queue.Success
+	}
 	build := func(sha queue.SHA, kind queue.Kind, base queue.SHA, pushed int, numbers ...int) queue.Build {
 		b := queue.Build{SHA: sha, Kind: kind, Base: base, Pushed: replayStart.Add(time.Duration(pushed) * time.Minute), Verdict: queue.Failure}
 		for _, n := range numbers {
@@ -226,12 +230,9 @@ func behindRedBuildsAlone(onTheRedTrunk bool) []queue.Recording {
 		}
 		return b
 	}
-	recs = append(recs, recordAt(recs, 7, build("both1", queue.Check, "t0", 1, 3, 4)), recordAt(recs, 8, build("both2", queue.Check, "t0", 2, 3, 4)))
-	if onTheRedTrunk {
-		recs = append(recs, recordAt(recs, 15, build("alone1", queue.Probe, "T", 5, 4)), recordAt(recs, 16, build("alone2", queue.Probe, "T", 6, 4)))
-	} else {
-		recs = append(recs, recordAt(recs, 5, build("alone1", queue.Probe, "t0", 3, 4)), recordAt(recs, 6, build("alone2", queue.Probe, "t0", 4, 4)))
-	}
+	recs := append(slices.Clone(day),
+		recordAt(day, 7, build("both1", queue.Check, "t0", 1, 3, 4)), recordAt(day, 8, build("both2", queue.Check, "t0", 2, 3, 4)),
+		recordAt(day, 15, build("alone1", queue.Probe, "T", 5, 4)), recordAt(day, 16, build("alone2", queue.Probe, "T", 6, 4)))
 	recs = sortedByTime(recs)
 	for i := range recs {
 		if recs[i].World.Now.After(replayStart.Add(60 * time.Minute)) {
@@ -243,15 +244,20 @@ func behindRedBuildsAlone(onTheRedTrunk bool) []queue.Recording {
 
 func TestReplayCountsNoRedTrunksBuildAsAHeadFailingAlone(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		onTheRedTrunk bool
+		name     string
+		redTrunk bool
+		spans    int
 	}{
-		{"its builds alone the red trunk's", true},
-		{"its builds alone on another trunk", false},
+		{"its builds alone the red trunk's", true, 1},
+		{"its builds alone on a trunk the records clear", false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, w, _ := replayWindow(t, behindRedBuildsAlone(tc.onTheRedTrunk), 100)
-			if guilty := heldGuilty(w, 3, replayPR(3).Head); guilty != tc.onTheRedTrunk {
+			recs := behindRedBuildsAlone(tc.redTrunk)
+			if found := foundSpans(recs); len(found) != tc.spans {
+				t.Fatalf("spans %v", found)
+			}
+			_, w, _ := replayWindow(t, recs, 100)
+			if guilty := heldGuilty(w, 3, replayPR(3).Head); guilty != tc.redTrunk {
 				t.Fatalf("#3 held guilty %v", guilty)
 			}
 		})

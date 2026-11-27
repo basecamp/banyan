@@ -1376,6 +1376,16 @@ func TestReplayHoldsNoHeadGuiltyForBuildsBesideAHeadThatFailedAloneTwice(t *test
 		{"behind a head whose two red probes held another",
 			[]queue.Build{holding("pair1", queue.Probe, queue.Failure, 1, 3), holding("pair2", queue.Probe, queue.Failure, 1, 3), red("red1", 1, 2), red("red2", 1, 2)},
 			[]bool{true, true, false}},
+		{"behind a head that failed alone twice and then passed alone",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), holding("green1", queue.Candidate, queue.Success, 1), red("red1", 1, 2), red("red2", 1, 2)},
+			[]bool{false, true, false}},
+		{"twice beside a head that failed alone twice and once alone",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), red("red1", 1, 2), red("red2", 1, 2), red("own1", 2)},
+			[]bool{true, false, false}},
+		{"behind a pull request that failed alone once at each of two heads",
+			[]queue.Build{alone("alone1", 1), {SHA: "moved1", Kind: queue.Probe, Base: "t", Verdict: queue.Failure, Chain: []queue.Member{{Number: 1, Head: "moved", Merge: "moved1"}}},
+				red("red1", 1, 2), red("red2", 1, 2)},
+			[]bool{true, true, false}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recs := leftAfter(tc.builds...)
@@ -1385,6 +1395,18 @@ func TestReplayHoldsNoHeadGuiltyForBuildsBesideAHeadThatFailedAloneTwice(t *test
 				t.Fatalf("#1, #2, #3 held guilty %v, want %v", guilty, tc.guilty)
 			}
 		})
+	}
+}
+
+func TestReplayHoldsGuiltyAHeadBesideOneThatFailedAloneTwiceAndLanded(t *testing.T) {
+	alone := func(sha queue.SHA) queue.Build { return holding(sha, queue.Probe, queue.Failure, 1) }
+	red := func(sha queue.SHA) queue.Build { return holding(sha, queue.Candidate, queue.Failure, 1, 2) }
+	recs := leftAfter(alone("alone1"), alone("alone2"), red("red1"), red("red2"))
+	recs[len(recs)-2].Actions = []queue.Action{{Do: "land", SHA: "landed1", Members: []queue.Member{{Number: 1, Head: replayPR(1).Head, Merge: "landed1"}}}}
+	recs[len(recs)-1].World.Trunk = "landed1"
+	_, w, _ := replayWindow(t, recs, 10*len(recs))
+	if heldGuilty(w, 1, replayPR(1).Head) || !heldGuilty(w, 2, replayPR(2).Head) {
+		t.Fatalf("#1 held guilty %v, #2 %v", heldGuilty(w, 1, replayPR(1).Head), heldGuilty(w, 2, replayPR(2).Head))
 	}
 }
 
