@@ -4,7 +4,9 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand"
+	"slices"
 	"sort"
 	"time"
 
@@ -49,6 +51,10 @@ type Shape struct {
 	Whole time.Duration
 	// Clashing holds each head git was asked about, with the heads git cannot merge it with.
 	Clashing map[queue.SHA]map[queue.SHA]bool
+	// Failing holds how long each recorded whole build that a guilty head failed took, push to
+	// answered as in Times, by the head. A whole build of a tree that holds such a head takes one
+	// of its times in place of one from Times.
+	Failing map[queue.SHA][]time.Duration
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
 	Rerun   time.Duration
@@ -97,6 +103,9 @@ type Episode struct {
 	// Share, where set, is the share of the agents the episode breaks: a build that lands on
 	// one fails whatever its tree, and the rest are untouched. 0 is all of them.
 	Share float64
+	// Fixes, where set, are the recorded pull requests that fix one that NeedsFix: a tree
+	// holding any of them passes, and no fix is queued.
+	Fixes []int
 }
 
 type simPR struct {
@@ -109,8 +118,8 @@ type simPR struct {
 	fix         int // 1 + the episode it fixes
 	queued      bool
 	landed      bool
-	gone        bool // ejected with cause, or removed by its author, and not coming back
-	back        time.Duration
+	gone        bool          // ejected with cause, or removed by its author, and not coming back
+	back        time.Duration // when it is labelled again, having been ejected in error; never where it is not
 	mend        time.Duration // when its author pushes the head that mends its conflict with the trunk
 	ready       time.Duration // when this head became ready, which starts its clock
 	checksGreen time.Duration
@@ -123,6 +132,7 @@ type simBuild struct {
 	lost       bool
 	flake      bool
 	errored    bool
+	guilty     bool // its tree, at the heads it was pushed with, fails for a pull request's own reason
 }
 
 // Sim is one simulated world: the repository, its CI and the hidden facts that decide
@@ -151,13 +161,23 @@ type Sim struct {
 
 	crashAfterPush bool
 
-	Trace    io.Writer
-	Broken   []string      // invariants broken, each with what happened
-	Stopped  time.Duration // when a queue that did not keep up was stopped
+	Trace   io.Writer
+	Broken  []string       // invariants broken, each with what happened
+	Stopped time.Duration  // when a queue that did not keep up was stopped
+	Left    map[int]string // the cause each ejected pull request last left for
+	Minutes float64        // the time its builds took, each to its end
+	opening int
+	history *script
+	scored
+}
+
+// scored is what a world is scored by, each counted when it happens: a landing with its clocks,
+// a build at its push, a red build at its verdict, an ejection when it is made. A recorded replay
+// that opens before its window counts them again from the window's start.
+type scored struct {
 	Landed   int
 	Wrong    int
 	Ejected  map[string]int
-	Left     map[int]string // the cause each ejected pull request last left for
 	Whole    int
 	Probes   int
 	Red      int       // whole builds that reported failure
@@ -166,9 +186,6 @@ type Sim struct {
 	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
 	Lands    []time.Duration // when each pull request landed
-	Minutes  float64         // the time its builds took, each to its end
-	opening  int
-	history  *script
 
 	RedCandidates   int
 	RedPullRequests int
@@ -185,7 +202,8 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	}
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
-		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, under: map[queue.SHA]queue.SHA{}, merges: map[queue.SHA]queue.Member{}, trunks: map[queue.SHA]bool{"trunk0": true}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
+		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, under: map[queue.SHA]queue.SHA{}, merges: map[queue.SHA]queue.Member{}, trunks: map[queue.SHA]bool{"trunk0": true}, seen: map[queue.SHA]bool{}, Left: map[int]string{},
+		scored: scored{Ejected: map[string]int{}}}
 	if shape.Agents > 0 {
 		s.pool, s.alone = newPool(shape, seed), newPool(shape, seed)
 	}
@@ -194,6 +212,11 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	}
 	if shape.Acts != nil {
 		s.history = newScript(shape.Acts)
+	}
+	if shape.Recorded {
+		for _, a := range shape.Acts {
+			s.now = min(s.now, a.At)
+		}
 	}
 	s.queue()
 	return s
@@ -205,7 +228,7 @@ func (s *Sim) queue() {
 		if q.At <= s.now-tick || q.At > s.now {
 			continue
 		}
-		p := &simPR{arrived: s.now, ready: s.now, queued: true, breaks: q.Breaks, clash: q.Clash, conflict: q.Conflict}
+		p := &simPR{arrived: s.now, ready: s.now, back: never, queued: true, breaks: q.Breaks, clash: q.Clash, conflict: q.Conflict}
 		p.Number, p.Head = q.Number, fmt.Sprintf("head%d", q.Number)
 		p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 		if s.shape.Stop > 0 {
@@ -285,13 +308,13 @@ func (s *Sim) clashes(parent, head queue.SHA) bool {
 
 // leftWaiting says a pull request ends the run waiting on the queue. A refusal onto the trunk
 // that only a clashing head this simulation landed makes is the simulated order's, not its
-// author's, so it still waits on the queue.
+// author's, so it still waits on the queue. A replay broken before its window leaves none.
 func (s *Sim) leftWaiting(p *simPR) bool {
 	pr := p.PR
 	if !p.conflict && p.ahead == 0 && s.clashes(s.trunk, p.Head) {
 		pr.Note = ""
 	}
-	return p.queued && !p.landed && waitsOnTheQueue(pr)
+	return s.now >= 0 && p.queued && !p.landed && waitsOnTheQueue(pr)
 }
 
 func (s *Sim) Mark(parent queue.SHA, note string) queue.SHA { return s.commit(parent, "", note, 0) }
@@ -304,7 +327,7 @@ func (s *Sim) hourly(rate float64) bool { return s.chance(rate * tick.Hours()) }
 
 func (s *Sim) arrive() *simPR {
 	s.next++
-	p := &simPR{arrived: s.now, queued: true}
+	p := &simPR{arrived: s.now, back: never, queued: true}
 	p.Number, p.Head = s.next, fmt.Sprintf("head%d", s.next)
 	p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 	var ahead []int
@@ -346,7 +369,7 @@ func (s *Sim) red(sha queue.SHA, tree map[int]bool, at time.Duration) bool {
 		if e.NeedsFix {
 			fixed := false
 			for n := range tree {
-				fixed = fixed || s.prs[n].fix == i+1
+				fixed = fixed || s.prs[n].fix == i+1 || slices.Contains(e.Fixes, n)
 			}
 			if !fixed {
 				return true
@@ -430,7 +453,7 @@ func (s *Sim) flakes() bool {
 func (s *Sim) verdict(b *simBuild) queue.Verdict {
 	tree := s.holds[b.SHA]
 	switch {
-	case s.red(b.SHA, tree, b.start), s.guilty(tree):
+	case s.red(b.SHA, tree, b.start), b.guilty:
 		return queue.Failure
 	case b.flake:
 		return queue.Failure
@@ -444,6 +467,7 @@ func (s *Sim) Step() {
 }
 
 func (s *Sim) step(at time.Duration) {
+	opens := s.now < 0 && at >= 0
 	s.now = at
 	if s.pool != nil {
 		s.pool.advance(s.now)
@@ -454,8 +478,11 @@ func (s *Sim) step(at time.Duration) {
 	}
 	s.queue()
 	s.play()
+	if opens {
+		s.open()
+	}
 	for i, e := range s.shape.Episodes {
-		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
+		if e.NeedsFix && e.Fixes == nil && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
 			p.First, p.fix, p.breaks, p.clash, p.conflict, p.ahead = true, i+1, false, 0, false, 0
 			s.say("the fix for the red trunk is queued as #%d", p.Number)
@@ -467,8 +494,8 @@ func (s *Sim) step(at time.Duration) {
 		if p.Checks == queue.Pending && s.now >= p.checksGreen {
 			p.Checks, p.ready = queue.Success, s.now
 		}
-		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
-			p.queued, p.back, p.Note = true, 0, ""
+		if !p.queued && !p.landed && !p.gone && s.now >= p.back {
+			p.queued, p.back, p.Note = true, never, ""
 			if !s.shape.Recorded {
 				p.ready = s.now
 			}
@@ -506,7 +533,7 @@ func (s *Sim) step(at time.Duration) {
 					s.RedPullRequests += len(b.Chain)
 				}
 			}
-			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), s.guilty(s.holds[sha]), b.flake)
+			s.say("  %.7s verdict %d (trunk red %v, guilty %v, flake %v)", sha, b.Verdict, s.red(sha, s.holds[sha], b.start), b.guilty, b.flake)
 		}
 	}
 	s.tick()
@@ -515,6 +542,17 @@ func (s *Sim) step(at time.Duration) {
 			if !b.Landed.IsZero() && s.epoch.Add(s.now).Sub(b.Landed) > s.cfg.Keep+10*tick {
 				s.Broken = append(s.Broken, fmt.Sprintf("keep expiry: landed build %.12s still stands past keep", b.SHA))
 			}
+		}
+	}
+}
+
+// open starts the window a recorded replay scores: what was counted before it is the lead-in's,
+// and the pull requests waiting on the queue now are those waiting at its start.
+func (s *Sim) open() {
+	s.scored = scored{Ejected: map[string]int{}}
+	for _, p := range s.prs {
+		if p.queued && waitsOnTheQueue(p.PR) {
+			s.opening++
 		}
 	}
 }
@@ -687,7 +725,7 @@ func (s *Sim) push(b queue.Build) {
 		return
 	}
 	s.seen[b.SHA] = true
-	d, flake := s.shape.Build, s.shape.Flake
+	d, flake, guilty := s.shape.Build, s.shape.Flake, s.guilty(s.holds[b.SHA])
 	if b.Kind == queue.Probe {
 		flake = s.shape.ProbeFlake
 		if s.shape.Probe > 0 {
@@ -700,20 +738,24 @@ func (s *Sim) push(b queue.Build) {
 	if s.shape.Spread > 0 {
 		d += time.Duration(float64(d) * s.shape.Spread * (2*s.rng.Float64() - 1))
 	}
-	if s.shape.Fails > 0 && b.Kind != queue.Probe && s.guilty(s.holds[b.SHA]) {
+	if s.shape.Fails > 0 && b.Kind != queue.Probe && guilty {
 		d = time.Duration(float64(d) * s.shape.Fails)
 	}
 	if s.started < len(s.shape.Takes) && s.shape.Takes[s.started] > 0 {
 		d = s.shape.Takes[s.started]
 	}
-	if len(s.shape.Times) > 0 && b.Kind != queue.Probe {
-		d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
-		if b.Kind == queue.Check && s.shape.Whole > 0 {
-			d = s.shape.Whole
+	if b.Kind != queue.Probe {
+		if fails, ok := s.failing(b.SHA); ok {
+			d = fails
+		} else if len(s.shape.Times) > 0 {
+			d = s.shape.Times[s.rng.Intn(len(s.shape.Times))]
+			if b.Kind == queue.Check && s.shape.Whole > 0 {
+				d = s.shape.Whole
+			}
 		}
 	}
 
-	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost)}
+	sb := &simBuild{Build: b, start: s.now + s.pickup(b.SHA), end: s.now + d, lost: s.chance(s.shape.Lost), guilty: guilty}
 	s.Minutes += d.Minutes()
 	if s.pool != nil {
 		sb.end = never
@@ -728,12 +770,37 @@ func (s *Sim) push(b queue.Build) {
 	} else {
 		sb.flake = s.chance(flake)
 	}
-	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || s.guilty(s.holds[b.SHA])) {
+	if s.shape.Rerun > 0 && b.Kind != queue.Probe && (sb.flake || guilty) {
 		sb.end, sb.flake = sb.end+s.shape.Rerun, sb.flake && !s.chance(s.shape.Rescued)
 		s.Minutes += s.shape.Rerun.Minutes()
 	}
 	s.started++
 	s.builds[b.SHA] = sb
+}
+
+// failing is how long a whole build of this tree takes to fail by the recorded failing times of
+// the guilty heads it holds, where it holds one the record timed. It takes one draw in place of
+// the shared sample's, the shortest of the times it picks where the tree holds more than one.
+// It leaves two things as they were: where two guilty heads failed in the same recorded build,
+// that build's time is each of theirs, and a failing time runs from push to answered.
+func (s *Sim) failing(sha queue.SHA) (time.Duration, bool) {
+	if len(s.shape.Failing) == 0 {
+		return 0, false
+	}
+	var timed [][]time.Duration
+	for _, n := range slices.Sorted(maps.Keys(s.holds[sha])) {
+		if times := s.shape.Failing[s.prs[n].Head]; s.prs[n].breaks && len(times) > 0 {
+			timed = append(timed, times)
+		}
+	}
+	if len(timed) == 0 {
+		return 0, false
+	}
+	d, draw := never, s.rng.Int63()
+	for _, times := range timed {
+		d = min(d, times[draw%int64(len(times))])
+	}
+	return d, true
 }
 
 // pickup is how long after its push the CI takes a build up: one to ten seconds, by the commit
@@ -797,15 +864,15 @@ func (s *Sim) land(a queue.Action) {
 	}
 }
 
-// Run plays ticks before Stop, or drains an unbounded shape and checks that it finishes.
+// Run plays ticks before Stop, or drains an unbounded shape and checks that it finishes. A
+// recorded replay opens at its first act, before zero where it is led into its window, and
+// scores what happens from zero on; one broken before zero scores nothing but its failure.
 func (s *Sim) Run() {
 	if s.shape.Stop > 0 {
 		if s.shape.Recorded {
 			s.play()
-			for _, p := range s.prs {
-				if p.queued && waitsOnTheQueue(p.PR) {
-					s.opening++
-				}
+			if s.now >= 0 {
+				s.open()
 			}
 			s.tick()
 		}
@@ -817,11 +884,17 @@ func (s *Sim) Run() {
 						next = min(next, acts[0].At)
 					}
 				}
+				if s.now < 0 {
+					next = min(next, 0)
+				}
 			}
 			if next >= s.shape.Stop {
 				break
 			}
 			s.step(next)
+		}
+		if s.now < 0 {
+			s.scored = scored{Ejected: map[string]int{}}
 		}
 		return
 	}
@@ -883,10 +956,22 @@ func (s *Sim) kept() bool {
 	return false
 }
 
+// unfixed is how many episodes that recorded pull requests fix are still red: none of their
+// fixes has landed.
+func (s *Sim) unfixed() int {
+	n := 0
+	for _, e := range s.shape.Episodes {
+		if e.Fixes != nil && !slices.ContainsFunc(e.Fixes, func(n int) bool { return s.prs[n] != nil && s.prs[n].landed }) {
+			n++
+		}
+	}
+	return n
+}
+
 // idle says no pull request or episode remains.
 func (s *Sim) idle() bool {
 	for _, p := range s.prs {
-		if p.queued || (p.back > 0 && !p.gone && !p.landed) {
+		if p.queued || (p.back < never && !p.gone && !p.landed) {
 			return false
 		}
 	}

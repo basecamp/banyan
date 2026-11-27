@@ -95,7 +95,8 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		trunks       = map[queue.SHA]bool{}
 		unconfirmed  = map[queue.SHA]bool{}
 		took         = map[queue.Kind][]float64{}
-		timed        = map[queue.Kind][]float64{}      // took, less the builds whose verdict was first read after an unrecorded stretch
+		timed        = map[queue.Kind][]timedBuild{}   // took, less the builds whose verdict was first read after an unrecorded stretch
+		failedBefore []timedBuild                      // the failed whole builds answered before the window, timed as timed is
 		verdicts     = map[queue.SHA][]queue.Verdict{} // each tree's whole builds, by the prefix they test
 		good         = map[queue.SHA]bool{}            // the trees a whole build passed, each prefix of its chain among them
 		waits        []time.Duration
@@ -175,14 +176,18 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				answerAt, pushedAt = b.Landed, firstPush[b.SHA]
 			}
 			answered[b.SHA] = answerAt
+			kept := (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch
+			timing := timedBuild{b.SHA, b.Verdict == queue.Failure, time.Duration(answerAt.Sub(pushedAt).Minutes() * float64(time.Minute)), answerAt}
 			if opts.contains(answerAt) {
 				took[b.Kind] = append(took[b.Kind], answerAt.Sub(pushedAt).Minutes())
-				if (!b.Landed.IsZero() && b.Landed.Before(now)) || i == 0 || now.Sub(recs[i-1].World.Now) <= unrecordedStretch {
-					timed[b.Kind] = append(timed[b.Kind], answerAt.Sub(pushedAt).Minutes())
+				if kept {
+					timed[b.Kind] = append(timed[b.Kind], timing)
 				}
 				if b.Kind == queue.Candidate {
 					candidates[b.SHA] = b
 				}
+			} else if kept && timing.failed && b.Kind != queue.Probe && opts.from != nil && answerAt.Before(*opts.from) {
+				failedBefore = append(failedBefore, timing)
 			}
 			if b.Kind != queue.Probe {
 				if opts.contains(answerAt) {
@@ -215,7 +220,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 				if ok && hadMembers[a.SHA] && !pushedAt.IsZero() && now.After(pushedAt) {
 					deleted[a.SHA] = true
 					if opts.contains(now) {
-						overtaken = append(overtaken, overtakenBuild{b.SHA, b.Kind, now.Sub(pushedAt).Minutes()})
+						overtaken = append(overtaken, overtakenBuild{b.Kind, timedBuild{b.SHA, false, time.Duration(now.Sub(pushedAt).Minutes() * float64(time.Minute)), now}})
 					}
 				}
 			case a.Do == "eject" && a.Cause == "culprit":
@@ -242,7 +247,7 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 						h = recordedHead{}
 					}
 					r := ready[h]
-					landings = append(landings, liveLanding{at: now, ready: r, sha: a.SHA})
+					landings = append(landings, liveLanding{at: now, ready: r, sha: a.SHA, member: headKey{m.Number, m.Head}, record: i})
 					if !opts.contains(now) {
 						continue
 					}
@@ -346,12 +351,10 @@ func scoreLive(dir, clone string, opts liveOptions) (Score, window, liveRow, err
 		win.stop = opts.to.Sub(*opts.from)
 		for _, o := range overtaken {
 			if _, counted := answered[o.sha]; !counted {
-				timed[o.kind] = append(timed[o.kind], o.minutes)
+				timed[o.kind] = append(timed[o.kind], o.timedBuild)
 			}
 		}
-		for _, minutes := range append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...) {
-			win.times = append(win.times, time.Duration(minutes*float64(time.Minute)))
-		}
+		win.timed, win.failedBefore = append(slices.Clone(timed[queue.Candidate]), timed[queue.Check]...), failedBefore
 		win.probe = win.build
 		if len(took[queue.Probe]) > 0 {
 			win.probe = time.Duration(percentile(took[queue.Probe], 50) * float64(time.Minute))
@@ -450,7 +453,10 @@ const unrecordedStretch = 30 * time.Minute
 // window holds the arrivals or recorded acts, CI times and settings for a replay.
 type window struct {
 	arrivals                                        []time.Duration
-	times                                           []time.Duration // a bounded window's whole builds, each as long as it took, with lower bounds for candidates still building when the queue dropped them with every member landed
+	timed                                           []timedBuild                  // a bounded window's whole builds whose time the record holds, with lower bounds for candidates still building when the queue dropped them with every member landed
+	failedBefore                                    []timedBuild                  // the same of the failed ones answered before it
+	times                                           []time.Duration               // the same, each as long as it took, less those a guilty head failed
+	failing                                         map[queue.SHA][]time.Duration // each guilty head's failed builds among both, answered from the replay's opening record on, each as long as it took
 	acts                                            []Act
 	unblamedRedCandidates, candidatesWithoutCulprit int
 	opening, left, withdrawn, settings              int
@@ -458,11 +464,24 @@ type window struct {
 	clashing                                        map[queue.SHA]map[queue.SHA]bool
 	clashingPairs                                   *int
 	unattributed, unconfirmedDepartures             int
+	unejectedGuilty                                 int
+	episodes                                        []Episode     // the red trunks the replay plays, from where it opens
+	unplayed                                        int           // the red trunks no fix ends that overlap the window, which the replay does not play
+	unplayedFor                                     time.Duration // the time they overlap it
 	flake, errored                                  float64
 	build                                           time.Duration
 	probe                                           time.Duration
 	stop                                            time.Duration
 	cfg                                             queue.Config
+}
+
+// timedBuild is a whole build whose time the record holds, whether it failed, and when it was
+// answered, or for a candidate overtaken while building, when the record planned its delete.
+type timedBuild struct {
+	sha      queue.SHA
+	failed   bool
+	took     time.Duration
+	answered time.Time
 }
 
 // perturb changes only the replay's build times or recorded settings.
@@ -482,6 +501,13 @@ func (w window) perturb(name string) (window, error) {
 		for i := range w.times {
 			w.times[i] = scale(w.times[i])
 		}
+		failing := map[queue.SHA][]time.Duration{}
+		for head, times := range w.failing {
+			for _, d := range times {
+				failing[head] = append(failing[head], scale(d))
+			}
+		}
+		w.failing = failing
 	case "one-slot", "no-batch":
 		change := func(c queue.Config) queue.Config {
 			if name == "one-slot" {
@@ -520,10 +546,10 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 		shape.Agents, shape.Lost, shape.Flake, shape.Errored = 0, 0, w.flake, w.errored
 		shape.Outside, shape.Race, shape.Crash = 0, 0, 0
 		shape.ProbeFlake, shape.Spread, shape.Fails = 0, 0, 0
-		shape.Episodes, shape.Script, shape.Takes = nil, nil, nil
+		shape.Episodes, shape.Script, shape.Takes = w.episodes, nil, nil
 		shape.Rerun, shape.Rescued, shape.Whole = 0, 0, 0
 		shape.Times, shape.Probe = w.times, w.probe
-		shape.Clashing = w.clashing
+		shape.Clashing, shape.Failing = w.clashing, w.failing
 	} else if was.Good > 0 {
 		shape.Flake = float64(was.Flaked) / float64(was.Good)
 	}
@@ -531,7 +557,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 	var waits, labelled, ejects []float64
 	var added []float64
 	whole, wrong, hours := 0, 0, 0.0
-	probes, red, causes, left, opening, failures := 0, 0, 0, 0, 0, 0
+	probes, red, causes, left, opening, failures, unfixed := 0, 0, 0, 0, 0, 0, 0
 	redCandidates, redPullRequests, over30 := 0, 0, 0
 	for _, s := range each(seeds, func(i int) *Sim {
 		world, rng := shape, rand.New(rand.NewSource(int64(i)))
@@ -561,10 +587,14 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 				left++
 			}
 		}
+		unfixed += s.unfixed()
 		waits, labelled, ejects = append(waits, s.Waits...), append(labelled, s.Labelled...), append(ejects, s.Ejects...)
 	}
 	if sc.Landed > 0 {
-		sc.Wrong, sc.Builds, sc.PerHour = 1000*float64(wrong)/float64(sc.Landed), float64(whole)/float64(sc.Landed), float64(sc.Landed)/hours
+		sc.Wrong, sc.Builds = 1000*float64(wrong)/float64(sc.Landed), float64(whole)/float64(sc.Landed)
+		if hours > 0 {
+			sc.PerHour = float64(sc.Landed) / hours
+		}
 		if w.stop > 0 {
 			probe := shape.Probe
 			if probe == 0 {
@@ -585,10 +615,12 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 			QueueAddedP50Minutes: median(added), QueueAddedP90Minutes: quantile(added, 90), QueueAddedOver30: float64(over30) / seeds,
 			RedCandidates: float64(redCandidates) / seeds, RedPullRequests: float64(redPullRequests) / seeds,
 			UnblamedRedCandidates: w.unblamedRedCandidates, CandidatesWithoutACulprit: w.candidatesWithoutCulprit,
-			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
+			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, UnejectedGuiltyHeads: w.unejectedGuilty, RedTrunkSpans: len(w.episodes), UnfixedRedTrunkSpans: float64(unfixed) / seeds, UnplayedRedTrunkSpans: w.unplayed, UnplayedRedTrunkMinutes: w.unplayedFor.Minutes(), DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
 		}
 		for _, a := range w.acts {
-			comparison.Acts[a.Do]++
+			if a.At >= 0 {
+				comparison.Acts[a.Do]++
+			}
 		}
 		if len(waits) > 0 {
 			comparison.WaitP50Minutes, comparison.WaitP90Minutes = number(sc.WaitP50*shape.Build.Minutes()), number(sc.WaitP90*shape.Build.Minutes())
@@ -623,9 +655,8 @@ func planAgain(path string) error {
 }
 
 type overtakenBuild struct {
-	sha     queue.SHA
-	kind    queue.Kind
-	minutes float64
+	kind queue.Kind
+	timedBuild
 }
 
 // buildingOnLandedChain says whether the record plans to delete a candidate still building, not

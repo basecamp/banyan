@@ -100,6 +100,11 @@ type simulatedMeasures struct {
 	UnblamedRedCandidates            int            `json:"unblamed_red_candidates"`
 	CandidatesWithoutACulprit        int            `json:"candidates_without_a_culprit"`
 	CulpritsUnattributed             int            `json:"culprits_unattributed"`
+	UnejectedGuiltyHeads             int            `json:"unejected_guilty_heads"`
+	RedTrunkSpans                    int            `json:"red_trunk_spans"`
+	UnfixedRedTrunkSpans             float64        `json:"unfixed_red_trunk_spans"`
+	UnplayedRedTrunkSpans            int            `json:"unplayed_red_trunk_spans"`
+	UnplayedRedTrunkMinutes          float64        `json:"unplayed_red_trunk_minutes"`
 	DeparturesAfterAnUnconfirmedPlan int            `json:"departures_after_an_unconfirmed_plan"`
 	InvariantFailures                int            `json:"invariant_failures"`
 	WaitingAtOpen                    float64        `json:"waiting_at_open"`
@@ -130,6 +135,14 @@ type liveMeasures struct {
 	QueueAddedSumMinutes         *float64   `json:"queue_added_sum_minutes"`
 	QueueAddedOver30             int        `json:"queue_added_over_30"`
 	QueueAddedOver30SumMinutes   *float64   `json:"queue_added_over_30_sum_minutes"`
+	FirstCandidateP90Minutes     *float64   `json:"first_candidate_p90_minutes"`
+	FirstCandidateOver30         int        `json:"first_candidate_over_30"`
+	HeldFirstWaited              int        `json:"held_first_waited"`
+	HeldFirstFailed              int        `json:"held_first_failed"`
+	HeldFirstDropped             int        `json:"held_first_dropped"`
+	HeldFirstPassed              int        `json:"held_first_passed"`
+	HeldFirstOvertaken           int        `json:"held_first_overtaken"`
+	HeldFirstOther               int        `json:"held_first_other"`
 	LandingBuildMedianMinutes    *float64   `json:"landing_build_median_minutes"`
 	SplitReadyToLandedP50Minutes *float64   `json:"split_ready_to_landed_p50_minutes"`
 	SplitReadyToLandedP90Minutes *float64   `json:"split_ready_to_landed_p90_minutes"`
@@ -182,10 +195,13 @@ type recordedHead struct {
 type liveLanding struct {
 	at, ready time.Time
 	sha       queue.SHA
+	member    headKey
+	record    int // the index of the record that planned it
 }
 
 type landingParts struct {
 	added, build, toLand, total float64
+	landing                     liveLanding
 }
 
 func (opts liveOptions) contains(at time.Time) bool {
@@ -229,7 +245,7 @@ func splitLive(recs []queue.Recording, landings []liveLanding, opts liveOptions)
 			skipped++
 			continue
 		}
-		rows = append(rows, landingParts{p.Sub(r).Minutes(), v.Sub(p).Minutes(), end.Sub(v).Minutes(), end.Sub(r).Minutes()})
+		rows = append(rows, landingParts{p.Sub(r).Minutes(), v.Sub(p).Minutes(), end.Sub(v).Minutes(), end.Sub(r).Minutes(), l})
 	}
 	return rows, skipped
 }
@@ -355,6 +371,39 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 	if len(rows) > 0 {
 		m.QueueAddedSumMinutes, m.QueueAddedOver30SumMinutes = number(sum), number(over30)
 	}
+	reads := readCandidates(recs)
+	var firsts []float64
+	for _, r := range rows {
+		first, minutes := reads.first(r, pushes)
+		firsts = append(firsts, minutes)
+		if minutes > 30 {
+			m.FirstCandidateOver30++
+		}
+		if r.added <= 30 {
+			continue
+		}
+		red, wasRed := reads.red[first]
+		deleted, wasDropped := reads.dropped[first]
+		passed, didPass := reads.passed[first]
+		building := slices.ContainsFunc(recs[r.landing.record].World.Builds, func(b queue.Build) bool {
+			return b.Kind == queue.Candidate && b.SHA == first && b.Verdict == queue.Pending
+		})
+		switch {
+		case minutes > 30:
+			m.HeldFirstWaited++
+		case wasRed && red <= r.landing.record:
+			m.HeldFirstFailed++
+		case wasDropped && deleted <= r.landing.record:
+			m.HeldFirstDropped++
+		case didPass && passed < r.landing.record:
+			m.HeldFirstPassed++
+		case didPass && passed == r.landing.record || building:
+			m.HeldFirstOvertaken++
+		default:
+			m.HeldFirstOther++
+		}
+	}
+	m.FirstCandidateP90Minutes = quantile(firsts, 90)
 
 	var times []time.Time
 	for _, l := range landings {
@@ -463,6 +512,80 @@ func measureLive(recs []queue.Recording, opts liveOptions, landings []liveLandin
 	return m
 }
 
+// candidateReads holds, for the candidates the records show, which pull requests at which heads
+// each chain holds, in the order the records first show them, the first record that read each
+// red, the first that read each passing, and the first record that deleted each while the last
+// world to show it as a candidate read it pending.
+type candidateReads struct {
+	holders map[headKey][]queue.SHA
+	red     map[queue.SHA]int
+	passed  map[queue.SHA]int
+	dropped map[queue.SHA]int
+}
+
+func readCandidates(recs []queue.Recording) candidateReads {
+	c := candidateReads{holders: map[headKey][]queue.SHA{}, red: map[queue.SHA]int{}, passed: map[queue.SHA]int{}, dropped: map[queue.SHA]int{}}
+	held := map[headKey]map[queue.SHA]bool{}
+	hold := func(b queue.Build) {
+		if b.Kind != queue.Candidate {
+			return
+		}
+		for _, m := range b.Chain {
+			key := headKey{m.Number, m.Head}
+			if held[key] == nil {
+				held[key] = map[queue.SHA]bool{}
+			}
+			if !held[key][b.SHA] {
+				held[key][b.SHA] = true
+				c.holders[key] = append(c.holders[key], b.SHA)
+			}
+		}
+	}
+	pending := map[queue.SHA]bool{}
+	for i, rec := range recs {
+		read := map[queue.SHA]bool{}
+		for _, b := range rec.World.Builds {
+			if b.Kind != queue.Candidate {
+				continue
+			}
+			hold(b)
+			if _, ok := c.red[b.SHA]; !ok && (b.Verdict == queue.Failure || b.Verdict == queue.Error) {
+				c.red[b.SHA] = i
+			}
+			if _, ok := c.passed[b.SHA]; !ok && b.Verdict == queue.Success {
+				c.passed[b.SHA] = i
+			}
+			pending[b.SHA] = read[b.SHA] && pending[b.SHA] || b.Verdict == queue.Pending
+			read[b.SHA] = true
+		}
+		for _, a := range rec.Actions {
+			switch a.Do {
+			case "push":
+				hold(a.Build)
+			case "delete":
+				if _, ok := c.dropped[a.SHA]; !ok && pending[a.SHA] {
+					c.dropped[a.SHA] = i
+				}
+			}
+		}
+	}
+	return c
+}
+
+// first is a split landing's first candidate: of the candidates whose chain holds the pull
+// request at the head that landed, the one pushed earliest and no later than the landing
+// candidate, which it is itself when no other was pushed sooner. Its minutes run from ready to
+// that push, between 0 and the minutes the queue added.
+func (c candidateReads) first(r landingParts, pushes map[queue.SHA]time.Time) (queue.SHA, float64) {
+	first, at := r.landing.sha, pushes[r.landing.sha]
+	for _, sha := range c.holders[r.landing.member] {
+		if pushed := pushes[sha]; !pushed.IsZero() && pushed.Before(at) {
+			first, at = sha, pushed
+		}
+	}
+	return first, min(max(at.Sub(r.landing.ready).Minutes(), 0), r.added)
+}
+
 func throwReasons(prs []queue.PR, chain []queue.Member) (moved, left bool) {
 	heads := map[int]queue.SHA{}
 	for _, pr := range prs {
@@ -536,7 +659,9 @@ func longestBacklog(recs []queue.Recording, opts liveOptions) time.Duration {
 
 // backlogged says that after the record's own actions a pull request that could be built is in
 // no pending candidate or push, and every slot is held by a pending candidate or a candidate's
-// push. A round's probes and checks run beside the slots, as the engine counts them.
+// push. A round's probes and checks run beside the slots, and so does a candidate the engine
+// reads as no longer building: one marked landed while landed builds are kept, and one pending
+// longer than the timeout, which it builds again.
 func backlogged(rec queue.Recording) bool {
 	deleted, taken, ejected, notes := map[queue.SHA]bool{}, map[headKey]bool{}, map[int]bool{}, map[int]string{}
 	held, started := 0, map[headKey]bool{}
@@ -562,7 +687,9 @@ func backlogged(rec queue.Recording) bool {
 		}
 	}
 	for _, b := range rec.World.Builds {
-		if b.Verdict == queue.Pending && b.Kind == queue.Candidate && !deleted[b.SHA] {
+		kept := rec.Config.Keep > 0 && !b.Landed.IsZero()
+		late := rec.Config.Timeout > 0 && rec.World.Now.Sub(b.Pushed) > rec.Config.Timeout
+		if b.Verdict == queue.Pending && b.Kind == queue.Candidate && !deleted[b.SHA] && !kept && !late {
 			held++
 			for _, m := range b.Chain {
 				started[headKey{m.Number, m.Head}] = true
