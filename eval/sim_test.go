@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -295,25 +296,38 @@ func TestTheSimulatorReadsABuildAgainstTheTrunkAsGitDoes(t *testing.T) {
 	}
 }
 
-// The second to arrive is queued before the first, which clashes with it.
-func TestTheSimulatorJudgesAClashByQueueOrder(t *testing.T) {
+// The second to arrive clashes with the first and is taken out on a pass and two failures.
+func TestTheSimulatorJudgesAClashByTheFailedEvidence(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		later bool
-		want  bool
+		name    string
+		besides bool
+		want    bool
 	}{
-		{"the later taken out", true, true},
-		{"the earlier taken out with the later ready behind it", false, false},
+		{"taken out on evidence that held the other", true, true},
+		{"taken out on evidence that never held the other", false, false},
 	} {
 		s := NewSim(shapes[0], dials(5, 2, false), 1)
 		one, two := s.arrive(), s.arrive()
 		for _, p := range []*simPR{one, two} {
 			p.breaks, p.clash, p.conflict, p.ahead, p.Checks, p.Wait = false, 0, false, 0, queue.Success, ""
 		}
-		one.clash, one.Queued = two.Number, two.Queued.Add(time.Minute)
-		out := map[bool]*simPR{true: one, false: two}[tc.later]
-		out.queued = false
-		if got := s.culprit(out); got != tc.want {
+		two.clash, two.queued = one.Number, false
+		without := map[int]bool{}
+		if tc.besides {
+			without[one.Number] = true
+		}
+		evidence := []queue.SHA{"pass", "red1", "red2"}
+		for i, sha := range evidence {
+			b := &simBuild{Build: queue.Build{SHA: sha, Kind: queue.Probe, Verdict: queue.Failure}, start: time.Duration(i-1) * time.Minute}
+			s.holds[sha] = maps.Clone(without)
+			if i == 0 {
+				b.Verdict = queue.Success
+			} else {
+				s.holds[sha][two.Number] = true
+			}
+			s.builds[sha] = b
+		}
+		if got := s.culprit(queue.Action{Do: "eject", PR: two.Number, Cause: "culprit", Evidence: evidence}); got != tc.want {
 			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
 		}
 	}

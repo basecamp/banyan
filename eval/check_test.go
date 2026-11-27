@@ -237,8 +237,7 @@ func TestCheckerKillsAllInvariants(t *testing.T) {
 }
 
 func TestCheckerCurrentPlanner(t *testing.T) {
-	worlds := slices.DeleteFunc(defaultWorlds(), func(w checkWorld) bool { return slices.Contains(clashSetFirst, w.Name) })
-	sum := checkSuite(worlds, mutant{plan: queue.Plan, verify: queue.Verify})
+	sum := checkSuite(defaultWorlds(), mutant{plan: queue.Plan, verify: queue.Verify})
 	t.Logf("current queue.Plan: %d of %d whole, %d capped, %d states, %d broken",
 		sum.whole, sum.worlds, sum.capped, sum.states, sum.brokenWorlds)
 	for _, inv := range sum.brokenInvs {
@@ -1134,68 +1133,32 @@ func TestCheckerCulpritPRWithNeeds(t *testing.T) {
 		{"the one it needs is ahead and its checks run", checkedPR{number: 2, queued: true, order: 2, checks: queue.Pending}, true},
 		{"the one it needs is gone", checkedPR{number: 2}, true},
 	} {
-		if got := culpritPR(3, []checkedPR{{number: 1, queued: true, order: 1, checks: queue.Success}, tc.needed, needing}); got != tc.want {
+		if got := culpritPR(3, []checkedPR{{number: 1, queued: true, order: 1, checks: queue.Success}, tc.needed, needing}, nil); got != tc.want {
 			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
 
-// #2 needs #1, which has landed, and #3 clashes with #2.
+// #2 needs #1, which has landed, and #3 clashes with #2. Each failed build of the evidence holds
+// #2 and #1, and #3 only where it was built with #2.
 func TestCheckerCulpritPRWithAClashBesideANeed(t *testing.T) {
 	needing := checkedPR{number: 2, needs: 1, queued: true, order: 2, checks: queue.Success}
+	alone := []checkedBuild{{verdict: queue.Failure, holds: map[int]bool{1: true, 2: true}}}
+	beside := []checkedBuild{{verdict: queue.Failure, holds: map[int]bool{1: true, 2: true, 3: true}}}
 	for _, tc := range []struct {
 		name     string
 		clashing checkedPR
+		failed   []checkedBuild
 		want     bool
 	}{
-		{"the clashing one is held", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success, wait: "it is labelled hold"}, false},
-		{"the clashing one is ready behind", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success}, false},
-		{"the clashing one is ready ahead", checkedPR{number: 3, clash: 2, queued: true, first: true, order: 3, checks: queue.Success}, true},
-		{"the clashing one landed", checkedPR{number: 3, clash: 2, landed: true}, true},
+		{"held and never built with it", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success, wait: "it is labelled hold"}, alone, false},
+		{"ready behind and never built with it", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success}, alone, false},
+		{"in a failed build and still queued", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success}, beside, true},
+		{"landed", checkedPR{number: 3, clash: 2, landed: true}, alone, true},
+		{"in a failed build and gone", checkedPR{number: 3, clash: 2}, beside, false},
 	} {
-		if got := culpritPR(2, []checkedPR{{number: 1, landed: true}, needing, tc.clashing}); got != tc.want {
+		if got := culpritPR(2, []checkedPR{{number: 1, landed: true}, needing, tc.clashing}, tc.failed); got != tc.want {
 			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-var clashSetFirst = []string{"2 PRs moves+outside (clash, 2 of 2)", "2 PRs gather moves+outside (clash)"}
-
-// #2 clashes with #1 and is set to go first after the two were built together. #2 is ejected on
-// evidence that holds #1 beside it in every failed build, and #1 lands in the same tick, yet #1 is
-// not ahead of #2 when #2 leaves.
-func TestCheckerCurrentPlannerEjectsAClashingPullRequestSetFirst(t *testing.T) {
-	m := mutant{plan: queue.Plan, verify: queue.Verify}
-	for _, name := range clashSetFirst {
-		w, ok := findWorld(name)
-		if !ok {
-			t.Fatalf("missing world %s", name)
-		}
-		res := explore(w, m)
-		if res.Broken != "invariant 3: #2 is innocent and was ejected with no flake in play" {
-			t.Errorf("%s: broken %q, want #2 innocent on invariant 3", w.Name, res.Broken)
-			continue
-		}
-		eject, ok := ejectRead(newChecker(w, m), res.Trace, 2)
-		if !ok {
-			t.Errorf("%s: no read ejects #2:\n%s", w.Name, formatCounterexample(w, m, res))
-			continue
-		}
-		pr := eject.world.PRs[slices.IndexFunc(eject.world.PRs, func(p queue.PR) bool { return p.Number == 2 })]
-		if !pr.First || !slices.ContainsFunc(eject.world.PRs, func(p queue.PR) bool { return p.Number == 1 && !p.First }) {
-			t.Errorf("%s: #2 first %v at its ejection, want #2 first and #1 queued behind it", w.Name, pr.First)
-		}
-		at := slices.IndexFunc(eject.actions, func(a queue.Action) bool { return a.Do == "eject" && a.PR == 2 })
-		for _, sha := range eject.actions[at].Evidence[1:] {
-			b := eject.world.Builds[slices.IndexFunc(eject.world.Builds, func(b queue.Build) bool { return b.SHA == sha })]
-			if !slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return m.Number == 1 }) {
-				t.Errorf("%s: evidence %.7s does not hold #1 beside #2", w.Name, sha)
-			}
-		}
-		if !slices.ContainsFunc(eject.actions[at+1:], func(a queue.Action) bool {
-			return a.Do == "land" && slices.ContainsFunc(a.Members, func(m queue.Member) bool { return m.Number == 1 })
-		}) {
-			t.Errorf("%s: #1 does not land in the tick that ejects #2", w.Name)
 		}
 	}
 }

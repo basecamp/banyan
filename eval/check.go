@@ -24,7 +24,7 @@ type checkedPR struct {
 	queued bool
 	landed bool
 	first  bool
-	order  int64
+	order  uint8
 	checks queue.Verdict
 	wait   string
 }
@@ -41,7 +41,7 @@ func brokeMsg(n int, format string, args ...any) string {
 	return fmt.Sprintf("invariant %d: %s", n, fmt.Sprintf(format, args...))
 }
 
-func culpritPR(number int, prs []checkedPR) bool {
+func culpritPR(number int, prs []checkedPR, failed []checkedBuild) bool {
 	idx := slices.IndexFunc(prs, func(p checkedPR) bool { return p.number == number })
 	if idx < 0 {
 		return false
@@ -57,7 +57,7 @@ func culpritPR(number int, prs []checkedPR) bool {
 		}
 	}
 	for _, o := range prs {
-		if (o.number == pr.clash || o.clash == number) && (o.landed || readyAhead(o, pr)) {
+		if (o.number == pr.clash || o.clash == number) && (o.landed || o.queued && slices.ContainsFunc(failed, func(b checkedBuild) bool { return b.holds[o.number] })) {
 			return true
 		}
 	}
@@ -80,26 +80,9 @@ func readyAhead(a, b checkedPR) bool {
 // each build: the first is a build that passed without it, and among the rest are two builds
 // of that tree with it that failed, one begun no later than the pass and one no earlier.
 func fairTest(a queue.Action, built func(queue.SHA) (checkedBuild, bool)) bool {
-	if len(a.Evidence) == 0 {
-		return false
-	}
-	pass, ok := built(a.Evidence[0])
-	if !ok {
-		return false
-	}
-	without := pass.holds
-	var failed, before, after int
-	for _, sha := range a.Evidence[1:] {
-		b, ok := built(sha)
-		with := b.holds
-		same := ok && b.verdict == queue.Failure && with[a.PR] && len(with) == len(without)+1
-		for n := range without {
-			same = same && with[n]
-		}
-		if !same {
-			continue
-		}
-		failed++
+	pass, failed, ok := fairEvidence(a, built)
+	var before, after int
+	for _, b := range failed {
 		if b.start <= pass.start {
 			before++
 		}
@@ -107,7 +90,33 @@ func fairTest(a queue.Action, built func(queue.SHA) (checkedBuild, bool)) bool {
 			after++
 		}
 	}
-	return pass.verdict == queue.Success && !without[a.PR] && failed >= 2 && before >= 1 && after >= 1
+	return ok && pass.verdict == queue.Success && !pass.holds[a.PR] && len(failed) >= 2 && before >= 1 && after >= 1
+}
+
+// fairEvidence splits an ejection's evidence into its first build, the pass without it, and
+// the builds after that failed holding it beside exactly the pass's pull requests.
+func fairEvidence(a queue.Action, built func(queue.SHA) (checkedBuild, bool)) (checkedBuild, []checkedBuild, bool) {
+	if len(a.Evidence) == 0 {
+		return checkedBuild{}, nil, false
+	}
+	pass, ok := built(a.Evidence[0])
+	if !ok {
+		return checkedBuild{}, nil, false
+	}
+	without := pass.holds
+	var failed []checkedBuild
+	for _, sha := range a.Evidence[1:] {
+		b, ok := built(sha)
+		with := b.holds
+		same := ok && b.verdict == queue.Failure && with[a.PR] && len(with) == len(without)+1
+		for n := range without {
+			same = same && with[n]
+		}
+		if same {
+			failed = append(failed, b)
+		}
+	}
+	return pass, failed, true
 }
 
 func checkPass(pass int, acts []queue.Action) string {
@@ -900,7 +909,7 @@ func (c *checker) checkedPull(s *worldState, number int) checkedPR {
 	return checkedPR{
 		number: number, head: p.head(number, p.githubHead),
 		breaks: c.world.Pulls[number-1].Breaks, clash: c.world.Pulls[number-1].Clash, needs: c.world.Pulls[number-1].Needs,
-		queued: p.queued && !landed && !p.merged, landed: landed, first: p.first, order: int64(p.order),
+		queued: p.queued && !landed && !p.merged, landed: landed, first: p.first, order: p.order,
 		checks: p.checks, wait: p.waitReason(),
 	}
 }
@@ -1140,9 +1149,11 @@ func (t *checkTick) delete(a queue.Action) bool {
 }
 
 func (t *checkTick) eject(pulls map[int]pullRequest, a queue.Action) (string, bool) {
-	culprit := a.Cause == "culprit" && culpritPR(a.PR, t.c.drainPulls(t.state))
+	built := t.c.checkedBuild(t.state)
+	_, failed, _ := fairEvidence(a, built)
+	culprit := a.Cause == "culprit" && culpritPR(a.PR, t.c.drainPulls(t.state), failed)
 	flaked := t.state.flaked || t.state.episodes > 1
-	if broken := checkEject(a, culprit, flaked, t.c.checkedBuild(t.state)); len(broken) > 0 {
+	if broken := checkEject(a, culprit, flaked, built); len(broken) > 0 {
 		return strings.Join(broken, "; "), false
 	}
 	pr, ok := pulls[a.PR]

@@ -400,7 +400,7 @@ func (s *Sim) checkedPR(n int) checkedPR {
 	if p == nil {
 		return checkedPR{number: n}
 	}
-	return checkedPR{number: p.Number, head: p.Head, breaks: p.breaks, clash: p.clash, queued: p.queued, landed: p.landed, first: p.First, order: p.Queued.UnixNano(), checks: p.Checks, wait: p.Wait}
+	return checkedPR{number: p.Number, head: p.Head, breaks: p.breaks, clash: p.clash, queued: p.queued, landed: p.landed, checks: p.Checks, wait: p.Wait}
 }
 
 func (s *Sim) checkedPRs() []checkedPR {
@@ -427,11 +427,12 @@ func (s *Sim) checkedBuild(sha queue.SHA) (checkedBuild, bool) {
 	return checkedBuild{kind: b.Kind, verdict: b.Verdict, start: int64(b.start), holds: s.holds[sha], heads: heads}, true
 }
 
-// culprit says whether ejecting this pull request for a red build is right: it breaks the
-// build alone, or it is one of a pair that clash and the other has landed or is ready and queued
-// ahead of it.
-func (s *Sim) culprit(p *simPR) bool {
-	return culpritPR(p.Number, s.checkedPRs())
+// culprit says whether ejecting a pull request for a red build is right: it breaks the build
+// alone, or it is one of a pair that clash and the other has landed or is still queued and was
+// in a build of the ejection's evidence that failed with it.
+func (s *Sim) culprit(a queue.Action) bool {
+	_, failed, _ := fairEvidence(a, s.checkedBuild)
+	return culpritPR(a.PR, s.checkedPRs(), failed)
 }
 
 // agent is where in the pool a build lands, from 0 to 1, by the commit alone.
@@ -849,7 +850,7 @@ func (s *Sim) eject(a queue.Action) {
 	p.queued = false
 	s.Ejected[a.Cause]++
 	s.Left[a.PR] = a.Cause
-	culprit := a.Cause == "culprit" && s.culprit(p)
+	culprit := a.Cause == "culprit" && s.culprit(a)
 	s.Broken = append(s.Broken, checkEject(a, culprit, s.flakes(), s.checkedBuild)...)
 	if a.Cause != "culprit" {
 		return
