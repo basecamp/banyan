@@ -34,6 +34,7 @@ type Config struct {
 	Probe    string   `json:"probe"`    // the context that judges a probe; without one there are no probes
 	Admit    []string `json:"admit"`    // the contexts a pull request's head must pass to join the chain
 	Threads  bool     `json:"threads"`  // an unresolved review thread keeps a pull request out
+	Reviews  bool     `json:"reviews"`  // a writer's latest review that requests changes keeps a pull request out
 	Message  string   `json:"message"`  // description: a merge says the pull request's title and description, not GitHub's first line
 	Reword   string   `json:"reword"`   // a pattern no title or description a merge says may hold
 	Cancels  bool     `json:"cancels"`  // CI stops a build whose branch is deleted
@@ -112,7 +113,7 @@ func Load(path string) (Config, error) {
 
 func (c Config) names() github.Names {
 	n := github.Names{Trunk: c.Trunk, Label: c.Label, First: c.First, Hold: c.Hold, Status: c.Status,
-		Admit: c.Admit, App: c.App, Threads: c.Threads, Message: c.Message == "description"}
+		Admit: c.Admit, App: c.App, Threads: c.Threads, Reviews: c.Reviews, Message: c.Message == "description"}
 	if c.Reword != "" {
 		n.Reword = regexp.MustCompile(c.Reword)
 	}

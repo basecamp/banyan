@@ -60,6 +60,8 @@ type pull struct {
 	// holds past the page it returns.
 	threads []bool
 	unread  int
+	// reviews is each writer's latest review that approves or requests changes, by its state.
+	reviews []string
 }
 
 type labelEvent struct {
@@ -110,7 +112,10 @@ func (h *hub) last(sha, context string) status {
 
 func (h *hub) node(p *pull) map[string]any {
 	var labels, commits []any
-	threads := []any{}
+	threads, reviews := []any{}, []any{}
+	for _, state := range p.reviews {
+		reviews = append(reviews, map[string]any{"state": state})
+	}
 	for _, resolved := range p.threads {
 		threads = append(threads, map[string]any{"isResolved": resolved})
 	}
@@ -123,7 +128,8 @@ func (h *hub) node(p *pull) map[string]any {
 	return map[string]any{"number": p.number, "title": p.title, "body": p.body, "isDraft": p.draft, "merged": p.merged, "closed": p.merged, "baseRefName": p.base, "isCrossRepository": p.crossRepo,
 		"headRefName": fmt.Sprintf("pr%d", p.number), "headRepositoryOwner": map[string]any{"login": "o"},
 		"headRefOid": p.heads[len(p.heads)-1], "labels": map[string]any{"nodes": labels}, "timelineItems": h.timeline(p, 50, ""),
-		"reviewThreads": map[string]any{"totalCount": len(p.threads) + p.unread, "nodes": threads}, "commits": map[string]any{"nodes": commits}}
+		"reviewThreads":            map[string]any{"totalCount": len(p.threads) + p.unread, "nodes": threads},
+		"latestOpinionatedReviews": map[string]any{"nodes": reviews}, "commits": map[string]any{"nodes": commits}}
 }
 
 func (h *hub) timeline(p *pull, last int, before string) map[string]any {
@@ -984,6 +990,21 @@ func TestAnUnresolvedThreadKeepsAPullRequestOutAndSoDoThreadsTheQueueCannotRead(
 	w.rounds(3)
 	if !w.landed(1) || w.landed(2) {
 		t.Errorf("landed: resolved %v, unread %v\n%s", w.landed(1), w.landed(2), w.log)
+	}
+}
+
+func TestAReviewThatRequestsChangesKeepsAPullRequestOutUntilItsReviewerApproves(t *testing.T) {
+	w := newWorld(t, `{"reviews": true, "threads": true}`)
+	p := w.queue(1, "a", "1\n")
+	p.reviews = []string{"APPROVED", "CHANGES_REQUESTED"}
+	w.rounds(3)
+	if s := w.last(p.heads[0], "merge-queue"); s.Description != "waits: a review requests changes" || w.landed(1) {
+		t.Errorf("#1 says %q and landed %v\n%s", s.Description, w.landed(1), w.log)
+	}
+	p.reviews[1] = "APPROVED"
+	w.rounds(3)
+	if !w.landed(1) {
+		t.Errorf("#1 never landed once its reviewer approved\n%s", w.log)
 	}
 }
 

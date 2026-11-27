@@ -293,6 +293,7 @@ type Names struct {
 	Admit   []string // the contexts a head must pass before it joins the chain
 	App     int      // the GitHub App whose check runs alone answer for every context but the queue's own status
 	Threads bool     // whether an unresolved review thread keeps it out
+	Reviews bool     // whether a writer's latest review that requests changes keeps it out
 	// Message says a merge carries the pull request's title and description, and Reword is
 	// what neither may then hold.
 	Message bool
@@ -375,6 +376,9 @@ type pullNode struct {
 		TotalCount int
 		Nodes      []struct{ IsResolved bool }
 	}
+	Reviews struct {
+		Nodes []struct{ State string }
+	} `json:"latestOpinionatedReviews"`
 	Commits struct {
 		Nodes []struct {
 			Commit struct {
@@ -389,7 +393,12 @@ const timelineFields = `pageInfo { hasPreviousPage startCursor } nodes {
 	... on LabeledEvent { createdAt label { name } } }`
 
 func (n Names) pullFields() string {
-	return `number title body isDraft merged isCrossRepository baseRefName headRefOid headRefName headRepositoryOwner { login }
+	reviews := ""
+	if n.Reviews {
+		// Each writer's latest review that approves or requests changes.
+		reviews = "latestOpinionatedReviews(first: 100, writersOnly: true) { nodes { state } }"
+	}
+	return reviews + ` number title body isDraft merged isCrossRepository baseRefName headRefOid headRefName headRepositoryOwner { login }
 	labels(first: 100) { nodes { name } }
 	timelineItems(last: 50, itemTypes: [LABELED_EVENT]) { ` + timelineFields + ` }
 	reviewThreads(first: 100) { totalCount nodes { isResolved } }
@@ -436,6 +445,10 @@ func (n Names) pull(node pullNode) Pull {
 		p.Message = message(node.Title, node.Body)
 		unfit = n.unfit(p.Message)
 	}
+	requested := false
+	for _, r := range node.Reviews.Nodes {
+		requested = requested || r.State == "CHANGES_REQUESTED"
+	}
 	switch open := 0; {
 	case labels[n.Hold]:
 		p.Wait = "it is labelled " + n.Hold
@@ -445,6 +458,8 @@ func (n Names) pull(node pullNode) Pull {
 		p.Wait = "its base is " + node.BaseRefName + ", not " + n.Trunk
 	case unfit != "":
 		p.Wait = "its title or description " + unfit + "; reword it"
+	case n.Reviews && requested:
+		p.Wait = "a review requests changes"
 	case n.Threads:
 		for _, t := range node.ReviewThreads.Nodes {
 			if !t.IsResolved {
