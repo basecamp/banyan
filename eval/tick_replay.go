@@ -81,14 +81,14 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	opens := min(max(recs[firstIndex].World.Now.Sub(start), -leadIn), 0)
-	w.episodes = nil
+	w.episodes, w.unplayed = nil, 0
 	for _, span := range spans {
-		if at, until := max(span.from.Sub(start), opens), span.until.Sub(start); until > at && at < w.stop {
-			e := Episode{At: at, For: until - at}
-			if span.fixes != nil {
-				e = Episode{At: at, NeedsFix: true, Fixes: span.fixes}
-			}
-			w.episodes = append(w.episodes, e)
+		at, until := max(span.from.Sub(start), opens), span.until.Sub(start)
+		switch {
+		case span.fixes == nil && until > 0 && at < w.stop:
+			w.unplayed++
+		case span.fixes != nil && until > at && at < w.stop:
+			w.episodes = append(w.episodes, Episode{At: at, NeedsFix: true, Fixes: span.fixes})
 		}
 	}
 	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
@@ -417,7 +417,7 @@ type redTrunk struct {
 }
 
 // redTrunks is each span in which the records read the trunk itself red, with the builds that are
-// its. A build is read green on a base where a record reads it green standing on it, and on the
+// its, each true where a fix ends its span. A build is read green on a base where a record reads it green standing on it, and on the
 // base it was pushed on. The trunk at T is red where two probes of the bare trunk on T were read
 // red and no build read green on T was pushed between their pushes. It is red from the record
 // that made T the trunk, or from the push of the last build read green on T pushed before the
@@ -530,7 +530,7 @@ func redTrunks(recs []queue.Recording) ([]redTrunk, map[queue.SHA]bool) {
 			for sha, b := range failed {
 				fixed := slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return slices.Contains(span.fixes, m.Number) })
 				if b.Base == t && pushes[sha].Before(end) && !fixed {
-					theirs[sha] = true
+					theirs[sha] = span.fixes != nil
 				}
 			}
 			break

@@ -446,6 +446,7 @@ type window struct {
 	unattributed, unconfirmedDepartures             int
 	unejectedGuilty                                 int
 	episodes                                        []Episode // the red trunks the replay plays, from where it opens
+	unplayed                                        int       // the red trunks no fix ends that overlap the window, which the replay does not play
 	flake, errored                                  float64
 	build                                           time.Duration
 	probe                                           time.Duration
@@ -593,7 +594,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 			QueueAddedP50Minutes: median(added), QueueAddedP90Minutes: quantile(added, 90), QueueAddedOver30: float64(over30) / seeds,
 			RedCandidates: float64(redCandidates) / seeds, RedPullRequests: float64(redPullRequests) / seeds,
 			UnblamedRedCandidates: w.unblamedRedCandidates, CandidatesWithoutACulprit: w.candidatesWithoutCulprit,
-			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, UnejectedGuiltyHeads: w.unejectedGuilty, RedTrunkSpans: len(w.episodes), UnfixedRedTrunkSpans: float64(unfixed) / seeds, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
+			WaitingAtOpen: float64(opening) / seeds, InvariantFailures: failures, SettingsInWindow: w.settings, Acts: map[string]int{"label": 0, "unlabel": 0, "head": 0, "checks": 0, "wait": 0, "conflict": 0, "hold": 0, "ejected": 0, "settings": 0}, UnattributedHolds: w.ignoredHolds, ClashingPairs: w.clashingPairs, CulpritsUnattributed: w.unattributed, UnejectedGuiltyHeads: w.unejectedGuilty, RedTrunkSpans: len(w.episodes), UnfixedRedTrunkSpans: float64(unfixed) / seeds, UnplayedRedTrunkSpans: w.unplayed, DeparturesAfterAnUnconfirmedPlan: w.unconfirmedDepartures,
 		}
 		for _, a := range w.acts {
 			if a.At >= 0 {

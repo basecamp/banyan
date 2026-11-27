@@ -103,6 +103,7 @@ type simulatedMeasures struct {
 	UnejectedGuiltyHeads             int            `json:"unejected_guilty_heads"`
 	RedTrunkSpans                    int            `json:"red_trunk_spans"`
 	UnfixedRedTrunkSpans             float64        `json:"unfixed_red_trunk_spans"`
+	UnplayedRedTrunkSpans            int            `json:"unplayed_red_trunk_spans"`
 	DeparturesAfterAnUnconfirmedPlan int            `json:"departures_after_an_unconfirmed_plan"`
 	InvariantFailures                int            `json:"invariant_failures"`
 	WaitingAtOpen                    float64        `json:"waiting_at_open"`
