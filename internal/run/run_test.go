@@ -552,7 +552,7 @@ func TestARedTrunkEjectsNobody(t *testing.T) {
 		t.Fatalf("a red trunk took a pull request out\n%s", w.log)
 	}
 	for _, p := range []*pull{a, b} {
-		if s := w.last(p.heads[0], "merge-queue"); s.Description != "waits: the trunk itself is failing, and the queue holds until it passes" {
+		if s := w.last(p.heads[0], "merge-queue"); s.Description != "waits: the trunk itself is failing, and only a fix joins the chain until it passes" {
 			t.Errorf("the trunk is red and a waiting pull request's status says %q", s.Description)
 		}
 	}

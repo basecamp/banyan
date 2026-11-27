@@ -18,7 +18,7 @@ import (
 //     chain goes on without them. Rounds of builds of its prefixes narrow it to one pull
 //     request, which leaves only after a fair test: its prefix failed, the prefix below it
 //     passed in a later round, and its own failed again in a later round still.
-//   - A tip that fails is a red trunk: nobody is blamed.
+//   - A round whose tip fails is a red trunk: that round blames nobody.
 func Plan(w World, c Config) []Action {
 	p := &plan{w: w, c: c, open: map[int]PR{}, waits: map[int]string{}}
 	p.admit()
@@ -648,7 +648,7 @@ func (p *plan) fill() {
 }
 
 const suspected = "a build that holds it failed, and the queue is finding the cause"
-const redTrunk = "the trunk itself is failing, and the queue holds until it passes"
+const redTrunk = "the trunk itself is failing, and only a fix joins the chain until it passes"
 
 // notes writes each pull request's place in the queue on its head, when it changed.
 func (p *plan) notes() {
