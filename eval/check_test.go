@@ -1237,7 +1237,16 @@ func TestCheckerCurrentPlannerEjectsAPullRequestThatNeedsASuspectSetAside(t *tes
 	res := explore(w, m)
 	t.Logf("capped %v, %d states:\n%s", res.Capped, res.States, formatCounterexample(w, m, res))
 	if res.Broken != "invariant 3: #3 is innocent and was ejected with no flake in play" {
-		t.Errorf("broken %q, want #3 innocent on invariant 3", res.Broken)
+		t.Fatalf("broken %q, want #3 innocent on invariant 3", res.Broken)
+	}
+	c := newChecker(w, m)
+	eject, ok := ejectRead(c, res.Trace, 3)
+	if !ok {
+		t.Fatal("no read ejects #3")
+	}
+	trunk := eject.world.Trunk
+	if landed, fails := c.holds(trunk, "head2"), c.guilty(c.addCommit(trunk, "head3", 3, "")); !landed || fails {
+		t.Errorf("#3 leaves on %.7s, which holds #2 %v and fails with #3 %v, want #2 landed and the trunk with #3 passing", trunk, landed, fails)
 	}
 }
 
