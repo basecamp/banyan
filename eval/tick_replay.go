@@ -376,8 +376,9 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 //
 // It leaves two things out. A head with a single failed build is never held guilty, even one
 // that failed alone. And it cannot tell a head from what it failed beside unless the record
-// ejected the other or the other failed alone twice and was never cleared, so two heads failing
-// in the same builds are both held guilty when no other member of those builds did so.
+// ejected the other or the other failed alone twice and was never cleared, so where two heads
+// fail in the same builds and no other member of those builds did so, each shared red whole
+// build counts against both heads.
 //
 // The replay labels the pull request of any guilty head, these and those the record ejected,
 // again at the next head the record queues it at, as the replay's queue may have ejected it
