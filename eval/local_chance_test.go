@@ -156,6 +156,7 @@ func TestReplayPlaysAFlakeOnceABuildTookAChanceAboveZeroFromTheSample(t *testing
 	near := Shape{Build: 10 * time.Minute, Probe: 10 * time.Minute, Nearby: tenTwentyThirty}
 	greens := Shape{Build: 5 * time.Minute, Nearby: tenTwentyThirty}
 	theDays := Shape{Build: 10 * time.Minute, Flake: 0.1, Nearby: tenTwentyThirty}
+	scripted := Shape{Build: 10 * time.Minute, Script: []bool{}, Nearby: tenTwentyThirty}
 	for _, tc := range []struct {
 		name  string
 		shape Shape
@@ -168,6 +169,8 @@ func TestReplayPlaysAFlakeOnceABuildTookAChanceAboveZeroFromTheSample(t *testing
 		{"after a check drew among reds", near, queue.Check, []time.Duration{15 * time.Minute}, true},
 		{"after a probe among reds", near, queue.Probe, []time.Duration{15 * time.Minute}, false},
 		{"after candidates drew zero among greens", greens, queue.Candidate, []time.Duration{35 * time.Minute, 34 * time.Minute}, false},
+		{"after one drew among reds and the next drew zero", greens, queue.Candidate, []time.Duration{15 * time.Minute, 35 * time.Minute}, true},
+		{"after a candidate drew among reds in a scripted shape", scripted, queue.Candidate, []time.Duration{15 * time.Minute}, true},
 		{"by the day's share before any build", theDays, queue.Candidate, nil, true},
 	} {
 		if got := pushedInto(tc.shape, 1, tc.kind, tc.at...).flakes(); got != tc.want {

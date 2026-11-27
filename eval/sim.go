@@ -453,7 +453,7 @@ func (s *Sim) flakes() bool {
 			return true
 		}
 	}
-	return s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0 || s.drewFlake)
+	return s.drewFlake || s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0)
 }
 
 // nearbyShare is the red share of the candidates pushed within d of at, ends included, and
