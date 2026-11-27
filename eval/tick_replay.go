@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -32,14 +33,14 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	broken := map[headKey]bool{}
 	for _, r := range recs {
 		for _, b := range r.World.Builds {
-			if len(b.Chain) > len(builds[b.SHA].Chain) {
+			if was, ok := builds[b.SHA]; !ok || len(b.Chain) > len(was.Chain) {
 				builds[b.SHA] = b
 			}
 			green[b.SHA] = green[b.SHA] || b.Verdict == queue.Success
 			red[b.SHA] = red[b.SHA] || b.Verdict == queue.Failure
 		}
 		for _, a := range r.Actions {
-			if a.Do == "push" && len(a.Build.Chain) > len(builds[a.Build.SHA].Chain) {
+			if was, ok := builds[a.Build.SHA]; a.Do == "push" && (!ok || len(a.Build.Chain) > len(was.Chain)) {
 				builds[a.Build.SHA] = a.Build
 			}
 		}
@@ -64,6 +65,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 		}
 	}
 	spans, theirs := redTrunks(recs)
+	failed := maps.Clone(red)
 	for sha := range theirs {
 		delete(red, sha)
 	}
@@ -114,23 +116,21 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			w.times = append(w.times, b.took)
 		}
 	}
-	for sha, b := range candidates {
-		if theirs[sha] {
+	w.nearby = nil
+	for sha, b := range builds {
+		if b.Kind != queue.Candidate || theirs[sha] || blamed(b, broken) {
 			continue
 		}
-		if len(builds[sha].Chain) > len(b.Chain) {
-			b.Chain = builds[sha].Chain
-		}
-		blamed := false
-		for _, m := range b.Chain {
-			blamed = blamed || broken[headKey{m.Number, m.Head}]
-		}
-		if !blamed {
+		if c, ok := candidates[sha]; ok {
 			w.candidatesWithoutCulprit++
-			if b.Verdict == queue.Failure {
+			if c.Verdict == queue.Failure {
 				w.unblamedRedCandidates++
 			}
 		}
+		if b.Pushed.IsZero() || !green[sha] && !failed[sha] {
+			continue
+		}
+		w.nearby = append(w.nearby, answeredCandidate{at: b.Pushed.Sub(start), red: !green[sha]})
 	}
 	if w.candidatesWithoutCulprit > 0 {
 		w.flake = float64(w.unblamedRedCandidates) / float64(w.candidatesWithoutCulprit)
@@ -627,4 +627,15 @@ func queuedAfter(r queue.Recording, landed []queue.Member) []queue.PR {
 		}
 	}
 	return prs
+}
+
+// answeredCandidate is a recorded candidate answered with no culprit: when it was pushed, on the
+// window's clock, and whether it was read red and never green.
+type answeredCandidate struct {
+	at  time.Duration
+	red bool
+}
+
+func blamed(b queue.Build, broken map[headKey]bool) bool {
+	return slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return broken[headKey{m.Number, m.Head}] })
 }
