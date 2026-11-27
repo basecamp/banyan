@@ -1571,6 +1571,95 @@ func TestReplayHoldsNoHeadGuiltyThatNoRecordQueued(t *testing.T) {
 	}
 }
 
+// holding is a build on the trunk of the heads of those pull requests.
+func holding(sha queue.SHA, kind queue.Kind, v queue.Verdict, numbers ...int) queue.Build {
+	b := queue.Build{SHA: sha, Kind: kind, Base: "t", Verdict: v}
+	for _, n := range numbers {
+		b.Chain = append(b.Chain, queue.Member{Number: n, Head: replayPR(n).Head, Merge: sha})
+	}
+	return b
+}
+
+// leftAfter is a record of #1, #2 and #3 queued from the start, each build read ten minutes
+// after the one before and pushed five minutes before it was read, and none of them queued at
+// the last record.
+func leftAfter(builds ...queue.Build) []queue.Recording {
+	p := []queue.PR{replayPR(1), replayPR(2), replayPR(3)}
+	recs := []queue.Recording{replayTick(0, p...)}
+	for i, b := range builds {
+		r := replayTick(10*(i+1), p...)
+		b.Pushed = r.World.Now.Add(-5 * time.Minute)
+		r.World.Builds = []queue.Build{b}
+		recs = append(recs, r)
+	}
+	return append(recs, replayTick(10*(len(builds)+1)))
+}
+
+func TestReplayHoldsNoHeadGuiltyForBuildsBesideAHeadThatFailedAloneTwice(t *testing.T) {
+	red := func(sha queue.SHA, numbers ...int) queue.Build {
+		return holding(sha, queue.Candidate, queue.Failure, numbers...)
+	}
+	alone := func(sha queue.SHA, n int) queue.Build { return holding(sha, queue.Probe, queue.Failure, n) }
+	for _, tc := range []struct {
+		name   string
+		builds []queue.Build
+		guilty []bool
+	}{
+		{"behind a head that failed alone twice",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), red("red1", 1, 2), red("red2", 1, 2), red("red3", 1, 2)},
+			[]bool{true, false, false}},
+		{"behind a head whose two candidates alone were read red",
+			[]queue.Build{red("alone1", 1), red("alone2", 1), red("red1", 1, 2), red("red2", 1, 2), red("red3", 1, 2)},
+			[]bool{true, false, false}},
+		{"behind a head that failed alone once",
+			[]queue.Build{alone("alone1", 1), red("red1", 1, 2), red("red2", 1, 2), red("red3", 1, 2)},
+			[]bool{true, true, false}},
+		{"beside a head that failed alone twice, both having failed alone twice",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), alone("alone3", 2), alone("alone4", 2), red("red1", 1, 2), red("red2", 1, 2), red("red3", 1, 2)},
+			[]bool{true, true, false}},
+		{"twice beside a head that failed alone twice and twice without it",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), red("red1", 1, 2), red("red2", 1, 2), red("red3", 2, 3), red("red4", 2, 3)},
+			[]bool{true, true, true}},
+		{"behind a head whose two builds alone were read green",
+			[]queue.Build{holding("green1", queue.Candidate, queue.Success, 1), holding("green2", queue.Candidate, queue.Success, 1), red("red1", 1, 2), red("red2", 1, 2)},
+			[]bool{false, true, false}},
+		{"behind a head whose two red probes held another",
+			[]queue.Build{holding("pair1", queue.Probe, queue.Failure, 1, 3), holding("pair2", queue.Probe, queue.Failure, 1, 3), red("red1", 1, 2), red("red2", 1, 2)},
+			[]bool{true, true, false}},
+		{"behind a head that failed alone twice and then passed alone",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), holding("green1", queue.Candidate, queue.Success, 1), red("red1", 1, 2), red("red2", 1, 2)},
+			[]bool{false, true, false}},
+		{"twice beside a head that failed alone twice and once alone",
+			[]queue.Build{alone("alone1", 1), alone("alone2", 1), red("red1", 1, 2), red("red2", 1, 2), red("own1", 2)},
+			[]bool{true, false, false}},
+		{"behind a pull request that failed alone once at each of two heads",
+			[]queue.Build{alone("alone1", 1), {SHA: "moved1", Kind: queue.Probe, Base: "t", Verdict: queue.Failure, Chain: []queue.Member{{Number: 1, Head: "moved", Merge: "moved1"}}},
+				red("red1", 1, 2), red("red2", 1, 2)},
+			[]bool{true, true, false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := leftAfter(tc.builds...)
+			_, w, _ := replayWindow(t, recs, 10*len(recs))
+			guilty := []bool{heldGuilty(w, 1, replayPR(1).Head), heldGuilty(w, 2, replayPR(2).Head), heldGuilty(w, 3, replayPR(3).Head)}
+			if !slices.Equal(guilty, tc.guilty) {
+				t.Fatalf("#1, #2, #3 held guilty %v, want %v", guilty, tc.guilty)
+			}
+		})
+	}
+}
+
+func TestReplayHoldsGuiltyAHeadBesideOneThatFailedAloneTwiceAndLanded(t *testing.T) {
+	alone := func(sha queue.SHA) queue.Build { return holding(sha, queue.Probe, queue.Failure, 1) }
+	red := func(sha queue.SHA) queue.Build { return holding(sha, queue.Candidate, queue.Failure, 1, 2) }
+	recs := leftAfter(alone("alone1"), alone("alone2"), red("red1"), red("red2"))
+	recs[len(recs)-2].Actions = []queue.Action{{Do: "land", SHA: "landed1", Members: []queue.Member{{Number: 1, Head: replayPR(1).Head, Merge: "landed1"}}}}
+	recs[len(recs)-1].World.Trunk = "landed1"
+	_, w, _ := replayWindow(t, recs, 10*len(recs))
+	if heldGuilty(w, 1, replayPR(1).Head) || !heldGuilty(w, 2, replayPR(2).Head) {
+		t.Fatalf("#1 held guilty %v, #2 %v", heldGuilty(w, 1, replayPR(1).Head), heldGuilty(w, 2, replayPR(2).Head))
+	}
+}
+
 func labelled(w window, n int) []time.Duration {
 	var at []time.Duration
 	for _, a := range w.acts {
