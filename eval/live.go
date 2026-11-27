@@ -439,6 +439,8 @@ type window struct {
 	failing                                         map[queue.SHA][]time.Duration // each guilty head's failed builds among both, answered from the replay's opening record on, each as long as it took
 	acts                                            []Act
 	unblamedRedCandidates, candidatesWithoutCulprit int
+	nearby                                          []answeredCandidate // every candidate the records read answered with no culprit, read green or red
+	nearbyRed                                       bool                // one of them is red and pushed within an hour of the hours the replay runs
 	opening, left, withdrawn, settings              int
 	ignoredHolds                                    int
 	clashing                                        map[queue.SHA]map[queue.SHA]bool
@@ -526,6 +528,7 @@ func (w window) simulate(shape Shape, was Score) (Score, liveComparison) {
 		shape.Agents, shape.Lost, shape.Flake, shape.Errored = 0, 0, w.flake, w.errored
 		shape.Outside, shape.Race, shape.Crash = 0, 0, 0
 		shape.ProbeFlake, shape.Spread, shape.Fails = 0, 0, 0
+		shape.Nearby, shape.NearbyRed = w.nearby, w.nearbyRed
 		shape.Episodes, shape.Script, shape.Takes = w.episodes, nil, nil
 		shape.Rerun, shape.Rescued, shape.Whole = 0, 0, 0
 		shape.Times, shape.Probe = w.times, w.probe

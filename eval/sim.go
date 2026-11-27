@@ -55,6 +55,11 @@ type Shape struct {
 	// answered as in Times, by the head. A whole build of a tree that holds such a head takes one
 	// of its times in place of one from Times.
 	Failing map[queue.SHA][]time.Duration
+	// A recorded window's answered candidates with no culprit. A candidate or check pushed at t
+	// whose build takes d fails with the red share of those pushed within d of t, ends included,
+	// in place of Flake where there are any; NearbyRed says one red is near enough to play.
+	Nearby    []answeredCandidate
+	NearbyRed bool
 	// Rerun says the CI runs a red build's failed jobs once more before it reports, which
 	// takes this much longer, and Rescued is the share of flakes that pass then.
 	Rerun   time.Duration
@@ -447,7 +452,25 @@ func (s *Sim) flakes() bool {
 			return true
 		}
 	}
-	return s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0)
+	return s.shape.Script == nil && (s.shape.Flake > 0 || s.shape.ProbeFlake > 0 || s.shape.NearbyRed)
+}
+
+// nearbyShare is the red share of the candidates pushed within d of at, ends included, and
+// whether any was.
+func nearbyShare(nearby []answeredCandidate, at, d time.Duration) (float64, bool) {
+	red, all := 0, 0
+	for _, c := range nearby {
+		if c.at >= at-d && c.at <= at+d {
+			all++
+			if c.red {
+				red++
+			}
+		}
+	}
+	if all == 0 {
+		return 0, false
+	}
+	return float64(red) / float64(all), true
 }
 
 func (s *Sim) verdict(b *simBuild) queue.Verdict {
@@ -762,6 +785,11 @@ func (s *Sim) push(b queue.Build) {
 		s.pool.add(sb, d-s.pickup(b.SHA), sb.start)
 	}
 	if s.shape.Recorded {
+		if b.Kind != queue.Probe {
+			if share, ok := nearbyShare(s.shape.Nearby, s.now, d); ok {
+				flake = share
+			}
+		}
 		fate := s.rng.Float64()
 		sb.errored = fate < s.shape.Errored
 		sb.flake = !sb.errored && fate < s.shape.Errored+flake
