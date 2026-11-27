@@ -1404,8 +1404,8 @@ func TestReplayOvertakenCandidateLeavesTheLiveHalfAsItWas(t *testing.T) {
 		return row
 	}
 	overtaken := overtakenWindow(nil)
-	if _, w, _ := replayWindow(t, overtaken, 60); !slices.Contains(w.times, 50*time.Minute) {
-		t.Fatalf("no overtaken candidate in the pool %v", w.times)
+	if _, w, _ := replayWindow(t, overtaken, 60); !slices.Equal(w.times, []time.Duration{40 * time.Minute, 50 * time.Minute, 20 * time.Minute, 30 * time.Minute}) {
+		t.Fatalf("pool %v, want the candidates' times, the overtaken one's age, then the checks'", w.times)
 	}
 	control := overtakenWindow(func(recs []queue.Recording) []queue.Recording {
 		recs[5].Actions = recs[5].Actions[1:]
