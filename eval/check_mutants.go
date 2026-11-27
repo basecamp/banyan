@@ -52,6 +52,10 @@ func checkerMutants() []checkMutant {
 			},
 		},
 		checkMutant{
+			name:   "goes on beside a candidate stacked on a red one",
+			mutant: mutant{verify: queue.Verify, plan: besideStacked},
+		},
+		checkMutant{
 			name: "spans a round that had not begun",
 			mutant: mutant{
 				verify: queue.Verify,
@@ -70,6 +74,33 @@ func checkerMutants() []checkMutant {
 	)
 }
 
+func besideStacked(w queue.World, c queue.Config) []queue.Action {
+	acts := queue.Plan(w, c)
+	if !c.Probes || slices.ContainsFunc(acts, func(a queue.Action) bool { return a.Do == "push" }) {
+		return acts
+	}
+	onRed := func(b queue.Build) bool {
+		return slices.ContainsFunc(w.Builds, func(r queue.Build) bool {
+			n := len(r.Chain)
+			return r.Kind == queue.Candidate && r.Verdict == queue.Failure && r.Landed.IsZero() && n > 0 &&
+				len(b.Chain) > n && b.Base == r.Base && b.Chain[n-1].Merge == r.SHA
+		})
+	}
+	stacked := func(b queue.Build) bool {
+		return b.Kind == queue.Candidate && b.Verdict == queue.Pending && b.Landed.IsZero() && onRed(b)
+	}
+	beside := w
+	beside.Builds = slices.DeleteFunc(slices.Clone(w.Builds), stacked)
+	hidden := len(w.Builds) - len(beside.Builds)
+	if hidden == 0 || c.Slots <= hidden {
+		return acts
+	}
+	c.Slots -= hidden
+	return slices.DeleteFunc(queue.Plan(beside, c), func(a queue.Action) bool {
+		return a.Do == "push" && slices.ContainsFunc(w.Builds, func(b queue.Build) bool { return b.SHA == a.Build.SHA })
+	})
+}
+
 func mutantWorlds() []checkWorld {
 	cfg := dials(2, 1, false)
 	return []checkWorld{
@@ -79,6 +110,7 @@ func mutantWorlds() []checkWorld {
 		{"1 PR crashes+stale+moves", cfg, pulls(good), false, false, bounds{Crashes: 1, Stale: 1, Moves: 1, MaxStates: 6000}},
 		{"2 PRs (good+good) flakes+crashes", cfg, pulls(good, good), false, false, bounds{Flakes: 1, Crashes: 1, MaxStates: 8000}},
 		{"2 PRs (good+breaks) timeouts", dials(2, 2, false), pulls(good, breaks), false, false, bounds{Timeouts: 1, MaxStates: 2000}},
+		needsWorlds()[0],
 	}
 }
 

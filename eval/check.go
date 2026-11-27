@@ -20,8 +20,11 @@ type checkedPR struct {
 	head   queue.SHA
 	breaks bool
 	clash  int
+	needs  int
 	queued bool
 	landed bool
+	first  bool
+	order  uint8
 	checks queue.Verdict
 	wait   string
 }
@@ -43,15 +46,34 @@ func culpritPR(number int, prs []checkedPR) bool {
 	if idx < 0 {
 		return false
 	}
-	if prs[idx].breaks {
+	pr := prs[idx]
+	if pr.breaks {
 		return true
 	}
+	if pr.needs > 0 {
+		needed := slices.IndexFunc(prs, func(p checkedPR) bool { return p.number == pr.needs })
+		if needed < 0 || !(prs[needed].landed || readyAhead(prs[needed], pr)) {
+			return true
+		}
+	}
 	for _, o := range prs {
-		if (o.number == prs[idx].clash || o.clash == number) && (o.landed || o.queued) {
+		if (o.number == pr.clash || o.clash == number) && (o.landed || o.queued) {
 			return true
 		}
 	}
 	return false
+}
+
+func readyAhead(a, b checkedPR) bool {
+	switch {
+	case !a.queued || a.checks != queue.Success || a.wait != "":
+		return false
+	case a.first != b.first:
+		return a.first
+	case a.order != b.order:
+		return a.order < b.order
+	}
+	return a.number < b.number
 }
 
 // fairTest says an ejection's evidence is a fair test of its pull request, by when CI really began
@@ -204,7 +226,7 @@ func checkDrain(prs []checkedPR, after string) string {
 
 type pullSpec struct {
 	Breaks, Conflict, Unready, First, Hold bool
-	Clash, Ahead                           int
+	Clash, Needs, Ahead                    int
 }
 
 type bounds struct {
@@ -436,7 +458,7 @@ func (c *checker) build(sha, trunk queue.SHA) queue.Build {
 func (c *checker) guilty(sha queue.SHA) bool {
 	mask := c.commits[sha].holds
 	for i, p := range c.world.Pulls {
-		if mask&pullBit(i+1) != 0 && (p.Breaks || (p.Clash > 0 && mask&pullBit(p.Clash) != 0)) {
+		if mask&pullBit(i+1) != 0 && (p.Breaks || (p.Clash > 0 && mask&pullBit(p.Clash) != 0) || (p.Needs > 0 && mask&pullBit(p.Needs) == 0)) {
 			return true
 		}
 	}
@@ -877,8 +899,8 @@ func (c *checker) checkedPull(s *worldState, number int) checkedPR {
 	landed := c.holds(s.trunk, p.head(number, p.gitHead))
 	return checkedPR{
 		number: number, head: p.head(number, p.githubHead),
-		breaks: c.world.Pulls[number-1].Breaks, clash: c.world.Pulls[number-1].Clash,
-		queued: p.queued && !landed && !p.merged, landed: landed,
+		breaks: c.world.Pulls[number-1].Breaks, clash: c.world.Pulls[number-1].Clash, needs: c.world.Pulls[number-1].Needs,
+		queued: p.queued && !landed && !p.merged, landed: landed, first: p.first, order: p.order,
 		checks: p.checks, wait: p.waitReason(),
 	}
 }
@@ -1725,6 +1747,7 @@ var (
 )
 
 func clash(n int) pullSpec            { return pullSpec{Clash: n} }
+func needs(n int) pullSpec            { return pullSpec{Needs: n} }
 func ahead(n int) pullSpec            { return pullSpec{Ahead: n} }
 func pulls(ps ...pullSpec) []pullSpec { return ps }
 
@@ -1802,7 +1825,7 @@ func defaultWorlds() []checkWorld {
 		}
 	}
 
-	return append(worlds,
+	return append(append(worlds,
 		checkWorld{"3 PRs crashes+lost (good+breaks+good)", dials(2, 3, false), pulls(good, breaks, good), false, false, bCrash},
 		checkWorld{"3 PRs moves+stale (good+breaks+ahead)", dials(2, 3, false), pulls(good, breaks, ahead(2)), false, false, bMove},
 		checkWorld{"4 PRs batch (good*4)", dials(2, 4, false), pulls(good, good, good, good), false, false, b4},
@@ -1810,7 +1833,28 @@ func defaultWorlds() []checkWorld {
 		checkWorld{"4 PRs batch (clash+ahead+breaks)", dials(2, 4, false), pulls(good, clash(1), ahead(2), breaks), false, false, b4},
 		checkWorld{"4 PRs 3x2 (breaks+good*2+clash)", cfg32, pulls(breaks, good, good, clash(2)), false, false, b4},
 		checkWorld{"4 PRs probes (good+clash+good+breaks)", dials(2, 4, true), pulls(good, clash(1), good, breaks), false, false, b4},
-	)
+	), needsWorlds()...)
+}
+
+func needsWorlds() []checkWorld {
+	cfg := dials(2, 2, true)
+	return []checkWorld{
+		{Name: "3 PRs #2 and #3 need each other (2 of 2, probes)", Config: cfg, Pulls: pulls(good, needs(3), needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}},
+		{Name: "3 PRs #3 needs #2 (2 of 2, probes)", Config: cfg, Pulls: pulls(good, good, needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}},
+		{Name: "3 PRs #3 needs #2 and is ready later (2 of 2, probes)", Config: cfg, Pulls: pulls(good, good, late(needs(2))), Bounds: bounds{Moves: 1, MaxStates: 5000}},
+	}
+}
+
+func needsASuspectWorld() checkWorld {
+	return checkWorld{
+		Name:   "3 PRs #1 breaks and #3 needs #2 (2 of 2, probes)",
+		Config: dials(2, 2, true), Pulls: pulls(breaks, good, needs(2)), Bounds: bounds{MaxStates: 5000},
+	}
+}
+
+func late(p pullSpec) pullSpec {
+	p.Unready = true
+	return p
 }
 
 func smallKeepWorlds() []checkWorld {
@@ -2050,7 +2094,7 @@ func runCheck(name string) bool {
 }
 
 func findWorld(name string) (checkWorld, bool) {
-	for _, list := range [][]checkWorld{deepWorlds(), mutantWorlds(), keepMutantWorlds()} {
+	for _, list := range [][]checkWorld{deepWorlds(), mutantWorlds(), keepMutantWorlds(), {needsASuspectWorld()}} {
 		for _, w := range list {
 			if w.Name == name {
 				return w, true
