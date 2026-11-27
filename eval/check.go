@@ -24,7 +24,7 @@ type checkedPR struct {
 	queued bool
 	landed bool
 	first  bool
-	order  uint8
+	order  int64
 	checks queue.Verdict
 	wait   string
 }
@@ -57,7 +57,7 @@ func culpritPR(number int, prs []checkedPR) bool {
 		}
 	}
 	for _, o := range prs {
-		if (o.number == pr.clash || o.clash == number) && (o.landed || o.queued) {
+		if (o.number == pr.clash || o.clash == number) && (o.landed || readyAhead(o, pr)) {
 			return true
 		}
 	}
@@ -900,7 +900,7 @@ func (c *checker) checkedPull(s *worldState, number int) checkedPR {
 	return checkedPR{
 		number: number, head: p.head(number, p.githubHead),
 		breaks: c.world.Pulls[number-1].Breaks, clash: c.world.Pulls[number-1].Clash, needs: c.world.Pulls[number-1].Needs,
-		queued: p.queued && !landed && !p.merged, landed: landed, first: p.first, order: p.order,
+		queued: p.queued && !landed && !p.merged, landed: landed, first: p.first, order: int64(p.order),
 		checks: p.checks, wait: p.waitReason(),
 	}
 }
@@ -2115,21 +2115,31 @@ func formatTrace(res checkResult) string {
 func formatCounterexample(w checkWorld, m mutant, res checkResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %s (%d states, %d steps)\n", w.Name, res.Broken, res.States, len(res.Trace))
-	c := newChecker(w, m)
+	newChecker(w, m).replay(res.Trace,
+		func(i int, st step) { fmt.Fprintf(&b, "  %2d. %s\n", i+1, st) },
+		func(at string, r tickRead) {
+			fmt.Fprintf(&b, "    %s:\n", at)
+			writeRead(&b, "      ", w.Config, r)
+		})
+	return b.String()
+}
+
+// replay plays a trace from the initial state, calling stepped before each step and read for each
+// pass of a tick the step runs, with where in the step the pass falls.
+func (c *checker) replay(trace []step, stepped func(int, step), read func(string, tickRead)) {
 	cur := c.initState()
 	play := func(t *checkTick) {
 		out := t.run()
 		for p, r := range out.reads {
-			fmt.Fprintf(&b, "    pass %d:\n", p)
-			writeRead(&b, "      ", w.Config, r)
+			read(fmt.Sprintf("pass %d", p), r)
 		}
 		if out.final != nil {
 			cur = out.final
 			cur.sort()
 		}
 	}
-	for i, st := range res.Trace {
-		fmt.Fprintf(&b, "  %2d. %s\n", i+1, st)
+	for i, st := range trace {
+		stepped(i, st)
 		switch {
 		case st.kind == stepTick:
 			play(&checkTick{c: c, state: cur, trace: true})
@@ -2146,8 +2156,7 @@ func formatCounterexample(w checkWorld, m mutant, res checkResult) string {
 			_, ticks := c.drain(cur, true)
 			for _, dt := range ticks {
 				for p, r := range dt.reads {
-					fmt.Fprintf(&b, "    drain tick %d, pass %d:\n", dt.tick, p)
-					writeRead(&b, "      ", w.Config, r)
+					read(fmt.Sprintf("drain tick %d, pass %d", dt.tick, p), r)
 				}
 			}
 		default:
@@ -2155,7 +2164,6 @@ func formatCounterexample(w checkWorld, m mutant, res checkResult) string {
 			cur.sort()
 		}
 	}
-	return b.String()
 }
 
 func moveState(moves []transition, target step) *worldState {

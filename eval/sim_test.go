@@ -295,6 +295,30 @@ func TestTheSimulatorReadsABuildAgainstTheTrunkAsGitDoes(t *testing.T) {
 	}
 }
 
+// The second to arrive is queued before the first, which clashes with it.
+func TestTheSimulatorJudgesAClashByQueueOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		later bool
+		want  bool
+	}{
+		{"the later taken out", true, true},
+		{"the earlier taken out with the later ready behind it", false, false},
+	} {
+		s := NewSim(shapes[0], dials(5, 2, false), 1)
+		one, two := s.arrive(), s.arrive()
+		for _, p := range []*simPR{one, two} {
+			p.breaks, p.clash, p.conflict, p.ahead, p.Checks, p.Wait = false, 0, false, 0, queue.Success, ""
+		}
+		one.clash, one.Queued = two.Number, two.Queued.Add(time.Minute)
+		out := map[bool]*simPR{true: one, false: two}[tc.later]
+		out.queued = false
+		if got := s.culprit(out); got != tc.want {
+			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestKeepSimRetainsBuildsUntilExpiry(t *testing.T) {
 	cfg := dials(1, 1, false)
 	cfg.Keep = 5 * time.Minute

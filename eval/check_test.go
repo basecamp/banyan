@@ -237,7 +237,8 @@ func TestCheckerKillsAllInvariants(t *testing.T) {
 }
 
 func TestCheckerCurrentPlanner(t *testing.T) {
-	sum := checkSuite(defaultWorlds(), mutant{plan: queue.Plan, verify: queue.Verify})
+	worlds := slices.DeleteFunc(defaultWorlds(), func(w checkWorld) bool { return slices.Contains(clashSetFirst, w.Name) })
+	sum := checkSuite(worlds, mutant{plan: queue.Plan, verify: queue.Verify})
 	t.Logf("current queue.Plan: %d of %d whole, %d capped, %d states, %d broken",
 		sum.whole, sum.worlds, sum.capped, sum.states, sum.brokenWorlds)
 	for _, inv := range sum.brokenInvs {
@@ -1139,6 +1140,66 @@ func TestCheckerCulpritPRWithNeeds(t *testing.T) {
 	}
 }
 
+// #2 needs #1, which has landed, and #3 clashes with #2.
+func TestCheckerCulpritPRWithAClashBesideANeed(t *testing.T) {
+	needing := checkedPR{number: 2, needs: 1, queued: true, order: 2, checks: queue.Success}
+	for _, tc := range []struct {
+		name     string
+		clashing checkedPR
+		want     bool
+	}{
+		{"the clashing one is held", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success, wait: "it is labelled hold"}, false},
+		{"the clashing one is ready behind", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success}, false},
+		{"the clashing one is ready ahead", checkedPR{number: 3, clash: 2, queued: true, first: true, order: 3, checks: queue.Success}, true},
+		{"the clashing one landed", checkedPR{number: 3, clash: 2, landed: true}, true},
+	} {
+		if got := culpritPR(2, []checkedPR{{number: 1, landed: true}, needing, tc.clashing}); got != tc.want {
+			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+var clashSetFirst = []string{"2 PRs moves+outside (clash, 2 of 2)", "2 PRs gather moves+outside (clash)"}
+
+// #2 clashes with #1 and is set to go first after the two were built together. #2 is ejected on
+// evidence that holds #1 beside it in every failed build, and #1 lands in the same tick, yet #1 is
+// not ahead of #2 when #2 leaves.
+func TestCheckerCurrentPlannerEjectsAClashingPullRequestSetFirst(t *testing.T) {
+	m := mutant{plan: queue.Plan, verify: queue.Verify}
+	for _, name := range clashSetFirst {
+		w, ok := findWorld(name)
+		if !ok {
+			t.Fatalf("missing world %s", name)
+		}
+		res := explore(w, m)
+		if res.Broken != "invariant 3: #2 is innocent and was ejected with no flake in play" {
+			t.Errorf("%s: broken %q, want #2 innocent on invariant 3", w.Name, res.Broken)
+			continue
+		}
+		eject, ok := ejectRead(newChecker(w, m), res.Trace, 2)
+		if !ok {
+			t.Errorf("%s: no read ejects #2:\n%s", w.Name, formatCounterexample(w, m, res))
+			continue
+		}
+		pr := eject.world.PRs[slices.IndexFunc(eject.world.PRs, func(p queue.PR) bool { return p.Number == 2 })]
+		if !pr.First || !slices.ContainsFunc(eject.world.PRs, func(p queue.PR) bool { return p.Number == 1 && !p.First }) {
+			t.Errorf("%s: #2 first %v at its ejection, want #2 first and #1 queued behind it", w.Name, pr.First)
+		}
+		at := slices.IndexFunc(eject.actions, func(a queue.Action) bool { return a.Do == "eject" && a.PR == 2 })
+		for _, sha := range eject.actions[at].Evidence[1:] {
+			b := eject.world.Builds[slices.IndexFunc(eject.world.Builds, func(b queue.Build) bool { return b.SHA == sha })]
+			if !slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return m.Number == 1 }) {
+				t.Errorf("%s: evidence %.7s does not hold #1 beside #2", w.Name, sha)
+			}
+		}
+		if !slices.ContainsFunc(eject.actions[at+1:], func(a queue.Action) bool {
+			return a.Do == "land" && slices.ContainsFunc(a.Members, func(m queue.Member) bool { return m.Number == 1 })
+		}) {
+			t.Errorf("%s: #1 does not land in the tick that ejects #2", w.Name)
+		}
+	}
+}
+
 func TestCheckerCallsAPullRequestACulpritWhenTheOneItNeedsConflictsWithTheTrunk(t *testing.T) {
 	w := checkWorld{Name: "3 PRs #3 needs #2, which conflicts", Config: dials(2, 2, true), Pulls: pulls(good, conflict, needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}}
 	res := explore(w, mutant{plan: queue.Plan, verify: queue.Verify})
@@ -1178,4 +1239,15 @@ func TestCheckerCurrentPlannerEjectsAPullRequestThatNeedsASuspectSetAside(t *tes
 	if res.Broken != "invariant 3: #3 is innocent and was ejected with no flake in play" {
 		t.Errorf("broken %q, want #3 innocent on invariant 3", res.Broken)
 	}
+}
+
+func ejectRead(c *checker, trace []step, number int) (tickRead, bool) {
+	var found tickRead
+	var ok bool
+	c.replay(trace, func(int, step) {}, func(_ string, r tickRead) {
+		if !ok && slices.ContainsFunc(r.actions, func(a queue.Action) bool { return a.Do == "eject" && a.PR == number }) {
+			found, ok = r, true
+		}
+	})
+	return found, ok
 }

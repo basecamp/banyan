@@ -400,7 +400,7 @@ func (s *Sim) checkedPR(n int) checkedPR {
 	if p == nil {
 		return checkedPR{number: n}
 	}
-	return checkedPR{number: p.Number, head: p.Head, breaks: p.breaks, clash: p.clash, queued: p.queued, landed: p.landed, checks: p.Checks, wait: p.Wait}
+	return checkedPR{number: p.Number, head: p.Head, breaks: p.breaks, clash: p.clash, queued: p.queued, landed: p.landed, first: p.First, order: p.Queued.UnixNano(), checks: p.Checks, wait: p.Wait}
 }
 
 func (s *Sim) checkedPRs() []checkedPR {
@@ -428,7 +428,8 @@ func (s *Sim) checkedBuild(sha queue.SHA) (checkedBuild, bool) {
 }
 
 // culprit says whether ejecting this pull request for a red build is right: it breaks the
-// build alone, or it is one of a pair that clash and the other has landed or is still queued.
+// build alone, or it is one of a pair that clash and the other has landed or is ready and queued
+// ahead of it.
 func (s *Sim) culprit(p *simPR) bool {
 	return culpritPR(p.Number, s.checkedPRs())
 }
