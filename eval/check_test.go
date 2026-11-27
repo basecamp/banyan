@@ -1139,6 +1139,14 @@ func TestCheckerCulpritPRWithNeeds(t *testing.T) {
 	}
 }
 
+func TestCheckerCallsAPullRequestACulpritWhenTheOneItNeedsConflictsWithTheTrunk(t *testing.T) {
+	w := checkWorld{Name: "3 PRs #3 needs #2, which conflicts", Config: dials(2, 2, true), Pulls: pulls(good, conflict, needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}}
+	res := explore(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	if res.Broken != "" || res.Capped {
+		t.Errorf("broken %q, capped %v, %d states", res.Broken, res.Capped, res.States)
+	}
+}
+
 func TestCheckerKillsGoingOnBesideAStackedCandidateOnlyWhereAPullRequestNeedsAnother(t *testing.T) {
 	m := mutant{plan: besideStacked, verify: queue.Verify}
 	for _, w := range needsWorlds()[:1] {
