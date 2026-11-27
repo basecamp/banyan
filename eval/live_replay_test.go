@@ -1190,14 +1190,12 @@ func plannedDay(shape Shape, cfg queue.Config, minutes int, change func(*Sim)) [
 }
 
 // movesHead has the author of a pull request push a new head at a time; the builds of its old
-// head fail while they stand, and the new one breaks nothing.
+// head keep the guilt they were pushed with, and the new one breaks nothing.
 func movesHead(n int, head queue.SHA, at time.Duration) func(*Sim) {
 	return func(s *Sim) {
-		switch p := s.prs[n]; {
-		case s.now == at:
+		if p := s.prs[n]; s.now == at {
 			p.Head = head
 			s.byHead[head] = n
-		case s.now == at+tick:
 			p.breaks = false
 		}
 	}
