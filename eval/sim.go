@@ -115,8 +115,8 @@ type simPR struct {
 	fix         int // 1 + the episode it fixes
 	queued      bool
 	landed      bool
-	gone        bool // ejected with cause, or removed by its author, and not coming back
-	back        time.Duration
+	gone        bool          // ejected with cause, or removed by its author, and not coming back
+	back        time.Duration // when it is labelled again, having been ejected in error; never where it is not
 	mend        time.Duration // when its author pushes the head that mends its conflict with the trunk
 	ready       time.Duration // when this head became ready, which starts its clock
 	checksGreen time.Duration
@@ -158,13 +158,23 @@ type Sim struct {
 
 	crashAfterPush bool
 
-	Trace    io.Writer
-	Broken   []string      // invariants broken, each with what happened
-	Stopped  time.Duration // when a queue that did not keep up was stopped
+	Trace   io.Writer
+	Broken  []string       // invariants broken, each with what happened
+	Stopped time.Duration  // when a queue that did not keep up was stopped
+	Left    map[int]string // the cause each ejected pull request last left for
+	Minutes float64        // the time its builds took, each to its end
+	opening int
+	history *script
+	scored
+}
+
+// scored is what a world is scored by, each counted when it happens: a landing with its clocks,
+// a build at its push, a red build at its verdict, an ejection when it is made. A recorded replay
+// that opens before its window counts them again from the window's start.
+type scored struct {
 	Landed   int
 	Wrong    int
 	Ejected  map[string]int
-	Left     map[int]string // the cause each ejected pull request last left for
 	Whole    int
 	Probes   int
 	Red      int       // whole builds that reported failure
@@ -173,9 +183,6 @@ type Sim struct {
 	Ejects   []float64 // ready to ejected as the cause, in build times
 	LastLand time.Duration
 	Lands    []time.Duration // when each pull request landed
-	Minutes  float64         // the time its builds took, each to its end
-	opening  int
-	history  *script
 
 	RedCandidates   int
 	RedPullRequests int
@@ -192,7 +199,8 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	}
 	s := &Sim{shape: shape, cfg: cfg, plan: queue.Plan, verify: queue.Verify, rng: rand.New(rand.NewSource(seed)), epoch: time.Unix(1_800_000_000, 0).UTC(),
 		trunk: "trunk0", prs: map[int]*simPR{}, byHead: map[queue.SHA]int{}, builds: map[queue.SHA]*simBuild{},
-		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, under: map[queue.SHA]queue.SHA{}, merges: map[queue.SHA]queue.Member{}, trunks: map[queue.SHA]bool{"trunk0": true}, seen: map[queue.SHA]bool{}, Ejected: map[string]int{}, Left: map[int]string{}}
+		holds: map[queue.SHA]map[int]bool{"trunk0": {}}, under: map[queue.SHA]queue.SHA{}, merges: map[queue.SHA]queue.Member{}, trunks: map[queue.SHA]bool{"trunk0": true}, seen: map[queue.SHA]bool{}, Left: map[int]string{},
+		scored: scored{Ejected: map[string]int{}}}
 	if shape.Agents > 0 {
 		s.pool, s.alone = newPool(shape, seed), newPool(shape, seed)
 	}
@@ -201,6 +209,11 @@ func NewSim(shape Shape, cfg queue.Config, seed int64) *Sim {
 	}
 	if shape.Acts != nil {
 		s.history = newScript(shape.Acts)
+	}
+	if shape.Recorded {
+		for _, a := range shape.Acts {
+			s.now = min(s.now, a.At)
+		}
 	}
 	s.queue()
 	return s
@@ -212,7 +225,7 @@ func (s *Sim) queue() {
 		if q.At <= s.now-tick || q.At > s.now {
 			continue
 		}
-		p := &simPR{arrived: s.now, ready: s.now, queued: true, breaks: q.Breaks, clash: q.Clash, conflict: q.Conflict}
+		p := &simPR{arrived: s.now, ready: s.now, back: never, queued: true, breaks: q.Breaks, clash: q.Clash, conflict: q.Conflict}
 		p.Number, p.Head = q.Number, fmt.Sprintf("head%d", q.Number)
 		p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 		if s.shape.Stop > 0 {
@@ -292,13 +305,13 @@ func (s *Sim) clashes(parent, head queue.SHA) bool {
 
 // leftWaiting says a pull request ends the run waiting on the queue. A refusal onto the trunk
 // that only a clashing head this simulation landed makes is the simulated order's, not its
-// author's, so it still waits on the queue.
+// author's, so it still waits on the queue. A replay broken before its window leaves none.
 func (s *Sim) leftWaiting(p *simPR) bool {
 	pr := p.PR
 	if !p.conflict && p.ahead == 0 && s.clashes(s.trunk, p.Head) {
 		pr.Note = ""
 	}
-	return p.queued && !p.landed && waitsOnTheQueue(pr)
+	return s.now >= 0 && p.queued && !p.landed && waitsOnTheQueue(pr)
 }
 
 func (s *Sim) Mark(parent queue.SHA, note string) queue.SHA { return s.commit(parent, "", note, 0) }
@@ -311,7 +324,7 @@ func (s *Sim) hourly(rate float64) bool { return s.chance(rate * tick.Hours()) }
 
 func (s *Sim) arrive() *simPR {
 	s.next++
-	p := &simPR{arrived: s.now, queued: true}
+	p := &simPR{arrived: s.now, back: never, queued: true}
 	p.Number, p.Head = s.next, fmt.Sprintf("head%d", s.next)
 	p.Queued, p.Checks = s.epoch.Add(s.now), queue.Success
 	var ahead []int
@@ -451,6 +464,7 @@ func (s *Sim) Step() {
 }
 
 func (s *Sim) step(at time.Duration) {
+	opens := s.now < 0 && at >= 0
 	s.now = at
 	if s.pool != nil {
 		s.pool.advance(s.now)
@@ -461,6 +475,9 @@ func (s *Sim) step(at time.Duration) {
 	}
 	s.queue()
 	s.play()
+	if opens {
+		s.open()
+	}
 	for i, e := range s.shape.Episodes {
 		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
@@ -474,8 +491,8 @@ func (s *Sim) step(at time.Duration) {
 		if p.Checks == queue.Pending && s.now >= p.checksGreen {
 			p.Checks, p.ready = queue.Success, s.now
 		}
-		if !p.queued && !p.landed && !p.gone && p.back > 0 && s.now >= p.back {
-			p.queued, p.back, p.Note = true, 0, ""
+		if !p.queued && !p.landed && !p.gone && s.now >= p.back {
+			p.queued, p.back, p.Note = true, never, ""
 			if !s.shape.Recorded {
 				p.ready = s.now
 			}
@@ -522,6 +539,17 @@ func (s *Sim) step(at time.Duration) {
 			if !b.Landed.IsZero() && s.epoch.Add(s.now).Sub(b.Landed) > s.cfg.Keep+10*tick {
 				s.Broken = append(s.Broken, fmt.Sprintf("keep expiry: landed build %.12s still stands past keep", b.SHA))
 			}
+		}
+	}
+}
+
+// open starts the window a recorded replay scores: what was counted before it is the lead-in's,
+// and the pull requests waiting on the queue now are those waiting at its start.
+func (s *Sim) open() {
+	s.scored = scored{Ejected: map[string]int{}}
+	for _, p := range s.prs {
+		if p.queued && waitsOnTheQueue(p.PR) {
+			s.opening++
 		}
 	}
 }
@@ -833,15 +861,15 @@ func (s *Sim) land(a queue.Action) {
 	}
 }
 
-// Run plays ticks before Stop, or drains an unbounded shape and checks that it finishes.
+// Run plays ticks before Stop, or drains an unbounded shape and checks that it finishes. A
+// recorded replay opens at its first act, before zero where it is led into its window, and
+// scores what happens from zero on; one broken before zero scores nothing but its failure.
 func (s *Sim) Run() {
 	if s.shape.Stop > 0 {
 		if s.shape.Recorded {
 			s.play()
-			for _, p := range s.prs {
-				if p.queued && waitsOnTheQueue(p.PR) {
-					s.opening++
-				}
+			if s.now >= 0 {
+				s.open()
 			}
 			s.tick()
 		}
@@ -853,11 +881,17 @@ func (s *Sim) Run() {
 						next = min(next, acts[0].At)
 					}
 				}
+				if s.now < 0 {
+					next = min(next, 0)
+				}
 			}
 			if next >= s.shape.Stop {
 				break
 			}
 			s.step(next)
+		}
+		if s.now < 0 {
+			s.scored = scored{Ejected: map[string]int{}}
 		}
 		return
 	}
@@ -922,7 +956,7 @@ func (s *Sim) kept() bool {
 // idle says no pull request or episode remains.
 func (s *Sim) idle() bool {
 	for _, p := range s.prs {
-		if p.queued || (p.back > 0 && !p.gone && !p.landed) {
+		if p.queued || (p.back < never && !p.gone && !p.landed) {
 			return false
 		}
 	}

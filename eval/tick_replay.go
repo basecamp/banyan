@@ -13,8 +13,15 @@ type headKey struct {
 	head   queue.SHA
 }
 
-// recorded starts from the last snapshot at or before from, preserving its pull
-// requests and their live ready clocks. It does not carry running builds.
+// leadIn is how long before its window a replay opens: a few build times, long enough to
+// outlast the builds running at the window's start and let the replay's queue settle by then.
+const leadIn = 4 * time.Hour
+
+// recorded opens the replay leadIn before from, at the last snapshot at or before then, or at the
+// first one read where none is, preserving its pull requests and their live ready clocks. Acts
+// are dated from from, the lead-in's before zero, so the queue the window opens on is the one
+// the replay built, builds in flight included. Where no record is before from, the replay opens
+// at zero.
 func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Time, candidates map[queue.SHA]queue.Build, from, to time.Time, clone string) error {
 	start := from
 	w.stop = to.Sub(start)
@@ -59,7 +66,26 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	for k := range left {
 		broken[k] = true
 	}
+	firstIndex, windowIndex := 0, 0
+	for i, r := range recs {
+		if r.World.Now.After(start) {
+			break
+		}
+		if windowIndex = i; !r.World.Now.After(start.Add(-leadIn)) {
+			firstIndex = i
+		}
+	}
 	w.times, w.failing = nil, map[queue.SHA][]time.Duration{}
+	for _, b := range w.failedBefore {
+		if b.answered.Before(recs[firstIndex].World.Now) {
+			continue
+		}
+		for _, m := range builds[b.sha].Chain {
+			if broken[headKey{m.Number, m.Head}] {
+				w.failing[m.Head] = append(w.failing[m.Head], b.took)
+			}
+		}
+	}
 	for _, b := range w.timed {
 		guilty := false
 		for _, m := range builds[b.sha].Chain {
@@ -88,13 +114,6 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	}
 	if w.candidatesWithoutCulprit > 0 {
 		w.flake = float64(w.unblamedRedCandidates) / float64(w.candidatesWithoutCulprit)
-	}
-	firstIndex := 0
-	for i, r := range recs {
-		if r.World.Now.After(start) {
-			break
-		}
-		firstIndex = i
 	}
 	answered := map[queue.SHA]bool{}
 	if clone != "" {
@@ -141,7 +160,7 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 	holding := map[int]queue.SHA{}
 	var cfg queue.Config
 	for i, r := range recs {
-		at := max(r.World.Now.Sub(start), 0)
+		at := max(r.World.Now.Sub(start), -leadIn)
 		add := func(n int, a Act) { a.At, a.Number = at, n; w.acts = append(w.acts, a) }
 		present := map[int]queue.PR{}
 		for _, p := range r.World.PRs {
@@ -195,9 +214,11 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 			}
 			if _, ok := present[p.Number]; !ok && !removed[recordedHead{p.Number, p.Head, p.Queued}] {
 				add(p.Number, Act{Do: "unlabel"})
-				w.withdrawn++
-				if planned[headKey{p.Number, p.Head}] {
-					w.unconfirmedDepartures++
+				if i > windowIndex {
+					w.withdrawn++
+					if planned[headKey{p.Number, p.Head}] {
+						w.unconfirmedDepartures++
+					}
 				}
 			}
 		}
@@ -235,13 +256,16 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 				delete(conflicted, p.Number)
 			}
 			held := heldBehind(r, p) && !answered[p.Head]
-			if was := exists && holding[p.Number] == p.Head; !exists || old.Head != p.Head || held != was {
+			changed := !exists || old.Head != p.Head || held != (exists && holding[p.Number] == p.Head)
+			if changed {
 				ahead := 0
 				if held {
 					ahead = -1
-					w.ignoredHolds++
 				}
 				add(p.Number, Act{Do: "hold", Ahead: ahead})
+			}
+			if held && (i == windowIndex || i > windowIndex && changed) {
+				w.ignoredHolds++
 			}
 			if held {
 				holding[p.Number] = p.Head

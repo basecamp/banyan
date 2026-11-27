@@ -109,7 +109,7 @@ func (s *Sim) act(a Act) bool {
 	}
 	h, p := s.history, s.prs[a.Number]
 	if p == nil {
-		p = &simPR{}
+		p = &simPR{back: never}
 		p.Number, p.Head, p.Checks = a.Number, queue.SHA(fmt.Sprintf("head%d", a.Number)), queue.Success
 		s.prs[a.Number], s.byHead[p.Head] = p, a.Number
 		s.next = max(s.next, a.Number)
@@ -137,7 +137,7 @@ func (s *Sim) act(a Act) bool {
 			if !s.shape.Recorded {
 				p.ready = s.now
 			}
-			p.queued, p.gone, p.back = true, false, 0
+			p.queued, p.gone, p.back = true, false, never
 			p.Queued = s.epoch.Add(s.now)
 			if s.shape.Recorded {
 				p.arrived = s.now
