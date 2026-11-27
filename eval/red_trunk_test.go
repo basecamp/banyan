@@ -214,6 +214,50 @@ func TestReplayHoldsNoHeadGuiltyForTheRedTrunksBuilds(t *testing.T) {
 	}
 }
 
+// behindRedBuildsAlone is redTrunkDay with two red builds of #3 and #4 read red on the trunk
+// before T, two red probes of #4 alone read red on T where onTheRedTrunk says so and on the trunk
+// before T where it does not, and #3 leaving at 60m.
+func behindRedBuildsAlone(onTheRedTrunk bool) []queue.Recording {
+	recs := redTrunkDay()
+	build := func(sha queue.SHA, kind queue.Kind, base queue.SHA, pushed int, numbers ...int) queue.Build {
+		b := queue.Build{SHA: sha, Kind: kind, Base: base, Pushed: replayStart.Add(time.Duration(pushed) * time.Minute), Verdict: queue.Failure}
+		for _, n := range numbers {
+			b.Chain = append(b.Chain, queue.Member{Number: n, Head: replayPR(n).Head, Merge: sha})
+		}
+		return b
+	}
+	recs = append(recs, recordAt(recs, 7, build("both1", queue.Check, "t0", 1, 3, 4)), recordAt(recs, 8, build("both2", queue.Check, "t0", 2, 3, 4)))
+	if onTheRedTrunk {
+		recs = append(recs, recordAt(recs, 15, build("alone1", queue.Probe, "T", 5, 4)), recordAt(recs, 16, build("alone2", queue.Probe, "T", 6, 4)))
+	} else {
+		recs = append(recs, recordAt(recs, 5, build("alone1", queue.Probe, "t0", 3, 4)), recordAt(recs, 6, build("alone2", queue.Probe, "t0", 4, 4)))
+	}
+	recs = sortedByTime(recs)
+	for i := range recs {
+		if recs[i].World.Now.After(replayStart.Add(60 * time.Minute)) {
+			recs[i].World.PRs = slices.DeleteFunc(slices.Clone(recs[i].World.PRs), func(p queue.PR) bool { return p.Number == 3 })
+		}
+	}
+	return recs
+}
+
+func TestReplayCountsNoRedTrunksBuildAsAHeadFailingAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		onTheRedTrunk bool
+	}{
+		{"its builds alone the red trunk's", true},
+		{"its builds alone on another trunk", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, w, _ := replayWindow(t, behindRedBuildsAlone(tc.onTheRedTrunk), 100)
+			if guilty := heldGuilty(w, 3, replayPR(3).Head); guilty != tc.onTheRedTrunk {
+				t.Fatalf("#3 held guilty %v", guilty)
+			}
+		})
+	}
+}
+
 // reversedRedTrunkDay is redTrunkDay with its probes pushed at 2m and 5m, before T landed, and a
 // check on T pushed at 7m read green at 46m, so the span the records show ends before it begins.
 func reversedRedTrunkDay() []queue.Recording {

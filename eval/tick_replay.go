@@ -367,11 +367,16 @@ func (w *window) recorded(recs []queue.Recording, ready map[recordedHead]time.Ti
 // no landing of it was confirmed, two or more whole builds that held it were read red with no
 // ejected culprit among their members, and a later record no longer queues it at that head.
 //
+// A head failed alone once for each build in red, probes included, that held it and nothing else.
+// A red whole build is no evidence against a head when it also held another head that failed
+// alone twice or more, unless the head itself failed alone twice or more.
+//
 // red holds no build of a red trunk, which is no evidence against the heads it held.
 //
 // It leaves two things out. A head with a single failed build is never held guilty, even one
 // that failed alone. And it cannot tell a head from what it failed beside unless the record
-// ejected the other, so two heads failing in the same builds are both held guilty.
+// ejected the other or the other failed alone twice, so two heads failing in the same builds
+// where neither failed alone twice, or both did, are both held guilty.
 //
 // The replay labels the pull request of any guilty head, these and those the record ejected,
 // again at the next head the record queues it at, as the replay's queue may have ejected it
@@ -383,13 +388,23 @@ func brokeAndLeft(recs []queue.Recording, builds map[queue.SHA]queue.Build, gree
 			landed[headKey{m.Number, m.Head}] = true
 		}
 	}
+	alone := map[headKey]int{}
+	for sha, b := range builds {
+		if red[sha] && len(b.Chain) == 1 {
+			alone[headKey{b.Chain[0].Number, b.Chain[0].Head}]++
+		}
+	}
 	for sha, b := range builds {
 		evidence := b.Kind != queue.Probe && red[sha] &&
 			!slices.ContainsFunc(b.Chain, func(m queue.Member) bool { return ejected[headKey{m.Number, m.Head}] })
 		for _, m := range b.Chain {
 			k := headKey{m.Number, m.Head}
 			passed[k] = passed[k] || green[sha]
-			if evidence {
+			spared := alone[k] < 2 && slices.ContainsFunc(b.Chain, func(o queue.Member) bool {
+				other := headKey{o.Number, o.Head}
+				return other != k && alone[other] >= 2
+			})
+			if evidence && !spared {
 				failed[k]++
 			}
 		}
