@@ -103,6 +103,9 @@ type Episode struct {
 	// Share, where set, is the share of the agents the episode breaks: a build that lands on
 	// one fails whatever its tree, and the rest are untouched. 0 is all of them.
 	Share float64
+	// Fixes, where set, are the recorded pull requests that fix one that NeedsFix: a tree
+	// holding any of them passes, and no fix is queued.
+	Fixes []int
 }
 
 type simPR struct {
@@ -366,7 +369,7 @@ func (s *Sim) red(sha queue.SHA, tree map[int]bool, at time.Duration) bool {
 		if e.NeedsFix {
 			fixed := false
 			for n := range tree {
-				fixed = fixed || s.prs[n].fix == i+1
+				fixed = fixed || s.prs[n].fix == i+1 || slices.Contains(e.Fixes, n)
 			}
 			if !fixed {
 				return true
@@ -479,7 +482,7 @@ func (s *Sim) step(at time.Duration) {
 		s.open()
 	}
 	for i, e := range s.shape.Episodes {
-		if e.NeedsFix && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
+		if e.NeedsFix && e.Fixes == nil && s.now >= e.At+e.Fix && s.now < e.At+e.Fix+tick {
 			p := s.arrive()
 			p.First, p.fix, p.breaks, p.clash, p.conflict, p.ahead = true, i+1, false, 0, false, 0
 			s.say("the fix for the red trunk is queued as #%d", p.Number)
@@ -951,6 +954,18 @@ func (s *Sim) kept() bool {
 		}
 	}
 	return false
+}
+
+// unfixed is how many episodes that recorded pull requests fix are still red: none of their
+// fixes has landed.
+func (s *Sim) unfixed() int {
+	n := 0
+	for _, e := range s.shape.Episodes {
+		if e.Fixes != nil && !slices.ContainsFunc(e.Fixes, func(n int) bool { return s.prs[n] != nil && s.prs[n].landed }) {
+			n++
+		}
+	}
+	return n
 }
 
 // idle says no pull request or episode remains.
