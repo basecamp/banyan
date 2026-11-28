@@ -1091,3 +1091,136 @@ func TestKeepCheckerLowerTimesOutWhileTheTipIsKept(t *testing.T) {
 		t.Fatal("no timed-out lower reading")
 	}
 }
+
+func TestCheckerGuiltyWithNeeds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pulls []pullSpec
+		tree  []int
+		want  bool
+	}{
+		{"neither of the pair", pulls(good, needs(3), needs(2)), []int{1}, false},
+		{"#2 without #3", pulls(good, needs(3), needs(2)), []int{1, 2}, true},
+		{"#3 without #2", pulls(good, needs(3), needs(2)), []int{1, 3}, true},
+		{"the pair", pulls(good, needs(3), needs(2)), []int{1, 2, 3}, false},
+		{"#3 without the #2 it needs", pulls(good, good, needs(2)), []int{1, 3}, true},
+		{"#3 with the #2 it needs", pulls(good, good, needs(2)), []int{1, 2, 3}, false},
+		{"#2, which needs nothing", pulls(good, good, needs(2)), []int{1, 2}, false},
+	} {
+		c := newChecker(checkWorld{Config: dials(2, 2, true), Pulls: tc.pulls}, mutant{plan: queue.Plan, verify: queue.Verify})
+		sha := queue.SHA("trunk0")
+		for _, n := range tc.tree {
+			sha = c.addCommit(sha, queue.SHA(fmt.Sprintf("head%d", n)), n, "")
+		}
+		if got := c.guilty(sha); got != tc.want {
+			t.Errorf("%s: guilty %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCheckerCulpritPRWithNeeds(t *testing.T) {
+	needing := checkedPR{number: 3, needs: 2, queued: true, order: 3, checks: queue.Success}
+	for _, tc := range []struct {
+		name   string
+		needed checkedPR
+		want   bool
+	}{
+		{"the one it needs landed", checkedPR{number: 2, landed: true}, false},
+		{"the one it needs is queued ahead", checkedPR{number: 2, queued: true, order: 2, checks: queue.Success}, false},
+		{"the one it needs is queued behind", checkedPR{number: 2, queued: true, order: 4, checks: queue.Success}, true},
+		{"the one it needs goes first", checkedPR{number: 2, queued: true, first: true, order: 4, checks: queue.Success}, false},
+		{"the one it needs is ahead and held", checkedPR{number: 2, queued: true, order: 2, checks: queue.Success, wait: "it is labelled hold"}, true},
+		{"the one it needs is ahead and its checks run", checkedPR{number: 2, queued: true, order: 2, checks: queue.Pending}, true},
+		{"the one it needs is gone", checkedPR{number: 2}, true},
+	} {
+		if got := culpritPR(3, []checkedPR{{number: 1, queued: true, order: 1, checks: queue.Success}, tc.needed, needing}, nil); got != tc.want {
+			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// #2 needs #1, which has landed, and #3 clashes with #2. Each failed build of the evidence holds
+// #2 and #1, and #3 only where it was built with #2.
+func TestCheckerCulpritPRWithAClashBesideANeed(t *testing.T) {
+	needing := checkedPR{number: 2, needs: 1, queued: true, order: 2, checks: queue.Success}
+	alone := []checkedBuild{{verdict: queue.Failure, holds: map[int]bool{1: true, 2: true}}}
+	beside := []checkedBuild{{verdict: queue.Failure, holds: map[int]bool{1: true, 2: true, 3: true}}}
+	for _, tc := range []struct {
+		name     string
+		clashing checkedPR
+		failed   []checkedBuild
+		want     bool
+	}{
+		{"held and never built with it", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success, wait: "it is labelled hold"}, alone, false},
+		{"ready behind and never built with it", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success}, alone, false},
+		{"in a failed build and still queued", checkedPR{number: 3, clash: 2, queued: true, order: 3, checks: queue.Success}, beside, true},
+		{"landed", checkedPR{number: 3, clash: 2, landed: true}, alone, true},
+		{"in a failed build and gone", checkedPR{number: 3, clash: 2}, beside, false},
+	} {
+		if got := culpritPR(2, []checkedPR{{number: 1, landed: true}, needing, tc.clashing}, tc.failed); got != tc.want {
+			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCheckerCallsAPullRequestACulpritWhenTheOneItNeedsConflictsWithTheTrunk(t *testing.T) {
+	w := checkWorld{Name: "3 PRs #3 needs #2, which conflicts", Config: dials(2, 2, true), Pulls: pulls(good, conflict, needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}}
+	res := explore(w, mutant{plan: queue.Plan, verify: queue.Verify})
+	if res.Broken != "" || res.Capped {
+		t.Errorf("broken %q, capped %v, %d states", res.Broken, res.Capped, res.States)
+	}
+}
+
+func TestCheckerKillsGoingOnBesideAStackedCandidateWhereAPullRequestNeedsAnother(t *testing.T) {
+	m := mutant{plan: besideStacked, verify: queue.Verify}
+	for _, w := range needsWorlds()[:1] {
+		if res := explore(w, m); res.Broken != "invariant 3: #3 is innocent and was ejected with no flake in play" || res.Capped {
+			t.Errorf("%s: broken %q, capped %v, want #3 innocent on invariant 3 in a search not stopped at the cap", w.Name, res.Broken, res.Capped)
+		}
+	}
+	var plain []checkWorld
+	for _, w := range append(defaultWorlds(), checkWorld{"3 PRs good+breaks+good (2 of 2, probes)", dials(2, 2, true), pulls(good, breaks, good), false, true, bounds{MaxStates: 5000}}) {
+		if w.Config.Probes && w.Config.Keep == 0 && !slices.ContainsFunc(w.Pulls, func(p pullSpec) bool { return p.Needs > 0 }) {
+			plain = append(plain, w)
+		}
+	}
+	sum := checkSuite(plain, m)
+	t.Logf("passed in %d worlds with probes, no keep and no pull request that needs another: %d explored whole, %d stopped at the cap, %d states",
+		sum.worlds, sum.whole, sum.capped, sum.states)
+	for _, inv := range sum.brokenInvs {
+		t.Errorf("%s is broken in %s:\n%s", inv, sum.bestByInv[inv].world.Name, formatTrace(sum.bestByInv[inv].result))
+	}
+}
+
+// #1 breaks and #3 needs #2. The candidates of #1 and #2 and of all three fail, and the chain goes
+// on with #3 alone while #1 and #2 are suspects. #2 is cleared and lands, and #3 leaves on the
+// fair test of its own build, though the trunk with #3 now passes.
+func TestCheckerCurrentPlannerEjectsAPullRequestThatNeedsASuspectSetAside(t *testing.T) {
+	w := needsASuspectWorld()
+	m := mutant{plan: queue.Plan, verify: queue.Verify}
+	res := explore(w, m)
+	t.Logf("capped %v, %d states:\n%s", res.Capped, res.States, formatCounterexample(w, m, res))
+	if res.Broken != "invariant 3: #3 is innocent and was ejected with no flake in play" {
+		t.Fatalf("broken %q, want #3 innocent on invariant 3", res.Broken)
+	}
+	c := newChecker(w, m)
+	eject, ok := ejectRead(c, res.Trace, 3)
+	if !ok {
+		t.Fatal("no read ejects #3")
+	}
+	trunk := eject.world.Trunk
+	if landed, fails := c.holds(trunk, "head2"), c.guilty(c.addCommit(trunk, "head3", 3, "")); !landed || fails {
+		t.Errorf("#3 leaves on %.7s, which holds #2 %v and fails with #3 %v, want #2 landed and the trunk with #3 passing", trunk, landed, fails)
+	}
+}
+
+func ejectRead(c *checker, trace []step, number int) (tickRead, bool) {
+	var found tickRead
+	var ok bool
+	c.replay(trace, func(int, step) {}, func(_ string, r tickRead) {
+		if !ok && slices.ContainsFunc(r.actions, func(a queue.Action) bool { return a.Do == "eject" && a.PR == number }) {
+			found, ok = r, true
+		}
+	})
+	return found, ok
+}

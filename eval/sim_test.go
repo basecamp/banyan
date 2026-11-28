@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -292,6 +293,43 @@ func TestTheSimulatorReadsABuildAgainstTheTrunkAsGitDoes(t *testing.T) {
 	s = NewSim(shapes[0], dials(5, 2, false), 1)
 	if base, numbers := chain(s, 1); base != "trunk0" || len(numbers) != 2 {
 		t.Errorf("stacked beside what landed, the build reads on %.7s holding %v, where it stands on the old trunk holding both", base, numbers)
+	}
+}
+
+// The second to arrive clashes with the first and is taken out on a pass and two failures.
+func TestTheSimulatorJudgesAClashByTheFailedEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		besides bool
+		want    bool
+	}{
+		{"taken out on evidence that held the other", true, true},
+		{"taken out on evidence that never held the other", false, false},
+	} {
+		s := NewSim(shapes[0], dials(5, 2, false), 1)
+		one, two := s.arrive(), s.arrive()
+		for _, p := range []*simPR{one, two} {
+			p.breaks, p.clash, p.conflict, p.ahead, p.Checks, p.Wait = false, 0, false, 0, queue.Success, ""
+		}
+		two.clash, two.queued = one.Number, false
+		without := map[int]bool{}
+		if tc.besides {
+			without[one.Number] = true
+		}
+		evidence := []queue.SHA{"pass", "red1", "red2"}
+		for i, sha := range evidence {
+			b := &simBuild{Build: queue.Build{SHA: sha, Kind: queue.Probe, Verdict: queue.Failure}, start: time.Duration(i-1) * time.Minute}
+			s.holds[sha] = maps.Clone(without)
+			if i == 0 {
+				b.Verdict = queue.Success
+			} else {
+				s.holds[sha][two.Number] = true
+			}
+			s.builds[sha] = b
+		}
+		if got := s.culprit(queue.Action{Do: "eject", PR: two.Number, Cause: "culprit", Evidence: evidence}); got != tc.want {
+			t.Errorf("%s: culprit %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

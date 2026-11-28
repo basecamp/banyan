@@ -20,8 +20,11 @@ type checkedPR struct {
 	head   queue.SHA
 	breaks bool
 	clash  int
+	needs  int
 	queued bool
 	landed bool
+	first  bool
+	order  uint8
 	checks queue.Verdict
 	wait   string
 }
@@ -38,46 +41,48 @@ func brokeMsg(n int, format string, args ...any) string {
 	return fmt.Sprintf("invariant %d: %s", n, fmt.Sprintf(format, args...))
 }
 
-func culpritPR(number int, prs []checkedPR) bool {
+func culpritPR(number int, prs []checkedPR, failed []checkedBuild) bool {
 	idx := slices.IndexFunc(prs, func(p checkedPR) bool { return p.number == number })
 	if idx < 0 {
 		return false
 	}
-	if prs[idx].breaks {
+	pr := prs[idx]
+	if pr.breaks {
 		return true
 	}
+	if pr.needs > 0 {
+		needed := slices.IndexFunc(prs, func(p checkedPR) bool { return p.number == pr.needs })
+		if needed < 0 || !(prs[needed].landed || readyAhead(prs[needed], pr)) {
+			return true
+		}
+	}
 	for _, o := range prs {
-		if (o.number == prs[idx].clash || o.clash == number) && (o.landed || o.queued) {
+		if (o.number == pr.clash || o.clash == number) && (o.landed || o.queued && slices.ContainsFunc(failed, func(b checkedBuild) bool { return b.holds[o.number] })) {
 			return true
 		}
 	}
 	return false
 }
 
+func readyAhead(a, b checkedPR) bool {
+	switch {
+	case !a.queued || a.checks != queue.Success || a.wait != "":
+		return false
+	case a.first != b.first:
+		return a.first
+	case a.order != b.order:
+		return a.order < b.order
+	}
+	return a.number < b.number
+}
+
 // fairTest says an ejection's evidence is a fair test of its pull request, by when CI really began
 // each build: the first is a build that passed without it, and among the rest are two builds
 // of that tree with it that failed, one begun no later than the pass and one no earlier.
 func fairTest(a queue.Action, built func(queue.SHA) (checkedBuild, bool)) bool {
-	if len(a.Evidence) == 0 {
-		return false
-	}
-	pass, ok := built(a.Evidence[0])
-	if !ok {
-		return false
-	}
-	without := pass.holds
-	var failed, before, after int
-	for _, sha := range a.Evidence[1:] {
-		b, ok := built(sha)
-		with := b.holds
-		same := ok && b.verdict == queue.Failure && with[a.PR] && len(with) == len(without)+1
-		for n := range without {
-			same = same && with[n]
-		}
-		if !same {
-			continue
-		}
-		failed++
+	pass, failed, ok := fairEvidence(a, built)
+	var before, after int
+	for _, b := range failed {
 		if b.start <= pass.start {
 			before++
 		}
@@ -85,7 +90,33 @@ func fairTest(a queue.Action, built func(queue.SHA) (checkedBuild, bool)) bool {
 			after++
 		}
 	}
-	return pass.verdict == queue.Success && !without[a.PR] && failed >= 2 && before >= 1 && after >= 1
+	return ok && pass.verdict == queue.Success && !pass.holds[a.PR] && len(failed) >= 2 && before >= 1 && after >= 1
+}
+
+// fairEvidence splits an ejection's evidence into its first build, the pass without it, and
+// the builds after that failed holding it beside exactly the pass's pull requests.
+func fairEvidence(a queue.Action, built func(queue.SHA) (checkedBuild, bool)) (checkedBuild, []checkedBuild, bool) {
+	if len(a.Evidence) == 0 {
+		return checkedBuild{}, nil, false
+	}
+	pass, ok := built(a.Evidence[0])
+	if !ok {
+		return checkedBuild{}, nil, false
+	}
+	without := pass.holds
+	var failed []checkedBuild
+	for _, sha := range a.Evidence[1:] {
+		b, ok := built(sha)
+		with := b.holds
+		same := ok && b.verdict == queue.Failure && with[a.PR] && len(with) == len(without)+1
+		for n := range without {
+			same = same && with[n]
+		}
+		if same {
+			failed = append(failed, b)
+		}
+	}
+	return pass, failed, true
 }
 
 func checkPass(pass int, acts []queue.Action) string {
@@ -204,7 +235,7 @@ func checkDrain(prs []checkedPR, after string) string {
 
 type pullSpec struct {
 	Breaks, Conflict, Unready, First, Hold bool
-	Clash, Ahead                           int
+	Clash, Needs, Ahead                    int
 }
 
 type bounds struct {
@@ -436,7 +467,7 @@ func (c *checker) build(sha, trunk queue.SHA) queue.Build {
 func (c *checker) guilty(sha queue.SHA) bool {
 	mask := c.commits[sha].holds
 	for i, p := range c.world.Pulls {
-		if mask&pullBit(i+1) != 0 && (p.Breaks || (p.Clash > 0 && mask&pullBit(p.Clash) != 0)) {
+		if mask&pullBit(i+1) != 0 && (p.Breaks || (p.Clash > 0 && mask&pullBit(p.Clash) != 0) || (p.Needs > 0 && mask&pullBit(p.Needs) == 0)) {
 			return true
 		}
 	}
@@ -877,8 +908,8 @@ func (c *checker) checkedPull(s *worldState, number int) checkedPR {
 	landed := c.holds(s.trunk, p.head(number, p.gitHead))
 	return checkedPR{
 		number: number, head: p.head(number, p.githubHead),
-		breaks: c.world.Pulls[number-1].Breaks, clash: c.world.Pulls[number-1].Clash,
-		queued: p.queued && !landed && !p.merged, landed: landed,
+		breaks: c.world.Pulls[number-1].Breaks, clash: c.world.Pulls[number-1].Clash, needs: c.world.Pulls[number-1].Needs,
+		queued: p.queued && !landed && !p.merged, landed: landed, first: p.first, order: p.order,
 		checks: p.checks, wait: p.waitReason(),
 	}
 }
@@ -1118,10 +1149,11 @@ func (t *checkTick) delete(a queue.Action) bool {
 }
 
 func (t *checkTick) eject(pulls map[int]pullRequest, a queue.Action) (string, bool) {
-	prs := t.c.checkedPulls(t.state)
-	culprit := a.Cause == "culprit" && culpritPR(a.PR, prs)
+	built := t.c.checkedBuild(t.state)
+	_, failed, _ := fairEvidence(a, built)
+	culprit := a.Cause == "culprit" && culpritPR(a.PR, t.c.drainPulls(t.state), failed)
 	flaked := t.state.flaked || t.state.episodes > 1
-	if broken := checkEject(a, culprit, flaked, t.c.checkedBuild(t.state)); len(broken) > 0 {
+	if broken := checkEject(a, culprit, flaked, built); len(broken) > 0 {
 		return strings.Join(broken, "; "), false
 	}
 	pr, ok := pulls[a.PR]
@@ -1725,6 +1757,7 @@ var (
 )
 
 func clash(n int) pullSpec            { return pullSpec{Clash: n} }
+func needs(n int) pullSpec            { return pullSpec{Needs: n} }
 func ahead(n int) pullSpec            { return pullSpec{Ahead: n} }
 func pulls(ps ...pullSpec) []pullSpec { return ps }
 
@@ -1802,7 +1835,7 @@ func defaultWorlds() []checkWorld {
 		}
 	}
 
-	return append(worlds,
+	return append(append(worlds,
 		checkWorld{"3 PRs crashes+lost (good+breaks+good)", dials(2, 3, false), pulls(good, breaks, good), false, false, bCrash},
 		checkWorld{"3 PRs moves+stale (good+breaks+ahead)", dials(2, 3, false), pulls(good, breaks, ahead(2)), false, false, bMove},
 		checkWorld{"4 PRs batch (good*4)", dials(2, 4, false), pulls(good, good, good, good), false, false, b4},
@@ -1810,7 +1843,28 @@ func defaultWorlds() []checkWorld {
 		checkWorld{"4 PRs batch (clash+ahead+breaks)", dials(2, 4, false), pulls(good, clash(1), ahead(2), breaks), false, false, b4},
 		checkWorld{"4 PRs 3x2 (breaks+good*2+clash)", cfg32, pulls(breaks, good, good, clash(2)), false, false, b4},
 		checkWorld{"4 PRs probes (good+clash+good+breaks)", dials(2, 4, true), pulls(good, clash(1), good, breaks), false, false, b4},
-	)
+	), needsWorlds()...)
+}
+
+func needsWorlds() []checkWorld {
+	cfg := dials(2, 2, true)
+	return []checkWorld{
+		{Name: "3 PRs #2 and #3 need each other (2 of 2, probes)", Config: cfg, Pulls: pulls(good, needs(3), needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}},
+		{Name: "3 PRs #3 needs #2 (2 of 2, probes)", Config: cfg, Pulls: pulls(good, good, needs(2)), Instant: true, Bounds: bounds{MaxStates: 5000}},
+		{Name: "3 PRs #3 needs #2 and is ready later (2 of 2, probes)", Config: cfg, Pulls: pulls(good, good, late(needs(2))), Bounds: bounds{Moves: 1, MaxStates: 5000}},
+	}
+}
+
+func needsASuspectWorld() checkWorld {
+	return checkWorld{
+		Name:   "3 PRs #1 breaks and #3 needs #2 (2 of 2, probes)",
+		Config: dials(2, 2, true), Pulls: pulls(breaks, good, needs(2)), Bounds: bounds{MaxStates: 5000},
+	}
+}
+
+func late(p pullSpec) pullSpec {
+	p.Unready = true
+	return p
 }
 
 func smallKeepWorlds() []checkWorld {
@@ -2050,7 +2104,7 @@ func runCheck(name string) bool {
 }
 
 func findWorld(name string) (checkWorld, bool) {
-	for _, list := range [][]checkWorld{deepWorlds(), mutantWorlds(), keepMutantWorlds()} {
+	for _, list := range [][]checkWorld{deepWorlds(), mutantWorlds(), keepMutantWorlds(), {needsASuspectWorld()}} {
 		for _, w := range list {
 			if w.Name == name {
 				return w, true
@@ -2072,21 +2126,31 @@ func formatTrace(res checkResult) string {
 func formatCounterexample(w checkWorld, m mutant, res checkResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %s (%d states, %d steps)\n", w.Name, res.Broken, res.States, len(res.Trace))
-	c := newChecker(w, m)
+	newChecker(w, m).replay(res.Trace,
+		func(i int, st step) { fmt.Fprintf(&b, "  %2d. %s\n", i+1, st) },
+		func(at string, r tickRead) {
+			fmt.Fprintf(&b, "    %s:\n", at)
+			writeRead(&b, "      ", w.Config, r)
+		})
+	return b.String()
+}
+
+// replay plays a trace from the initial state, calling stepped before each step and read for each
+// pass of a tick the step runs, with where in the step the pass falls.
+func (c *checker) replay(trace []step, stepped func(int, step), read func(string, tickRead)) {
 	cur := c.initState()
 	play := func(t *checkTick) {
 		out := t.run()
 		for p, r := range out.reads {
-			fmt.Fprintf(&b, "    pass %d:\n", p)
-			writeRead(&b, "      ", w.Config, r)
+			read(fmt.Sprintf("pass %d", p), r)
 		}
 		if out.final != nil {
 			cur = out.final
 			cur.sort()
 		}
 	}
-	for i, st := range res.Trace {
-		fmt.Fprintf(&b, "  %2d. %s\n", i+1, st)
+	for i, st := range trace {
+		stepped(i, st)
 		switch {
 		case st.kind == stepTick:
 			play(&checkTick{c: c, state: cur, trace: true})
@@ -2103,8 +2167,7 @@ func formatCounterexample(w checkWorld, m mutant, res checkResult) string {
 			_, ticks := c.drain(cur, true)
 			for _, dt := range ticks {
 				for p, r := range dt.reads {
-					fmt.Fprintf(&b, "    drain tick %d, pass %d:\n", dt.tick, p)
-					writeRead(&b, "      ", w.Config, r)
+					read(fmt.Sprintf("drain tick %d, pass %d", dt.tick, p), r)
 				}
 			}
 		default:
@@ -2112,7 +2175,6 @@ func formatCounterexample(w checkWorld, m mutant, res checkResult) string {
 			cur.sort()
 		}
 	}
-	return b.String()
 }
 
 func moveState(moves []transition, target step) *worldState {
